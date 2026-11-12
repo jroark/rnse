@@ -24,6 +24,7 @@
 use crate::dev::atapi::Atapi;
 use crate::dev::coral::{self, Coral};
 use crate::dev::flash::Flash;
+use crate::dev::hcan::Hcan;
 use crate::iolog::IoLog;
 use crate::sh4::Bus;
 use std::collections::HashMap;
@@ -48,6 +49,7 @@ pub struct Board {
     pub unmapped: HashMap<u32, Box<[u8; 4096]>>,
     pub coral: Coral,
     pub atapi: Atapi,
+    pub can: Hcan,
     /// Bytes transmitted on the companion chip's serial channels,
     /// indexed by the channel digit of its address (0x07aN_0000).
     pub uart_tx: [Vec<u8>; 16],
@@ -77,6 +79,7 @@ impl Board {
             unmapped: HashMap::new(),
             coral: Coral::new(),
             atapi: Atapi::new(),
+            can: Hcan::new(),
             uart_tx: Default::default(),
             gpio_in: [0; 8],
             log: IoLog::new(false, 4),
@@ -134,6 +137,17 @@ impl Board {
         p[(a & 0xfff) as usize + 1] = v as u8;
     }
 
+    /// The 32-bit interrupt status register at 0x07b0_0018.  Bits known
+    /// from the OS's handlers: 14 = CAN.  (2, 13 and 29 are tested too;
+    /// their sources are not identified.)
+    fn irq_status(&self) -> u32 {
+        let mut s = 0;
+        if self.can.irq() {
+            s |= 1 << 14;
+        }
+        s
+    }
+
     /// Recompute the level on the IRL pins.
     ///
     /// Device interrupt lines go to a priority encoder in the companion
@@ -146,11 +160,21 @@ impl Board {
     /// |-----------------|--------------|-----------|
     /// | ATAPI INTRQ     | +0x00, 7:4   | -         |
     /// | display VSYNC   | +0x02, 11:8  | 6         |
+    /// | Coral INT       | +0x02, 7:4   | -         |
     /// | CAN             | +0x12, 11:8  | -         |
+    ///
+    /// Level-triggered sources also show in the status register at
+    /// +0x18 (see `irq_status`).
     pub fn update_irl(&mut self) {
         let mut level = 0;
         if self.atapi.irq() {
             level = level.max((self.ipr(0x00) >> 4) & 0xf);
+        }
+        if self.can.irq() {
+            level = level.max((self.ipr(0x12) >> 8) & 0xf);
+        }
+        if self.coral.irq() {
+            level = level.max((self.ipr(0x02) >> 4) & 0xf);
         }
         if self.ipr(0x16) & self.ipr(0x1e) & 0x40 != 0 {
             level = level.max((self.ipr(0x02) >> 8) & 0xf);
@@ -186,6 +210,18 @@ impl Board {
         if addr >> 26 == 6 {
             return self.coral.read(addr - CORAL_BASE, size, self.pc);
         }
+        if addr & 0xffff_fffc == 0x07b0_0018 {
+            // Interrupt status: which sources are requesting right now.
+            // Handlers that share a level test their bit here.
+            let status = self.irq_status();
+            let v = match size {
+                4 => status,
+                2 => (status >> ((2 - (addr & 2)) * 8)) & 0xffff,
+                _ => (status >> ((3 - (addr & 3)) * 8)) & 0xff,
+            };
+            self.log.log("intc", false, addr, size, v, self.pc);
+            return v;
+        }
         match addr & 0xfff0_0000 {
             0x1250_0000 | 0x1260_0000 | 0x1270_0000 => {
                 let v = self.gpio_in[((addr >> 20) & 7) as usize - 3] as u32;
@@ -200,6 +236,7 @@ impl Board {
                 }
                 return v;
             }
+            0x07c0_0000 => return self.can.read(addr & 0xf_ffff, size, self.pc),
             0x0780_0000 if addr & 0x8_0000 != 0 => return self.atapi.dma_read(size),
             0x0780_0000 => return self.atapi.read((addr & 0x1f) >> 1, size, self.pc),
             0x0790_0000 => return self.atapi.read(8, size, self.pc),
@@ -228,6 +265,7 @@ impl Board {
                 }
                 return;
             }
+            0x07c0_0000 => return self.can.write(addr & 0xf_ffff, size, v, self.pc),
             0x0780_0000 => return self.atapi.write((addr & 0x1f) >> 1, size, v, self.pc),
             0x0790_0000 => return self.atapi.write(8, size, v, self.pc),
             _ => {}
@@ -355,6 +393,7 @@ impl Bus for Board {
         self.log.pr = pr;
         self.coral.log.pr = pr;
         self.atapi.log.pr = pr;
+        self.can.log.pr = pr;
     }
 
     #[inline(always)]

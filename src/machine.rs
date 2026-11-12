@@ -2,6 +2,7 @@
 
 use crate::board::Board;
 use crate::bootrom::{self, Hook};
+use crate::dev::hcan::Frame;
 use crate::fw::{IndexInfo, Module, Variant};
 use crate::sh4::cpu::Stop;
 use std::collections::{BTreeMap, VecDeque};
@@ -29,6 +30,9 @@ pub struct Machine {
     /// formats debug messages but does not send them to a serial port;
     /// with this set the emulator prints them itself.
     pub printf_hook: Option<u32>,
+    /// Frames sent to the unit periodically, standing in for the rest
+    /// of the car: (frame, period in cycles, next due).
+    can_cyclic: Vec<(Frame, u64, u64)>,
 }
 
 impl Default for Machine {
@@ -39,7 +43,7 @@ impl Default for Machine {
 
 impl Machine {
     pub fn new() -> Self {
-        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None }
+        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new() }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -96,6 +100,39 @@ impl Machine {
         }
     }
 
+    /// CPU cycles per millisecond of emulated time.
+    pub fn cycles_per_ms(&self) -> u64 {
+        self.cpu.io.pclk_div * 29_400
+    }
+
+    /// Send `frame` to the unit every `period_ms` milliseconds, as another
+    /// control unit on the bus would.  A second call with the same
+    /// identifier replaces the earlier frame.
+    pub fn can_send_cyclic(&mut self, frame: Frame, period_ms: u64) {
+        let period = period_ms.max(1) * self.cycles_per_ms();
+        let due = self.cpu.cycles + period;
+        self.can_cyclic.retain(|(f, _, _)| f.id != frame.id);
+        self.can_cyclic.push((frame, period, due));
+    }
+
+    fn can_tick(&mut self) {
+        let now = self.cpu.cycles;
+        let mut any = false;
+        for (frame, period, due) in self.can_cyclic.iter_mut() {
+            if now >= *due {
+                *due += *period;
+                if *due <= now {
+                    *due = now + *period;
+                }
+                self.board.can.receive(frame);
+                any = true;
+            }
+        }
+        if any {
+            self.board.update_irl();
+        }
+    }
+
     /// Start the installed firmware the way the boot ROM does: call the
     /// OS module's entry points in order (init 1, init 2, start).  The
     /// last one does not return; it dispatches the first task.
@@ -110,6 +147,9 @@ impl Machine {
         // that.  The loader, which shares the boot ROM's hardware layer,
         // uses level 7 (IPRA = 0x7000).
         self.cpu.io.intc.ipra = 0x7000;
+        // Likewise the CAN controller: the OS sets up mailboxes and
+        // handles interrupts but never takes the chip out of reset.
+        self.board.can.start();
         self.boot_calls.clear();
         for (i, name) in ["init1", "init2", "start"].iter().enumerate() {
             self.boot_calls.push_back((format!("OSM {}", name), os.entries[i]));
@@ -253,6 +293,9 @@ impl Machine {
                 let now = self.cpu.cycles;
                 self.cpu.io.dma_transfer(&mut self.board, 1, u32::MAX, now);
                 self.board.update_irl();
+            }
+            if !self.can_cyclic.is_empty() {
+                self.can_tick();
             }
             if self.cpu.cycles >= self.next_frame {
                 self.next_frame += self.frame_cycles;

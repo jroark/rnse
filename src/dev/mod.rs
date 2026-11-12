@@ -3,3 +3,4 @@
 pub mod atapi;
 pub mod coral;
 pub mod flash;
+pub mod hcan;

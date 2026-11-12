@@ -1,0 +1,391 @@
+//! CAN controller with the Renesas HCAN2 register layout.
+//!
+//! 16-bit registers, 32 mailboxes of 0x20 bytes from offset 0x100:
+//!
+//! ```text
+//! +0x00  STDID << 4 | RTR << 3 | IDE << 2 | EXTID[17:16]
+//! +0x02  EXTID[15:0]
+//! +0x04  control: bits 10:8 = MBC (0 transmit, 2/3 receive, 7 off),
+//!        bit 13 = NMC (overwrite unread message), bits 3:0 = DLC
+//! +0x06  time stamp
+//! +0x08  data bytes 0-7
+//! +0x10  acceptance mask (same layout as +0, 1 = don't care)
+//! ```
+//!
+//! The model moves whole frames: a transmit request completes at once
+//! and is handed to the host through [`Hcan::tx`]; the host injects
+//! received frames with [`Hcan::receive`].  Bit timing, error counters
+//! and remote frames are not modelled.
+
+use crate::iolog::IoLog;
+use std::collections::VecDeque;
+
+const MCR: usize = 0x00;
+const GSR: usize = 0x02;
+const IRR: usize = 0x08;
+const IMR: usize = 0x0a;
+const TXPR1: usize = 0x20;
+const TXCR1: usize = 0x28;
+const TXACK1: usize = 0x30;
+const ABACK1: usize = 0x38;
+const RXPR1: usize = 0x40;
+const RFPR1: usize = 0x48;
+const MBIMR1: usize = 0x50;
+const UMSR1: usize = 0x58;
+const MB: usize = 0x100;
+
+const IRR_RESET: u16 = 1 << 0;
+const IRR_RX: u16 = 1 << 1;
+const IRR_RFR: u16 = 1 << 2;
+const IRR_TX: u16 = 1 << 8;
+const IRR_OVERRUN: u16 = 1 << 9;
+
+/// A classic CAN data frame with an 11-bit identifier.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Frame {
+    pub id: u16,
+    pub len: u8,
+    pub data: [u8; 8],
+}
+
+impl Frame {
+    pub fn new(id: u16, bytes: &[u8]) -> Frame {
+        let mut data = [0u8; 8];
+        let len = bytes.len().min(8);
+        data[..len].copy_from_slice(&bytes[..len]);
+        Frame { id: id & 0x7ff, len: len as u8, data }
+    }
+}
+
+impl std::fmt::Display for Frame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:03x} [{}]", self.id, self.len)?;
+        for b in &self.data[..self.len as usize] {
+            write!(f, " {:02x}", b)?;
+        }
+        Ok(())
+    }
+}
+
+pub struct Hcan {
+    /// Register file, big-endian bytes.
+    regs: Vec<u8>,
+    /// Frames the firmware transmitted, oldest first.
+    pub tx: VecDeque<Frame>,
+    pub tx_count: u64,
+    pub rx_count: u64,
+    /// Received frames no mailbox accepted.
+    pub rx_dropped: u64,
+    pub log: IoLog,
+    pub trace: bool,
+}
+
+impl Default for Hcan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Hcan {
+    pub fn new() -> Self {
+        let mut h = Hcan { regs: vec![0; 0x500], tx: VecDeque::new(), tx_count: 0, rx_count: 0, rx_dropped: 0, log: IoLog::new(false, 4), trace: false };
+        h.reset();
+        h
+    }
+
+    /// Hardware reset state: reset mode, everything masked.
+    pub fn reset(&mut self) {
+        self.regs.iter_mut().for_each(|b| *b = 0);
+        self.w16(MCR, 0x0001);
+        self.w16(GSR, 0x000c);
+        self.w16(IRR, IRR_RESET);
+        self.w16(IMR, 0xffff);
+        self.w32(MBIMR1, 0xffff_ffff);
+    }
+
+    /// Put the controller in the state the boot ROM leaves it in: out of
+    /// reset, with the receive, transmit and bus-off interrupts enabled
+    /// (the update loader, built on the same hardware layer, programs
+    /// IMR = 0xfebd).  The OS never starts the controller itself.
+    pub fn start(&mut self) {
+        self.w16(MCR, 0);
+        self.w16(GSR, 0x0004);
+        self.w16(IRR, 0);
+        self.w16(IMR, 0xfebd);
+    }
+
+    #[inline]
+    fn r16(&self, off: usize) -> u16 {
+        u16::from_be_bytes([self.regs[off], self.regs[off + 1]])
+    }
+    #[inline]
+    fn w16(&mut self, off: usize, v: u16) {
+        self.regs[off..off + 2].copy_from_slice(&v.to_be_bytes());
+    }
+    /// Mailbox bit registers come in pairs: mailboxes 31-16, then 15-0.
+    fn r32(&self, off: usize) -> u32 {
+        (self.r16(off) as u32) << 16 | self.r16(off + 2) as u32
+    }
+    fn w32(&mut self, off: usize, v: u32) {
+        self.w16(off, (v >> 16) as u16);
+        self.w16(off + 2, v as u16);
+    }
+
+    fn running(&self) -> bool {
+        self.r16(MCR) & 0x0003 == 0
+    }
+
+    /// Recompute the summary bits of IRR from the mailbox registers.
+    fn update_irr(&mut self) {
+        let mut irr = self.r16(IRR) & !(IRR_RX | IRR_RFR | IRR_TX | IRR_OVERRUN);
+        if self.r32(RXPR1) != 0 {
+            irr |= IRR_RX;
+        }
+        if self.r32(RFPR1) != 0 {
+            irr |= IRR_RFR;
+        }
+        if self.r32(TXACK1) | self.r32(ABACK1) != 0 {
+            irr |= IRR_TX;
+        }
+        if self.r32(UMSR1) != 0 {
+            irr |= IRR_OVERRUN;
+        }
+        self.w16(IRR, irr);
+    }
+
+    /// Interrupt output.
+    pub fn irq(&self) -> bool {
+        let mask = !self.r32(MBIMR1);
+        let mut irr = self.r16(IRR) & !(IRR_RX | IRR_RFR | IRR_TX | IRR_OVERRUN);
+        if self.r32(RXPR1) & mask != 0 {
+            irr |= IRR_RX;
+        }
+        if self.r32(RFPR1) & mask != 0 {
+            irr |= IRR_RFR;
+        }
+        if (self.r32(TXACK1) | self.r32(ABACK1)) & mask != 0 {
+            irr |= IRR_TX;
+        }
+        if self.r32(UMSR1) & mask != 0 {
+            irr |= IRR_OVERRUN;
+        }
+        irr & !self.r16(IMR) != 0
+    }
+
+    fn mb_id(&self, n: usize) -> u16 {
+        (self.r16(MB + n * 0x20) >> 4) & 0x7ff
+    }
+
+    fn mb_mode(&self, n: usize) -> u8 {
+        self.regs[MB + n * 0x20 + 4] & 7
+    }
+
+    // ---- bus interface ----------------------------------------------------
+
+    pub fn read(&mut self, off: u32, size: u32, pc: u32) -> u32 {
+        let o = off as usize;
+        let mut v = 0u32;
+        for i in 0..size as usize {
+            v = (v << 8) | self.regs.get(o + i).copied().unwrap_or(0) as u32;
+        }
+        self.log.log("can", false, off, size, v, pc);
+        v
+    }
+
+    pub fn write(&mut self, off: u32, size: u32, v: u32, pc: u32) {
+        self.log.log("can", true, off, size, v, pc);
+        let o = off as usize;
+        if o + size as usize > self.regs.len() {
+            return;
+        }
+        if o >= MB {
+            for i in 0..size as usize {
+                self.regs[o + i] = (v >> ((size as usize - 1 - i) * 8)) as u8;
+            }
+            return;
+        }
+        // Control registers are accessed as 16-bit words.
+        let reg = o & !1;
+        let old = self.r16(reg);
+        let new = if size >= 2 {
+            (v >> ((size - 2) * 8)) as u16
+        } else if o & 1 == 0 {
+            (old & 0x00ff) | ((v as u16) << 8)
+        } else {
+            (old & 0xff00) | (v as u16 & 0xff)
+        };
+        match reg {
+            MCR => {
+                self.w16(MCR, new);
+                if new & 1 != 0 {
+                    // Reset request: enter reset mode.
+                    let mcr = new;
+                    self.reset();
+                    self.w16(MCR, mcr);
+                } else {
+                    let mut gsr = self.r16(GSR) & !0x0018;
+                    if new & 2 != 0 {
+                        gsr |= 0x0010; // halt acknowledged
+                    }
+                    self.w16(GSR, gsr | 0x0004);
+                }
+            }
+            GSR => {}
+            IRR => {
+                // Flags are cleared by writing 1; the mailbox summary
+                // bits follow their registers.
+                self.w16(IRR, old & !new);
+                self.update_irr();
+            }
+            TXPR1 | 0x22 => {
+                self.w16(reg, old | new);
+                self.transmit();
+            }
+            TXCR1 | 0x2a => {
+                // Nothing is ever pending, so there is nothing to cancel.
+            }
+            TXACK1 | 0x32 | ABACK1 | 0x3a | RXPR1 | 0x42 | RFPR1 | 0x4a | UMSR1 | 0x5a => {
+                self.w16(reg, old & !new);
+                self.update_irr();
+            }
+            _ => self.w16(reg, new),
+        }
+    }
+
+    fn transmit(&mut self) {
+        let pending = self.r32(TXPR1);
+        if pending == 0 || !self.running() {
+            return;
+        }
+        let mut ack = self.r32(TXACK1);
+        for n in 1..32 {
+            if pending & (1 << n) == 0 {
+                continue;
+            }
+            let base = MB + n * 0x20;
+            let len = (self.regs[base + 5] & 0xf).min(8);
+            let mut f = Frame { id: self.mb_id(n), len, data: [0; 8] };
+            f.data[..len as usize].copy_from_slice(&self.regs[base + 8..base + 8 + len as usize]);
+            if self.trace {
+                eprintln!("[can] tx {}", f);
+            }
+            self.tx_count += 1;
+            if self.tx.len() >= 4096 {
+                self.tx.pop_front();
+            }
+            self.tx.push_back(f);
+            ack |= 1 << n;
+        }
+        self.w32(TXPR1, 0);
+        self.w32(TXACK1, ack);
+        self.update_irr();
+    }
+
+    /// A frame arrives from the bus.  Returns true if a mailbox took it.
+    pub fn receive(&mut self, f: &Frame) -> bool {
+        if !self.running() {
+            return false;
+        }
+        self.rx_count += 1;
+        // Highest numbered mailbox first, as the chip searches.
+        for n in (0..32).rev() {
+            let mode = self.mb_mode(n);
+            let receives = n == 0 || mode == 2 || mode == 3;
+            if !receives {
+                continue;
+            }
+            let base = MB + n * 0x20;
+            let mask = (self.r16(base + 0x10) >> 4) & 0x7ff;
+            if (self.mb_id(n) ^ f.id) & !mask & 0x7ff != 0 {
+                continue;
+            }
+            let bit = 1u32 << n;
+            let unread = self.r32(RXPR1) & bit != 0;
+            if unread {
+                self.w32(UMSR1, self.r32(UMSR1) | bit);
+                if self.regs[base + 4] & 0x20 == 0 {
+                    // NMC clear: keep the old message, drop the new one.
+                    self.update_irr();
+                    return true;
+                }
+            }
+            let ctl0 = self.r16(base) & 0x000f;
+            self.w16(base, (f.id << 4) | (ctl0 & 0x3));
+            self.regs[base + 5] = (self.regs[base + 5] & 0xf0) | f.len;
+            self.regs[base + 8..base + 16].copy_from_slice(&f.data);
+            self.w32(RXPR1, self.r32(RXPR1) | bit);
+            self.update_irr();
+            if self.trace {
+                eprintln!("[can] rx {} -> mailbox {}", f, n);
+            }
+            return true;
+        }
+        self.rx_dropped += 1;
+        false
+    }
+
+    /// Identifiers the firmware has set up, as (mailbox, id, mode).
+    pub fn mailboxes(&self) -> Vec<(usize, u16, u8)> {
+        (0..32).map(|n| (n, self.mb_id(n), self.mb_mode(n))).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup() -> Hcan {
+        let mut h = Hcan::new();
+        h.start();
+        // Mailbox 5 receives 0x271, mailbox 9 transmits 0x661.
+        h.write(0x100 + 5 * 0x20, 2, 0x2710, 0);
+        h.write(0x100 + 5 * 0x20 + 4, 2, 0x0300, 0);
+        h.write(0x100 + 9 * 0x20, 2, 0x6610, 0);
+        h.write(0x100 + 9 * 0x20 + 4, 2, 0x2003, 0);
+        h.write(0x50, 2, 0, 0);
+        h.write(0x52, 2, 0, 0);
+        h
+    }
+
+    #[test]
+    fn received_frame_lands_in_the_matching_mailbox() {
+        let mut h = setup();
+        assert!(!h.irq());
+        assert!(h.receive(&Frame::new(0x271, &[0x03, 0x00])));
+        assert!(h.irq());
+        assert_eq!(h.read(0x42, 2, 0), 1 << 5);
+        assert_eq!(h.read(0x08, 2, 0) & 2, 2);
+        assert_eq!(h.read(0x100 + 5 * 0x20 + 8, 1, 0), 0x03);
+        assert_eq!(h.read(0x100 + 5 * 0x20 + 5, 1, 0) & 0xf, 2);
+        // Acknowledge: write 1 to the pending bit.
+        h.write(0x42, 2, 1 << 5, 0);
+        assert!(!h.irq());
+        assert_eq!(h.read(0x08, 2, 0) & 2, 0);
+        // An identifier nobody listens to is dropped.
+        assert!(!h.receive(&Frame::new(0x123, &[1])));
+    }
+
+    #[test]
+    fn transmit_request_completes_and_reports_the_frame() {
+        let mut h = setup();
+        for (i, b) in [0x11u32, 0x22, 0x33].iter().enumerate() {
+            h.write(0x100 + 9 * 0x20 + 8 + i as u32, 1, *b, 0);
+        }
+        h.write(0x22, 2, 1 << 9, 0);
+        assert_eq!(h.tx.pop_front(), Some(Frame::new(0x661, &[0x11, 0x22, 0x33])));
+        assert_eq!(h.read(0x22, 2, 0), 0);
+        assert_eq!(h.read(0x32, 2, 0), 1 << 9);
+        assert!(h.irq());
+        h.write(0x32, 2, 1 << 9, 0);
+        assert!(!h.irq());
+    }
+
+    #[test]
+    fn nothing_moves_in_reset_mode() {
+        let mut h = Hcan::new();
+        assert!(!h.receive(&Frame::new(0x271, &[3])));
+        assert_eq!(h.read(0x02, 2, 0) & 8, 8);
+        h.write(0x00, 2, 0, 0);
+        assert_eq!(h.read(0x02, 2, 0) & 8, 0);
+    }
+}

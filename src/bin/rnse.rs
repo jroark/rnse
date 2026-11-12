@@ -4,7 +4,7 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-coral      dump the display lists sent to the graphics chip\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
     );
     std::process::exit(2);
 }
@@ -88,10 +88,14 @@ struct Opts {
     gpio: Vec<(usize, u8)>,
     printf_hook: Option<u32>,
     no_printf: bool,
+    can: Vec<(rnse::dev::hcan::Frame, u64)>,
+    trace_can: bool,
+    trace_coral: bool,
+    surfaces: Vec<(u32, usize, usize, usize, String)>,
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
-    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false };
+    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![] };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| -> Result<&String, Box<dyn std::error::Error>> {
@@ -124,6 +128,31 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
             "--trace-exc" => o.trace_exc = true,
             "--printf" => o.printf_hook = Some(u32::from_str_radix(next(&mut i)?.trim_start_matches("0x"), 16)?),
             "--no-printf" => o.no_printf = true,
+            "--trace-can" => o.trace_can = true,
+            "--trace-coral" => o.trace_coral = true,
+            "--surface" => {
+                // ADDR,STRIDE,W,H,FILE
+                let v: Vec<&str> = next(&mut i)?.split(',').collect();
+                if v.len() != 5 {
+                    return Err("--surface wants ADDR,STRIDE,W,H,FILE".into());
+                }
+                o.surfaces.push((u32::from_str_radix(v[0].trim_start_matches("0x"), 16)?, v[1].parse()?, v[2].parse()?, v[3].parse()?, v[4].to_string()));
+            }
+            "--ignition" => {
+                // Ignition lock status: key in (bit 0) and ignition on (bit 1).
+                o.can.push((rnse::dev::hcan::Frame::new(0x271, &[0x03]), 100));
+            }
+            "--can" => {
+                // ID:HEXBYTES[@PERIOD_MS]
+                let v = next(&mut i)?;
+                let (spec, period) = match v.split_once('@') {
+                    Some((a, b)) => (a, b.parse()?),
+                    None => (v.as_str(), 100),
+                };
+                let (id, hex) = spec.split_once(':').ok_or("--can wants ID:HEXBYTES[@MS]")?;
+                let bytes: Vec<u8> = (0..hex.len() / 2).map(|k| u8::from_str_radix(&hex[k * 2..k * 2 + 2], 16)).collect::<Result<_, _>>()?;
+                o.can.push((rnse::dev::hcan::Frame::new(u16::from_str_radix(id, 16)?, &bytes), period));
+            }
             "--tp" => o.tracepoints.push(u32::from_str_radix(next(&mut i)?.trim_start_matches("0x"), 16)?),
             "--break" => o.breaks.push(u32::from_str_radix(next(&mut i)?.trim_start_matches("0x"), 16)?),
             "--args" => {
@@ -158,6 +187,7 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
             m.board.log = rnse::iolog::IoLog::new(true, n);
             m.board.coral.log = rnse::iolog::IoLog::new(true, n);
             m.board.atapi.log = rnse::iolog::IoLog::new(true, n);
+            m.board.can.log = rnse::iolog::IoLog::new(true, n);
             if o.onchip_log {
                 m.cpu.io.log = rnse::iolog::IoLog::new(true, n);
             }
@@ -183,6 +213,8 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         m.hook_printf(a);
     }
     m.board.atapi.trace = o.trace_atapi;
+    m.board.can.trace = o.trace_can;
+    m.board.coral.trace = o.trace_coral;
     if !o.no_disc {
         m.board.atapi.load(image.clone());
     }
@@ -201,6 +233,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
             m.install(v, &index);
         }
         m.start_os(v)?;
+    }
+    for (frame, period) in &o.can {
+        m.can_send_cyclic(frame.clone(), *period);
     }
     let end = m.cpu.cycles + o.cycles;
     let mut stop;
@@ -258,6 +293,18 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     }
     let irqs: Vec<String> = m.cpu.irq_counts.iter().enumerate().filter(|(_, &n)| n > 0).map(|(i, n)| format!("{:03x}:{}", i * 0x20, n)).collect();
     eprintln!("interrupts taken (INTEVT:count): {}", irqs.join(" "));
+    {
+        let can = &m.board.can;
+        let boxes: Vec<String> = can.mailboxes().iter().filter(|(_, id, _)| *id != 0).map(|(n, id, mode)| format!("{}:{:03x}{}", n, id, match mode { 0 => "t", 2 | 3 => "r", 7 => "-", _ => "?" })).collect();
+        eprintln!("can: {} frames sent by the unit, {} delivered to it ({} matched no mailbox); mailboxes {}", can.tx_count, can.rx_count, can.rx_dropped, boxes.join(" "));
+        let mut seen = std::collections::BTreeMap::new();
+        for f in &can.tx {
+            *seen.entry(f.id).or_insert((0u32, f.clone())) = (seen.get(&f.id).map(|x: &(u32, rnse::dev::hcan::Frame)| x.0).unwrap_or(0) + 1, f.clone());
+        }
+        for (_, (n, f)) in seen {
+            eprintln!("  tx x{:<5} last {}", n, f);
+        }
+    }
     for (i, tx) in m.board.uart_tx.iter().enumerate() {
         if !tx.is_empty() {
             let shown: Vec<String> = tx.iter().take(24).map(|b| format!("{:02x}", b)).collect();
@@ -276,6 +323,11 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     if let Some(path) = &o.save_flash {
         std::fs::write(path, &m.board.flash)?;
         eprintln!("flash image: {} ({} sectors erased, {} words programmed)", path, m.board.flash_ctl.erased_sectors, m.board.flash_ctl.programmed_words);
+    }
+    for (addr, stride, w, h, path) in &o.surfaces {
+        let rgb = m.board.coral.render_surface(*addr, *stride, *w, *h);
+        std::fs::write(path, rnse::png::encode_rgb(*w, *h, &rgb))?;
+        eprintln!("surface {:x}: {}", addr, path);
     }
     if let Some(path) = &o.screenshot {
         let (w, h, rgb) = m.board.coral.render();

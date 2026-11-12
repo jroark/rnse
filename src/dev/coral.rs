@@ -35,6 +35,11 @@ pub const IST: u32 = HOST + 0x20;
 pub const IMASK: u32 = HOST + 0x24;
 pub const SRST: u32 = HOST + 0x2c;
 pub const CID: u32 = HOST + 0xf0;
+/// Display list transfer: source address in video memory, word count,
+/// request.
+pub const LSA: u32 = HOST + 0x40;
+pub const LCO: u32 = HOST + 0x44;
+pub const LREQ: u32 = HOST + 0x48;
 
 // Interrupt status bits
 pub const IST_CERR: u32 = 1 << 0;
@@ -85,6 +90,24 @@ pub struct Coral {
     /// Display list / drawing words written to the FIFO but not yet
     /// interpreted (drawing engine is not modelled yet).
     pub fifo_words: u64,
+    /// Display lists executed.
+    pub lists: u64,
+    pub trace: bool,
+    /// Display list commands executed, by type byte.
+    pub cmd_counts: Vec<u64>,
+    unknown: Vec<u32>,
+}
+
+/// Where drawing commands write.
+struct Target {
+    base: usize,
+    /// Pixels per line.
+    stride: usize,
+    bpp16: bool,
+    cx0: i32,
+    cx1: i32,
+    cy0: i32,
+    cy1: i32,
 }
 
 impl Default for Coral {
@@ -95,7 +118,7 @@ impl Default for Coral {
 
 impl Coral {
     pub fn new() -> Self {
-        let mut c = Coral { vram: vec![0; VRAM_SIZE], regs: vec![0; REG_SIZE], log: IoLog::new(false, 4), frame: 0, fifo_words: 0 };
+        let mut c = Coral { vram: vec![0; VRAM_SIZE], regs: vec![0; REG_SIZE], log: IoLog::new(false, 4), frame: 0, fifo_words: 0, lists: 0, trace: false, cmd_counts: vec![0; 256], unknown: Vec::new() };
         c.reset();
         c
     }
@@ -168,12 +191,362 @@ impl Coral {
                 }
             }
             CID => {}
+            LREQ => {
+                self.w32(word, new);
+                if new & 1 != 0 {
+                    self.run_display_list();
+                    self.w32(LREQ, 0);
+                }
+            }
             _ => {
                 if (DRAW..DRAW + 0x1_0000).contains(&word) {
                     self.fifo_words += 1;
                 }
                 self.w32(word, new);
             }
+        }
+    }
+
+    #[inline]
+    fn vram32(&self, off: usize) -> u32 {
+        if off + 4 > VRAM_SIZE {
+            return 0;
+        }
+        u32::from_be_bytes([self.vram[off], self.vram[off + 1], self.vram[off + 2], self.vram[off + 3]])
+    }
+
+    // ---- drawing engine --------------------------------------------------
+    //
+    // Display lists are sequences of 32-bit words.  The first word of a
+    // command is `type << 24 | command << 16 | parameter`; how many words
+    // follow depends on the type.  Only the 2D subset the firmware uses is
+    // implemented; an unknown type ends the list (its length is unknown).
+
+    /// Drawing register by its documented offset from the draw base.
+    #[inline]
+    fn dreg(&self, off: u32) -> u32 {
+        self.r32(DRAW + off)
+    }
+
+    /// Frame buffer addresses are given either as offsets into video
+    /// memory or as the CPU's address of the same byte.
+    #[inline]
+    fn vaddr(a: u32) -> usize {
+        (a & 0x03ff_ffff) as usize
+    }
+
+    #[inline]
+    fn px_read(&self, base: usize, stride: usize, x: i32, y: i32, bpp16: bool) -> u32 {
+        if x < 0 || y < 0 {
+            return 0;
+        }
+        if bpp16 {
+            let p = (base + (y as usize * stride + x as usize) * 2) ^ 2;
+            if p + 1 >= VRAM_SIZE {
+                return 0;
+            }
+            u16::from_be_bytes([self.vram[p], self.vram[p + 1]]) as u32
+        } else {
+            let p = (base + y as usize * stride + x as usize) ^ 3;
+            if p >= VRAM_SIZE {
+                return 0;
+            }
+            self.vram[p] as u32
+        }
+    }
+
+    #[inline]
+    fn px_write(&mut self, base: usize, stride: usize, x: i32, y: i32, bpp16: bool, v: u32) {
+        if x < 0 || y < 0 {
+            return;
+        }
+        if bpp16 {
+            let p = (base + (y as usize * stride + x as usize) * 2) ^ 2;
+            if p + 1 < VRAM_SIZE {
+                self.vram[p..p + 2].copy_from_slice(&(v as u16).to_be_bytes());
+            }
+        } else {
+            let p = (base + y as usize * stride + x as usize) ^ 3;
+            if p < VRAM_SIZE {
+                self.vram[p] = v as u8;
+            }
+        }
+    }
+
+    /// Raster operation selected by a mode register's LOG field.
+    #[inline]
+    fn rop(log: u32, src: u32, dst: u32) -> u32 {
+        match log & 0xf {
+            0x0 => 0,
+            0x1 => src & dst,
+            0x2 => src & !dst,
+            0x3 => src,
+            0x4 => !src & dst,
+            0x5 => dst,
+            0x6 => src ^ dst,
+            0x7 => src | dst,
+            0x8 => !(src | dst),
+            0x9 => !(src ^ dst),
+            0xa => !dst,
+            0xb => src | !dst,
+            0xc => !src,
+            0xd => !src | dst,
+            0xe => !(src & dst),
+            _ => !0,
+        }
+    }
+
+    /// Destination surface and clip rectangle from the drawing registers.
+    fn target(&self) -> Target {
+        Target {
+            base: Self::vaddr(self.dreg(0x440)),
+            stride: (self.dreg(0x444) & 0xfff) as usize,
+            bpp16: self.dreg(0x420) & 0x8000 != 0,
+            cx0: (self.dreg(0x454) & 0xfff) as i32,
+            cx1: (self.dreg(0x458) & 0xfff) as i32,
+            cy0: (self.dreg(0x45c) & 0xfff) as i32,
+            cy1: (self.dreg(0x460) & 0xfff) as i32,
+        }
+    }
+
+    fn plot(&mut self, t: &Target, x: i32, y: i32, color: u32, log: u32) {
+        if x < t.cx0 || x > t.cx1 || y < t.cy0 || y > t.cy1 {
+            return;
+        }
+        let v = if log & 0xf == 3 {
+            color
+        } else {
+            let d = self.px_read(t.base, t.stride, x, y, t.bpp16);
+            Self::rop(log, color, d)
+        };
+        self.px_write(t.base, t.stride, x, y, t.bpp16, v);
+    }
+
+    fn fill_rect(&mut self, x: i32, y: i32, w: i32, h: i32) {
+        let t = self.target();
+        let color = self.dreg(0x480);
+        let log = (self.dreg(0x430) >> 9) & 0xf;
+        for yy in y..y + h {
+            for xx in x..x + w {
+                self.plot(&t, xx, yy, color, log);
+            }
+        }
+    }
+
+    fn line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
+        let t = self.target();
+        let color = self.dreg(0x480);
+        let log = (self.dreg(0x424) >> 9) & 0xf;
+        let (dx, dy) = ((x1 - x0).abs(), -(y1 - y0).abs());
+        let (sx, sy) = (if x0 < x1 { 1 } else { -1 }, if y0 < y1 { 1 } else { -1 });
+        let (mut x, mut y, mut err) = (x0, y0, dx + dy);
+        for _ in 0..8192 {
+            self.plot(&t, x, y, color, log);
+            if x == x1 && y == y1 {
+                break;
+            }
+            let e2 = 2 * err;
+            if e2 >= dy {
+                err += dy;
+                x += sx;
+            }
+            if e2 <= dx {
+                err += dx;
+                y += sy;
+            }
+        }
+    }
+
+    /// Copy a rectangle between two surfaces (which may be the same).
+    #[allow(clippy::too_many_arguments)]
+    fn blit(&mut self, sbase: usize, sstride: usize, sx: i32, sy: i32, dbase: usize, dstride: usize, dx: i32, dy: i32, w: i32, h: i32, clip: bool) {
+        let t = self.target();
+        let bpp16 = t.bpp16;
+        let mode = self.dreg(0x430);
+        let log = (mode >> 9) & 0xf;
+        let transparent = mode & 2 != 0;
+        let key = self.dreg(0x280) & if bpp16 { 0x7fff } else { 0xff };
+        // Choose the copy direction so that overlapping moves work.
+        let backwards = sbase == dbase && (dy > sy || (dy == sy && dx > sx));
+        for j in 0..h {
+            let j = if backwards { h - 1 - j } else { j };
+            for i in 0..w {
+                let i = if backwards { w - 1 - i } else { i };
+                let src = self.px_read(sbase, sstride, sx + i, sy + j, bpp16);
+                if transparent && (src & if bpp16 { 0x7fff } else { 0xff }) == key {
+                    continue;
+                }
+                let (x, y) = (dx + i, dy + j);
+                if clip && (x < t.cx0 || x > t.cx1 || y < t.cy0 || y > t.cy1) {
+                    continue;
+                }
+                let v = if log == 3 { src } else { Self::rop(log, src, self.px_read(dbase, dstride, x, y, bpp16)) };
+                self.px_write(dbase, dstride, x, y, bpp16, v);
+            }
+        }
+    }
+
+    fn run_display_list(&mut self) {
+        let addr = (self.r32(LSA) & 0x03ff_fffc) as usize;
+        let count = (self.r32(LCO) & 0x00ff_ffff) as usize;
+        let words: Vec<u32> = (0..count).map(|i| self.vram32(addr + i * 4)).collect();
+        self.lists += 1;
+        if self.trace {
+            eprintln!("[coral] display list #{} at {:07x}, {} words (frame {}):", self.lists, addr, count, self.frame);
+            for chunk in words.chunks(8) {
+                eprintln!("[coral]   {}", chunk.iter().map(|w| format!("{:08x}", w)).collect::<Vec<_>>().join(" "));
+            }
+        }
+        let mut ist = self.execute(&words);
+        ist |= IST_CEND;
+        let v = self.r32(IST) | ist;
+        self.w32(IST, v);
+    }
+
+    /// Run a display list; returns interrupt status bits to raise.
+    fn execute(&mut self, words: &[u32]) -> u32 {
+        let mut i = 0;
+        let mut ist = 0;
+        let xy = |w: u32| -> (i32, i32) { ((w & 0xffff) as i16 as i32, (w >> 16) as i16 as i32) };
+        while i < words.len() {
+            let head = words[i];
+            let (ty, cmd, param) = (head >> 24, (head >> 16) & 0xff, head & 0xffff);
+            let arg = |k: usize| words.get(i + k).copied().unwrap_or(0);
+            self.cmd_counts[ty as usize] += 1;
+            let len = match ty {
+                0xff | 0xfc | 0xf0 | 0x20 | 0x23 | 0x40 => 1, // Nop, Sync, Draw (flush), G_Nop, G_End, G_Init
+                0xfd => {
+                    // Interrupt: the list asks for the "command end" flag.
+                    ist |= IST_CEND;
+                    1
+                }
+                0xf1 => {
+                    // SetRegister: `cmd` values from register `param * 4`.
+                    for k in 0..cmd {
+                        let off = (param + k) * 4;
+                        if off < 0x1_0000 {
+                            self.w32(DRAW + off, arg(1 + k as usize));
+                        }
+                    }
+                    1 + cmd as usize
+                }
+                0xc0 => {
+                    // SetModeRegister: MDR0-MDR4 selected by `cmd`.
+                    if cmd <= 4 {
+                        self.w32(DRAW + 0x420 + cmd * 4, arg(1));
+                    }
+                    2
+                }
+                0xce => {
+                    // SetColorRegister: 0 = foreground, 1 = background.
+                    self.w32(DRAW + if cmd == 0 { 0x480 } else { 0x484 }, arg(1));
+                    2
+                }
+                0xc1 | 0xc8 | 0xc9 | 0xcc => 2,
+                0x41 | 0x44 => 5, // G_Viewport, G_ViewVolumeXYClip
+                0x42 | 0x45 => 3, // G_DepthRange, G_ViewVolumeZClip
+                0x46 => 2,
+                0x43 => 17, // G_LoadMatrix
+                0x09 => {
+                    // DrawRectP: 0x41 = fill with the foreground colour.
+                    let (x, y) = xy(arg(1));
+                    let (w, h) = xy(arg(2));
+                    if cmd == 0x41 {
+                        self.fill_rect(x, y, w, h);
+                    } else {
+                        self.unknown_cmd(head);
+                    }
+                    3
+                }
+                0x04 | 0x05 => {
+                    // Line from the start point registers to each vertex.
+                    let (mut x0, mut y0) = ((self.dreg(0x540) >> 16) as i16 as i32, (self.dreg(0x544) >> 16) as i16 as i32);
+                    if self.dreg(0x540) & 0xffff_0000 == 0 && self.dreg(0x540) != 0 {
+                        // Integer rather than 16.16 fixed point.
+                        x0 = self.dreg(0x540) as i32;
+                        y0 = self.dreg(0x544) as i32;
+                    }
+                    for k in 0..param as usize {
+                        let (x1, y1) = xy(arg(1 + k));
+                        self.line(x0, y0, x1, y1);
+                        x0 = x1;
+                        y0 = y1;
+                    }
+                    1 + param as usize
+                }
+                0x0d => {
+                    // BltCopyP within the current frame buffer.
+                    let (sx, sy) = xy(arg(1));
+                    let (dx, dy) = xy(arg(2));
+                    let (w, h) = xy(arg(3));
+                    let t = self.target();
+                    self.blit(t.base, t.stride, sx, sy, t.base, t.stride, dx, dy, w, h, true);
+                    4
+                }
+                0x0f | 0x1f => {
+                    // BltCopyAlternateP: source and destination surfaces
+                    // given explicitly.
+                    let (sx, sy) = xy(arg(3));
+                    let (dx, dy) = xy(arg(6));
+                    let (w, h) = xy(arg(7));
+                    self.blit(Self::vaddr(arg(1)), (arg(2) & 0xfff) as usize, sx, sy, Self::vaddr(arg(4)), (arg(5) & 0xfff) as usize, dx, dy, w, h, false);
+                    8
+                }
+                0x0b => {
+                    // DrawBitmapP: `param` words follow (position, size,
+                    // pattern).  0x42 = colour pattern, 0x43 = 1 bpp
+                    // pattern expanded with the fore/background colours.
+                    let (x, y) = xy(arg(1));
+                    let (w, h) = xy(arg(2));
+                    let t = self.target();
+                    let log = (self.dreg(0x430) >> 9) & 0xf;
+                    if cmd == 0x43 {
+                        let (fg, bg) = (self.dreg(0x480), self.dreg(0x484));
+                        let opaque_bg = self.dreg(0x430) & 2 == 0;
+                        let row_words = ((w + 31) / 32).max(0) as usize;
+                        for j in 0..h {
+                            for c in 0..w {
+                                let word = arg(3 + j as usize * row_words + (c / 32) as usize);
+                                let on = word & (0x8000_0000 >> (c % 32)) != 0;
+                                if on {
+                                    self.plot(&t, x + c, y + j, fg, log);
+                                } else if opaque_bg {
+                                    self.plot(&t, x + c, y + j, bg, log);
+                                }
+                            }
+                        }
+                    } else if cmd == 0x42 {
+                        let per_word = if t.bpp16 { 2 } else { 4 };
+                        let row_words = ((w + per_word - 1) / per_word).max(0) as usize;
+                        for j in 0..h {
+                            for c in 0..w {
+                                let word = arg(3 + j as usize * row_words + (c / per_word) as usize);
+                                let v = if t.bpp16 { (word >> ((c % 2) * 16)) & 0xffff } else { (word >> ((c % 4) * 8)) & 0xff };
+                                self.plot(&t, x + c, y + j, v, log);
+                            }
+                        }
+                    } else {
+                        self.unknown_cmd(head);
+                    }
+                    1 + param as usize
+                }
+                _ => {
+                    self.unknown_cmd(head);
+                    ist |= IST_CERR & 0; // real hardware flags a command error; keep going quietly
+                    break;
+                }
+            };
+            i += len;
+        }
+        ist
+    }
+
+    #[cold]
+    fn unknown_cmd(&mut self, head: u32) {
+        let key = head >> 16;
+        if !self.unknown.contains(&key) {
+            self.unknown.push(key);
+            eprintln!("[coral] display list command {:08x} (type {:02x}, command {:02x}) is not implemented", head, head >> 24, (head >> 16) & 0xff);
         }
     }
 
@@ -191,8 +564,9 @@ impl Coral {
 
     // ---- display ----------------------------------------------------------
 
+    /// Display enable: the legacy bit in DCE or the extended one in DCM1.
     pub fn display_enabled(&self) -> bool {
-        self.r16(DCE) & 0x8000 != 0
+        self.r16(DCE) & 0x8000 != 0 || self.r32(DCM1) & 0x8000_0000 != 0
     }
 
     /// Visible size in pixels from the timing registers.
@@ -206,15 +580,49 @@ impl Coral {
         }
     }
 
-    fn layer_enabled(&self, i: usize) -> bool {
+    pub fn layer_enabled(&self, i: usize) -> bool {
         let dce = self.r16(DCE);
         let ext = self.r32(DCM1) >> 16;
         dce & (1 << LAYERS[i].dce_bit) != 0 || ext & (1 << i) != 0
     }
 
-    fn palette(&self, base: u32, idx: u32) -> (u8, u8, u8, bool) {
+    fn palette(&self, base: u32, idx: u32) -> (u8, u8, u8) {
         let e = self.r32(base + idx * 4);
-        (((e >> 16) & 0xff) as u8, ((e >> 8) & 0xff) as u8, (e & 0xff) as u8, e >> 31 != 0)
+        (((e >> 16) & 0xff) as u8, ((e >> 8) & 0xff) as u8, (e & 0xff) as u8)
+    }
+
+    /// Layers from back to front.  DLS holds the order as six nibbles,
+    /// front-most first, 7 meaning "none"; it reads 0 until the firmware
+    /// programs it, in which case the fixed legacy order applies.
+    fn layer_order(&self) -> Vec<usize> {
+        let dls = self.r32(DISP + 0x180);
+        if dls == 0 {
+            return vec![5, 4, 3, 2, 1, 0];
+        }
+        let mut order = Vec::new();
+        for k in (0..6).rev() {
+            let l = ((dls >> (k * 4)) & 0xf) as usize;
+            if l < 6 && !order.contains(&l) {
+                order.push(l);
+            }
+        }
+        order
+    }
+
+    /// Screen rectangle of a layer: the whole screen, or its window when
+    /// window mode is on (always for L1).
+    fn layer_window(&self, i: usize, w: usize, h: usize) -> (usize, usize, usize, usize) {
+        let ext = DISP + 0x110 + i as u32 * 0x10;
+        let (wx, wy, ww, wh) = if i == 1 && self.r32(ext) & 2 == 0 {
+            (self.r16(DISP + 0x18), self.r16(DISP + 0x1a), self.r16(DISP + 0x1c), self.r16(DISP + 0x1e) + 1)
+        } else if self.r32(ext) & 2 != 0 {
+            (self.r16(ext + 4), self.r16(ext + 6), self.r16(ext + 8), self.r16(ext + 10) + 1)
+        } else {
+            (0, 0, w as u32, h as u32)
+        };
+        let x0 = (wx as usize).min(w);
+        let y0 = (wy as usize).min(h);
+        (x0, y0, (x0 + ww as usize).min(w), (y0 + wh as usize).min(h))
     }
 
     /// Compose the enabled layers into an RGB888 image.
@@ -224,10 +632,14 @@ impl Coral {
         if !self.display_enabled() {
             return (w, h, out);
         }
-        // Back to front.  The real ordering is programmable (DLS); the
-        // default is L5 at the back and L0 in front.
-        for i in (0..6).rev() {
-            if !self.layer_enabled(i) || i == 1 {
+        let bg = self.r32(DISP + 0x184);
+        for px in out.chunks_exact_mut(3) {
+            px[0] = (bg >> 16) as u8;
+            px[1] = (bg >> 8) as u8;
+            px[2] = bg as u8;
+        }
+        for i in self.layer_order() {
+            if !self.layer_enabled(i) {
                 continue;
             }
             let l = &LAYERS[i];
@@ -238,40 +650,47 @@ impl Coral {
                 continue;
             }
             let da = (self.r32(l.disp_addr) & 0x03ff_ffff) as usize;
-            // Colour 0 of an indirect layer in front of another one is
-            // transparent; the bottom layer is opaque.
-            let transparent0 = i != 5 && i != 4;
-            for y in 0..h {
-                let row = da + y * stride;
-                for x in 0..w {
-                    let (r, g, b);
+            // Transparency: a pixel equal to the layer's transparent
+            // colour shows what is behind it.  Colour code 0 only counts
+            // when the "zero transparent" bit is clear.
+            let etc = self.r32(DISP + 0x1a0 + i as u32 * 4);
+            let legacy_zt = match i {
+                0 => self.r16(DISP + 0xbc) & 0x8000 != 0,
+                2 => self.r16(DISP + 0xc2) & 0x8000 != 0,
+                3 => self.r16(DISP + 0xc0) & 0x8000 != 0,
+                _ => true,
+            };
+            let key = etc & 0x7fff;
+            let zero_opaque = etc & 0x8000_0000 != 0 || (etc == 0 && legacy_zt);
+            let transparent = |v: u32| v == key && (v != 0 || !zero_opaque);
+            let (x0, y0, x1, y1) = self.layer_window(i, w, h);
+            for y in y0..y1 {
+                let row = da + (y - y0) * stride;
+                for x in x0..x1 {
+                    let o = (y * w + x) * 3;
                     if direct {
-                        let p = (row + x * 2) ^ 2;
+                        let p = (row + (x - x0) * 2) ^ 2;
                         if p + 1 >= VRAM_SIZE {
                             break;
                         }
-                        let v = u16::from_be_bytes([self.vram[p], self.vram[p + 1]]);
-                        if v == 0 && transparent0 {
+                        let v = u16::from_be_bytes([self.vram[p], self.vram[p + 1]]) as u32 & 0x7fff;
+                        if transparent(v) {
                             continue;
                         }
-                        r = ((v >> 10) & 0x1f) as u8;
-                        g = ((v >> 5) & 0x1f) as u8;
-                        b = (v & 0x1f) as u8;
-                        let o = (y * w + x) * 3;
+                        let (r, g, b) = ((v >> 10) as u8 & 0x1f, (v >> 5) as u8 & 0x1f, v as u8 & 0x1f);
                         out[o] = (r << 3) | (r >> 2);
                         out[o + 1] = (g << 3) | (g >> 2);
                         out[o + 2] = (b << 3) | (b >> 2);
                     } else {
-                        let p = (row + x) ^ 3;
+                        let p = (row + (x - x0)) ^ 3;
                         if p >= VRAM_SIZE {
                             break;
                         }
                         let idx = self.vram[p] as u32;
-                        if idx == 0 && transparent0 {
+                        if transparent(idx) {
                             continue;
                         }
                         let c = self.palette(l.palette, idx);
-                        let o = (y * w + x) * 3;
                         out[o] = c.0;
                         out[o + 1] = c.1;
                         out[o + 2] = c.2;
@@ -282,26 +701,49 @@ impl Coral {
         (w, h, out)
     }
 
+    /// Render an arbitrary 16 bpp surface in video memory (for looking at
+    /// off-screen buffers).  `stride` is in pixels.
+    pub fn render_surface(&self, addr: u32, stride: usize, w: usize, h: usize) -> Vec<u8> {
+        let base = Self::vaddr(addr);
+        let mut out = vec![0u8; w * h * 3];
+        for y in 0..h {
+            for x in 0..w {
+                let v = self.px_read(base, stride, x as i32, y as i32, true);
+                let (r, g, b) = ((v >> 10) as u8 & 0x1f, (v >> 5) as u8 & 0x1f, v as u8 & 0x1f);
+                let o = (y * w + x) * 3;
+                out[o] = (r << 3) | (r >> 2);
+                out[o + 1] = (g << 3) | (g >> 2);
+                out[o + 2] = (b << 3) | (b >> 2);
+            }
+        }
+        out
+    }
+
     /// Human-readable summary of the display configuration.
     pub fn describe(&self) -> String {
         let (w, h) = self.resolution();
         let mut s = format!(
-            "coral: display {} {}x{} DCM0={:04x} DCE={:04x} DCM1={:08x} IST={:02x} IMASK={:02x} frames={} draw-reg-writes={}\n",
+"coral: display {} {}x{} DCM0={:04x} DCE={:04x} DCM1={:08x} DLS={:08x} IST={:02x} IMASK={:02x} frames={} display-lists={}\n",
             if self.display_enabled() { "on" } else { "off" },
             w,
             h,
             self.r16(DCM0),
             self.r16(DCE),
             self.r32(DCM1),
+            self.r32(DISP + 0x180),
             self.r32(IST),
             self.r32(IMASK),
             self.frame,
-            self.fifo_words
+            self.lists
         );
+        let cmds: Vec<String> = self.cmd_counts.iter().enumerate().filter(|(_, &n)| n > 0).map(|(t, n)| format!("{:02x}:{}", t, n)).collect();
+        if !cmds.is_empty() {
+            s += &format!("  display list commands by type: {}\n", cmds.join(" "));
+        }
         for (i, l) in LAYERS.iter().enumerate() {
             let mode = self.r32(l.mode);
             s += &format!(
-                "  {:<6} {} mode={:08x} ({}bpp stride {} height {}) origin={:07x} disp={:07x}\n",
+                "  {:<6} {} mode={:08x} ({}bpp stride {} height {}) origin={:07x} disp={:07x} ext={:x} etc={:08x}\n",
                 l.name,
                 if self.layer_enabled(i) { "on " } else { "off" },
                 mode,
@@ -309,7 +751,9 @@ impl Coral {
                 ((mode >> 16) & 0xff) * 64,
                 (mode & 0xfff) + 1,
                 self.r32(l.origin),
-                self.r32(l.disp_addr)
+                self.r32(l.disp_addr),
+                self.r32(DISP + 0x110 + i as u32 * 0x10),
+                self.r32(DISP + 0x1a0 + i as u32 * 4)
             );
         }
         s
