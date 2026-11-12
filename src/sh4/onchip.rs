@@ -103,10 +103,11 @@ pub struct Int2Source {
 /// The index is the bit number in [`Int2::pending`].
 pub const INT2_SOURCES: [Int2Source; 6] = [
     Int2Source { name: "TMU0", code: 0x400, pri: (0, 16), mask_bit: 1 },
-    // Not used by the firmware looked at so far; placement is a guess.
-    Int2Source { name: "TMU1", code: 0x420, pri: (0, 8), mask_bit: 1 },
-    Int2Source { name: "TMU2", code: 0x440, pri: (0, 0), mask_bit: 1 },
-    Int2Source { name: "display unit", code: 0x3e0, pri: (0, 24), mask_bit: 0 },
+    Int2Source { name: "TMU2", code: 0x440, pri: (0, 8), mask_bit: 1 },
+    Int2Source { name: "TMU2 capture", code: 0x460, pri: (0, 0), mask_bit: 1 },
+    // Vertical blanking.  The OS also sets bit 0 of 0xff80_2000 when it
+    // enables this one, so it may really be an interrupt pin.
+    Int2Source { name: "display", code: 0x3e0, pri: (0, 24), mask_bit: 0 },
     Int2Source { name: "CAN", code: 0x880, pri: (5, 16), mask_bit: 25 },
     Int2Source { name: "ATAPI", code: 0x5e0, pri: (1, 0), mask_bit: 7 },
 ];
@@ -233,7 +234,7 @@ impl Intc {
         if let Some(int2) = self.int2.as_mut() {
             // The timers are the same module as on the SH7750; their
             // requests arrive through `pending` and are routed here.
-            for (i, irq) in [Irq::Tuni0, Irq::Tuni1, Irq::Tuni2].into_iter().enumerate() {
+            for (i, irq) in [Irq::Tuni0, Irq::Tuni2, Irq::Ticpi2].into_iter().enumerate() {
                 if self.pending & (1 << irq as u32) != 0 {
                     int2.pending |= 1 << i;
                 } else {

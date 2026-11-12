@@ -90,9 +90,14 @@ impl Machine {
             self.radio.version.copy_from_slice(index.audver.as_bytes());
         }
         if let Some(os) = v.module("OSM") {
-            // The module directory sits in the 256 bytes below the OS.
-            let dir = crate::fw::module_directory(v, index);
-            self.board.load(os.phys_addr() - 0x100, &dir);
+            if self.board.model == crate::board::Model::Rnse193 {
+                let dir = crate::fw::module_directory_193(v, index);
+                self.board.load(os.phys_addr() - 0x200, &dir);
+            } else {
+                // The module directory sits in the 256 bytes below the OS.
+                let dir = crate::fw::module_directory(v, index);
+                self.board.load(os.phys_addr() - 0x100, &dir);
+            }
         }
     }
 
@@ -128,6 +133,9 @@ impl Machine {
             // drop it.
             "V5740002" => Some(0x09e3_937a),
             "vB480000" => Some(0x09e3_9372),
+            // The 193's OS builds.
+            "V5741040" => Some(0x8068_8afe),
+            "VB481000" => Some(0x8068_8146),
             _ => None,
         }
     }
@@ -142,7 +150,9 @@ impl Machine {
 
     /// CPU cycles per millisecond of emulated time.
     pub fn cycles_per_ms(&self) -> u64 {
-        self.cpu.io.pclk_div * 29_400
+        // Peripheral clock: 29.4 MHz on the 192, 25 MHz on the 193 (both
+        // from the reload values the firmware uses for its 2 ms tick).
+        self.cpu.io.pclk_div * if self.cpu.io.navi.is_some() { 25_000 } else { 29_400 }
     }
 
     /// Send `frame` to the unit every `period_ms` milliseconds, as another
@@ -323,12 +333,35 @@ impl Machine {
         // that.  The loader, which shares the boot ROM's hardware layer,
         // uses level 7 (IPRA = 0x7000).
         self.cpu.io.intc.ipra = 0x7000;
+        if let Some(int2) = self.cpu.io.intc.int2.as_mut() {
+            // The same on the 193, in its own controller: the loader
+            // gives timer 0 level 7 and unmasks the timers; the OS only
+            // sets up the other fields of that register.
+            int2.pri[0] |= 0x000e_0000;
+            int2.mask &= !(1 << 1);
+        }
         // Likewise the CAN controller: the OS sets up mailboxes and
         // handles interrupts but never takes the chip out of reset.
         self.can().start();
         self.boot_calls.clear();
-        for (i, name) in ["init1", "init2", "start"].iter().enumerate() {
-            self.boot_calls.push_back((format!("OSM {}", name), os.entries[i]));
+        if self.board.model == crate::board::Model::Rnse193 {
+            // On this model the boot ROM calls the entry points of every
+            // module, stage by stage, in directory order (the 192's OS
+            // does that for the other modules itself; the same code is
+            // present but unreachable in the 193's OS).  The OS's third
+            // entry does not return, so it has to come last.
+            let order = ["OSM", "APM", "APFM", "AUM", "FONT", "VRM", "DIG"];
+            let modules: Vec<&Module> = order.iter().filter_map(|n| v.module(n)).collect();
+            for (i, name) in ["init1", "init2", "start"].iter().enumerate() {
+                for m in modules.iter().filter(|m| !(i == 2 && m.name == "OSM")) {
+                    self.boot_calls.push_back((format!("{} {}", m.name, name), m.entries[i]));
+                }
+            }
+            self.boot_calls.push_back(("OSM start".into(), os.entries[2]));
+        } else {
+            for (i, name) in ["init1", "init2", "start"].iter().enumerate() {
+                self.boot_calls.push_back((format!("OSM {}", name), os.entries[i]));
+            }
         }
         self.next_boot_call();
         Ok(())
@@ -434,7 +467,43 @@ impl Machine {
             (0x3e, 1) => 0x8000_0406,
             // Version block of the installed software: SOFIDX[4],
             // NAVVER[8], AUDVER[8] as stored in the module directory.
+            (0x3e, 0x13) if self.board.model == crate::board::Model::Rnse193 => {
+                // On the 193 the block follows the module entries of the
+                // directory at 0x400000.
+                let count = u32::from_be_bytes(self.board.flash[0x40_0018..0x40_001c].try_into().unwrap()).min(10);
+                0x8040_001c + count * 16
+            }
             (0x3e, 0x13) => 0x8000_c01c,
+            // Called from the tick: on the 193 this is what serves the
+            // watchdog once the OS runs (the OS never touches the strobe
+            // itself).
+            (0x3e, 7) => {
+                let now = self.cpu.cycles;
+                if let Some(navi) = self.cpu.io.navi.as_mut() {
+                    if navi.watchdog_strobe.is_some() {
+                        navi.watchdog_strobe = Some(now);
+                    }
+                }
+                0
+            }
+            (0x3e, 0xb) => {
+                if self.trace_bios {
+                    // CAN configuration: two tables, each ended by 0xffff.
+                    for (k, (size, what)) in [(12u32, "receive"), (8, "transmit")].iter().enumerate() {
+                        let mut p = self.peek32(regs[4] + 4 * k as u32).unwrap_or(0);
+                        for _ in 0..16 {
+                            let Some(tag) = self.peek16(p) else { break };
+                            if tag == 0xffff {
+                                break;
+                            }
+                            let bytes: Vec<String> = (0..*size).map(|i| format!("{:02x}", self.peek8(p + i).unwrap_or(0))).collect();
+                            eprintln!("[bios]   CAN {} entry: {}", what, bytes.join(" "));
+                            p += size;
+                        }
+                    }
+                }
+                0
+            }
             (0x3e, 6) => {
                 for p in [regs[4], regs[5], regs[6]] {
                     self.poke32(p, 0);

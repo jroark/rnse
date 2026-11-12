@@ -22,7 +22,7 @@ by a few bytes.  Which cars `VB48` is for is not known.
 | 0x08000000-0x0fffffff | RAM, 128 MiB (the loader's stack starts at 0x8fffdf00) |
 | 0x18000000-           | battery-backed SRAM (the OS has some 1800 references to it) |
 | 0xfe008000, 0xfe800100 | not identified (a few writes at start-up; 0xfe800100 takes the key 0xa55a) |
-| 0xff802000            | bus state controller |
+| 0xff802000            | interrupt pin control (the layout of the SH7780's INTC: sense, mask and mask-clear registers) |
 | 0xff804000            | interrupt controller |
 | 0xff923000, 0xff926000, 0xff927000 | serial ports with FIFO (OS only; not emulated yet) |
 | 0xff93c000 and other 0xff9xxxxx | further on-chip modules used by the OS only |
@@ -49,12 +49,19 @@ pair at +0x108/+0x10c.  Everything is masked after reset.
 
 | source | INTEVT | priority field | mask bit | level used |
 |--------|--------|----------------|----------|------------|
-| display unit | 0x3e0 | PRI0 bits 31:24 | 0 | 14 |
+| display (vertical blanking) | 0x3e0 | PRI0 bits 31:24 | 0 | 14 (loader), 8 (OS) |
 | timer 0 (tick) | 0x400 | PRI0 bits 23:16 | 1 | 7 |
+| timer 2, underflow and capture | 0x440, 0x460 | PRI0 bits 15:8 and 7:0 | 1 | 14, 12 (OS) |
 | ATAPI | 0x5e0 | PRI1 bits 7:0 | 7 | 3 |
 | CAN | 0x880 | PRI5 bits 23:16 | 25 | 5 |
 
-The levels are the ones the 192 uses for the same jobs.  The loader's
+The levels are the ones the 192 uses for the same jobs.  The timer
+fields are an inference: the loader sets bits 23:16 when it starts timer
+0 and the OS sets the two lower fields for timer 2, whose handlers sit
+at 0x440 and 0x460.  When the OS enables the display interrupt it also
+sets bit 0 of 0xff802000, so that one may be a pin rather than the
+display unit's own request line; the emulator raises it from the display
+unit's vertical-blanking flag either way.  The loader's
 table of handlers also has entries for 0x220-0x3c0 (external interrupt
 levels), 0x4c0, 0x660, 0x680, 0xaa0, 0xac0 and 0xe80, which it does not
 use.
@@ -116,9 +123,51 @@ the boot ROM header at flash 0x406, like the 192's.  Its log goes
 through a `printf` (0x09e3937a in V5740002) that formats and discards;
 `rnse loader` hooks it.
 
+## Main software
+
+The OS and the other modules have the same structure as on the 192
+(three entry points each, a uITRON-style kernel, the same task names in
+the debug log), with two differences in how they are started:
+
+* The boot ROM, not the OS, calls every module's entry points: stage 1
+  of each module in directory order, then stage 2, then stage 3, with
+  the OS's third entry (which never returns) last.  The 192's OS does
+  this for the other modules itself; the same routine is still in the
+  193's OS but nothing calls it.  The order matters: the application's
+  first entry moves the memory break (boot ROM service 5) from the end
+  of the OS's data down to the end of its own, at 0x0ca57004, and the
+  heap the OS creates later runs from the final break up to 0x0e8cfff0,
+  just below the OS's data.
+* The OS replaces the boot ROM's vector tables with its own, in RAM at
+  0x8e8d0000 (TRAPA handlers), 0x8e8d0400 (exception and interrupt
+  handlers) and 0x8e8d0600 (interrupt mask levels), and seeds them from
+  the boot ROM's: 64 handlers at the old vector base (the first 16 for
+  exception codes 0x000-0x1e0, all of them for TRAPA 0-63) and 125 mask
+  bytes at +0x780.  See [boot-rom.md](boot-rom.md).
+
+As on the 192, the OS starts timer 0 for its 2 ms tick without giving it
+a priority; the boot ROM has done that (the loader's value is level 7,
+with the timers' mask bit cleared).  The peripheral clock is 25 MHz,
+going by the tick's reload value.
+
+In the emulator the OS now starts all its tasks, checks its flash file
+system and runs its power manager.  Its log reads like the 192's did
+before the car and the other processors were answered: no ignition on
+the CAN bus, `ROMID RETRY`, `init_dsp_pos = 1` (display open).  `printf`
+is at 0x80688afe in V5741040.
+
 ## Not done
 
-The main software (OS and applications) has not been started on this
-model yet.  It will need at least the boot ROM services, the serial
-ports, the remaining interrupt sources and whatever it uses to draw
-(the display unit alone only shows surfaces).
+* The OS has not put anything on the screen yet: no plane is enabled.
+  How it draws (the chip has a graphics engine besides the display
+  unit) has not been looked at.
+* CAN: the OS never programs a mailbox in the emulator, so it does not
+  see the ignition message.  Boot ROM service 0x0b, which it calls with
+  two tables of buffers, may be part of the answer.
+* Serial ports (radio processor, faceplate), A/D converter (display
+  position), the ports behind 0xffc4xxxx, DMA for the drive.
+* How the OS serves the watchdog.  The emulator only watches the
+  loader's strobe.
+* Interrupt sources the OS registers handlers for and that have no
+  model: 0x480, 0x760, 0x780, 0x7a0, 0x940-0x980, 0xc00, 0xca0-0xce0,
+  0xd20, 0xdc0, 0xde0, 0xe20, 0xea0, 0xf00, 0xfa0.

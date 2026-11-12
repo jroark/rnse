@@ -302,6 +302,8 @@ pub struct IndexInfo {
     pub sofidx: String,
     pub navver: String,
     pub audver: String,
+    /// Version of the text/speech data (193-family discs only).
+    pub txtver: String,
 }
 
 impl IndexInfo {
@@ -314,6 +316,7 @@ impl IndexInfo {
                     "SOFIDX" => info.sofidx = v.to_string(),
                     "NAVVER" => info.navver = v.to_string(),
                     "AUDVER" => info.audver = v.to_string(),
+                    "TXTVER" => info.txtver = v.to_string(),
                     _ => {}
                 }
             }
@@ -373,6 +376,50 @@ pub fn module_directory(v: &Variant, index: &IndexInfo) -> [u8; 0x100] {
         }
     }
     d[0x5c..0x60].copy_from_slice(&n.to_be_bytes());
+    d
+}
+
+/// The module directory of the 193 family: 512 bytes at 0x400000, in
+/// front of the OS module.  The boot ROM walks it to start the modules.
+///
+/// ```text
+/// 0x00  ".OS "  version[8]  address          the OS module
+/// 0x10  "00", ' ', software version "1040"
+/// 0x18  number of further modules
+/// 0x1c  tag[4] version[8] address            one per module
+///       then SOFIDX[4] NAVVER[8] AUDVER[8] TXTVER[4] ".IDX"
+/// ```
+pub fn module_directory_193(v: &Variant, index: &IndexInfo) -> [u8; 0x200] {
+    let mut d = [0u8; 0x200];
+    fn put(d: &mut [u8], off: usize, s: &[u8], max: usize) {
+        let n = s.len().min(max);
+        d[off..off + n].copy_from_slice(&s[..n]);
+    }
+    fn entry(d: &mut [u8], off: usize, m: &Module) {
+        d[off] = b'.';
+        put(d, off + 1, format!("{:<3}", m.kind).as_bytes(), 3);
+        put(d, off + 4, m.version.as_bytes(), 8);
+        d[off + 12..off + 16].copy_from_slice(&m.load_addr.to_be_bytes());
+    }
+    if let Some(os) = v.module("OSM") {
+        entry(&mut d, 0, os);
+    }
+    put(&mut d, 0x10, format!("00 {}", v.version).as_bytes(), 8);
+    let order = ["APM", "APFM", "AUM", "FONT", "VRM", "DIG"];
+    let mut n = 0usize;
+    for name in order {
+        if let Some(m) = v.module(name) {
+            entry(&mut d, 0x1c + n * 16, m);
+            n += 1;
+        }
+    }
+    d[0x18..0x1c].copy_from_slice(&(n as u32).to_be_bytes());
+    let o = 0x1c + n * 16;
+    put(&mut d, o, index.sofidx.as_bytes(), 4);
+    put(&mut d, o + 4, index.navver.as_bytes(), 8);
+    put(&mut d, o + 12, index.audver.as_bytes(), 8);
+    put(&mut d, o + 20, index.txtver.as_bytes(), 4);
+    put(&mut d, o + 24, b".IDX", 4);
     d
 }
 

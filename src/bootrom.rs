@@ -117,6 +117,19 @@ pub fn install(board: &mut Board, project: &str) {
     for n in 15..64u32 {
         put32(f, VBR + 0x400 + n * 4, 0x8000_0000 | (TRAP_STUBS + n * 8));
     }
+    if model == crate::board::Model::Rnse193 {
+        // The 193's OS expects a different arrangement (see the routine
+        // at the start of its OS module): one table of 64 handlers at
+        // +0, the first 16 for exception codes 0x000-0x1e0 and all of
+        // them for TRAPA 0-63, and 125 interrupt mask bytes at +0x780.
+        for n in 16..64u32 {
+            put32(f, VBR + n * 4, 0x8000_0000 | (TRAP_STUBS + n * 8));
+        }
+        for i in 0..125u32 {
+            let mask = if (16..31).contains(&i) { ((31 - i) << 4) as u8 } else { 0 };
+            f[(VBR + 0x780 + i) as usize] = mask;
+        }
+    }
     for n in 0..256u32 {
         let at = TRAP_STUBS + n * 8;
         put16(f, at, HYPERCALL);

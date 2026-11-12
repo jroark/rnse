@@ -91,11 +91,32 @@ fn loader_installs_the_firmware_193() {
             let n = module.size as usize;
             assert_eq!(&m.board.flash[a..a + n], &module.data[..n], "{}: module {} as written by the loader", v.name, module.name);
         }
-        // The directory in front of the OS names the OS first.
+        // The directory in front of the OS is the one `install` builds.
         let os = v.module("OSM").unwrap();
         let dir = os.phys_addr() as usize - 0x200;
-        assert_eq!(&m.board.flash[dir..dir + 4], b".OS ");
-        assert_eq!(&m.board.flash[dir + 4..dir + 12], os.version.as_bytes());
+        let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+        assert_eq!(&m.board.flash[dir..dir + 0x200], &fw::module_directory_193(v, &index)[..], "{}: module directory", v.name);
+    }
+}
+
+/// The 193's OS, started the way its boot ROM does it (every module's
+/// entry points, stage by stage), must get its tick going and keep
+/// running.
+#[test]
+fn os_runs_193() {
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    for v in variants.iter().filter(|v| rnse::board::Model::for_variant(&v.name) == Some(rnse::board::Model::Rnse193)) {
+        let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+        let mut m = Machine::for_model(rnse::board::Model::Rnse193);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        m.atapi().load(image.clone());
+        m.start_os(v).unwrap();
+        let stop = m.run(1_000_000_000);
+        assert_eq!(stop, Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        assert!(m.cpu.irq_counts[0x400 >> 5] > 1000, "{}: system tick is not running", v.name);
     }
 }
 

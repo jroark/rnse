@@ -85,3 +85,23 @@ Seen but not understood:
 
 Unknown services return 0.  `rnse boot --trace-bios` logs every call with
 its caller.
+
+## The 193's boot ROM
+
+The stand-in serves both models; what differs for the 193 (variants V574
+and VB48):
+
+* Reset is entered as code at address 0: the loader ends an update with
+  a jump there (after giving the watchdog time to do it first).
+* Vector tables: 64 handlers at the vector base, used both for exception
+  codes 0x000-0x1e0 (the first 16) and for TRAPA 0-63, and 125 interrupt
+  mask bytes at +0x780.
+* It starts the installed software itself, module by module; see
+  [hardware-193.md](hardware-193.md).
+* Service 0x13 returns the address of the version block behind the
+  entries of the directory at 0x400000 (0x8040007c with six modules).
+* Service 0x0b is new: one argument, a pointer to two table addresses.
+  The tables hold (number, buffer address, size) records ending in
+  0xffff.  Not understood; the stand-in ignores it.
+* Services 1, 4, 5 and 6 are used as on the 192.
+

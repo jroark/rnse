@@ -27,7 +27,7 @@ built around an SH7770-family system-on-chip:
 | | |
 |---|---|
 | Update loader | Boots, shows its screen on the 800 x 480 display, reads the CD and writes the flash; the result is byte-for-byte the modules on the disc.  `rnse loader disc.iso --variant V574` |
-| Main software | Not started yet. |
+| Main software | Starts: all modules initialise, the tick runs, the tasks come up and write the same kind of log as on the 192.  Nothing on the screen yet, and the car, radio processor and faceplate are not connected on this model.  `rnse boot disc.iso --variant V574` |
 
 Not done yet: the power button, opening the display, CD playback, the
 GPS and SD card processors, sound, the 3D half of the graphics chip.

@@ -163,7 +163,10 @@ impl Navi {
         self.log.log("soc", true, addr, size, v, pc);
         match addr {
             WATCHDOG_PORT => {
-                if (self.raw_read(addr, size) ^ v) & 1 != 0 {
+                // Only the loader is known to strobe this way (a 32-bit
+                // read-modify-write); how the OS serves the watchdog is
+                // not known, so it is left unwatched.
+                if size == 4 && (self.raw_read(addr, size) ^ v) & 1 != 0 {
                     self.watchdog_strobe = Some(now);
                 }
                 self.raw_write(addr, size, v);
