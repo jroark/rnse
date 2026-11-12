@@ -1,0 +1,11 @@
+/target
+# Firmware and anything derived from it stays out of the repository.
+/firmware/
+*.iso
+*.bin
+*.BIN
+*.KWI
+*.MOT
+*.bz2*
+/out/
+__pycache__/

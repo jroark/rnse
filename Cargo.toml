@@ -1,0 +1,25 @@
+[package]
+name = "rnse"
+version = "0.1.0"
+edition = "2021"
+description = "Emulator for the Audi RNS-E (Aisin AW) navigation unit"
+license = "MIT"
+
+[lib]
+name = "rnse"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rnse"
+path = "src/bin/rnse.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+debug = 1
+lto = "thin"
+codegen-units = 4
+
+[profile.dev]
+opt-level = 1
