@@ -47,7 +47,8 @@ pub enum Hook {
 pub fn classify(pc: u32) -> Option<Hook> {
     let a = pc & 0x1fff_ffff;
     Some(match a {
-        RESET_ENTRY => Hook::Reset,
+        // The 193's loader restarts the unit by jumping to address 0.
+        0 | RESET_ENTRY => Hook::Reset,
         CALL_RETURN => Hook::CallReturn,
         UNHANDLED => Hook::Unhandled,
         a if a == VBR + 0x100 => Hook::Exception,
@@ -67,12 +68,18 @@ fn put32(flash: &mut [u8], off: u32, v: u32) {
 /// Write the stub into flash.  `project` is the four character hardware
 /// project code ("V220").
 pub fn install(board: &mut Board, project: &str) {
+    let model = board.model;
     let f = &mut board.flash;
     f[..0x4000].iter_mut().for_each(|b| *b = 0xff);
 
     // Offset 0: address of the reset entry.  The update loader finishes
     // with `jmp @[0]`.
     put32(f, 0, 0xa000_0000 | RESET_ENTRY);
+    if model == crate::board::Model::Rnse193 {
+        // Here the reset vector is entered as code.
+        put16(f, 0, HYPERCALL);
+        put16(f, 2, 0x0009);
+    }
 
     // 0x400: module-style header; the loader reads the project code at
     // +6 to decide which software set on a disc fits this hardware.

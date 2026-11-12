@@ -85,7 +85,98 @@ const IRQ_TABLE: [(Irq, u32, Pri); 31] = [
     (Irq::RefRovi, 0x5a0, Pri::B(8)),
 ];
 
+/// A request line into the SH7770-style interrupt controller (INT2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Int2Source {
+    pub name: &'static str,
+    /// INTEVT code.
+    pub code: u32,
+    /// Priority register (index of INT2PRIn) and bit position of the
+    /// 5-bit field; the upper four bits are the level.
+    pub pri: (usize, u32),
+    /// Bit in the mask register (INT2MSKR), or in the second one when 32
+    /// is added.
+    pub mask_bit: u32,
+}
+
+/// The sources identified so far, from the firmware's own set-up code.
+/// The index is the bit number in [`Int2::pending`].
+pub const INT2_SOURCES: [Int2Source; 6] = [
+    Int2Source { name: "TMU0", code: 0x400, pri: (0, 16), mask_bit: 1 },
+    // Not used by the firmware looked at so far; placement is a guess.
+    Int2Source { name: "TMU1", code: 0x420, pri: (0, 8), mask_bit: 1 },
+    Int2Source { name: "TMU2", code: 0x440, pri: (0, 0), mask_bit: 1 },
+    Int2Source { name: "display unit", code: 0x3e0, pri: (0, 24), mask_bit: 0 },
+    Int2Source { name: "CAN", code: 0x880, pri: (5, 16), mask_bit: 25 },
+    Int2Source { name: "ATAPI", code: 0x5e0, pri: (1, 0), mask_bit: 7 },
+];
+pub const INT2_DU: usize = 3;
+pub const INT2_CAN: usize = 4;
+pub const INT2_ATAPI: usize = 5;
+
+/// Interrupt controller for on-chip modules in the SH7770 family: the
+/// same arrangement as the SH7780's INTC2, at 0xff80_4000.
+///
+/// | offset        | register                                          |
+/// |---------------|---------------------------------------------------|
+/// | +0x00..+0x2c  | INT2PRI0-11, four 5-bit priorities each           |
+/// | +0x38, +0x3c  | mask set / mask clear (1 = masked after reset)    |
+/// | +0x108, +0x10c| the same for a second group of 32 sources         |
+pub struct Int2 {
+    pub pri: [u32; 16],
+    /// 1 = masked; bits 32.. are the second register.
+    pub mask: u64,
+    /// Requests, one bit per entry of [`INT2_SOURCES`].
+    pub pending: u64,
+}
+
+impl Int2 {
+    pub fn new() -> Int2 {
+        Int2 { pri: [0; 16], mask: u64::MAX, pending: 0 }
+    }
+
+    fn best(&self) -> (u32, u32) {
+        let (mut level, mut code) = (0, 0);
+        for (i, src) in INT2_SOURCES.iter().enumerate() {
+            if self.pending >> i & 1 != 0 && self.mask >> src.mask_bit & 1 == 0 {
+                let l = (self.pri[src.pri.0] >> src.pri.1 & 0x1f) >> 1;
+                if l > level {
+                    level = l;
+                    code = src.code;
+                }
+            }
+        }
+        (level, code)
+    }
+}
+
+impl Intc {
+    /// Raise or drop a request line of the SH7770-style controller.
+    pub fn set_int2(&mut self, source: usize, on: bool) {
+        if let Some(int2) = self.int2.as_mut() {
+            let old = int2.pending;
+            if on {
+                int2.pending |= 1 << source;
+            } else {
+                int2.pending &= !(1 << source);
+            }
+            if int2.pending != old {
+                self.recalc();
+            }
+        }
+    }
+}
+
+impl Default for Int2 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct Intc {
+    /// Present on the SH7770 family, where it replaces the priority
+    /// registers below for on-chip sources.
+    pub int2: Option<Int2>,
     pub icr: u16,
     pub ipra: u16,
     pub iprb: u16,
@@ -107,6 +198,7 @@ pub struct Intc {
 impl Intc {
     fn new() -> Self {
         Intc {
+            int2: None,
             icr: 0,
             ipra: 0,
             iprb: 0,
@@ -138,7 +230,22 @@ impl Intc {
             level = self.irl as u32;
             code = 0x200 + (15 - level) * 0x20;
         }
-        if self.pending != 0 {
+        if let Some(int2) = self.int2.as_mut() {
+            // The timers are the same module as on the SH7750; their
+            // requests arrive through `pending` and are routed here.
+            for (i, irq) in [Irq::Tuni0, Irq::Tuni1, Irq::Tuni2].into_iter().enumerate() {
+                if self.pending & (1 << irq as u32) != 0 {
+                    int2.pending |= 1 << i;
+                } else {
+                    int2.pending &= !(1 << i);
+                }
+            }
+            let (l, c) = int2.best();
+            if l > level {
+                level = l;
+                code = c;
+            }
+        } else if self.pending != 0 {
             for (irq, c, p) in IRQ_TABLE.iter() {
                 if self.pending & (1 << *irq as u32) != 0 {
                     let pr = self.priority(*p);
@@ -250,6 +357,9 @@ pub struct OnChip {
 
     pub next_event: u64,
     pub log: IoLog,
+    /// Present when the CPU is the SH7770-family system-on-chip of the
+    /// 193 unit: its own peripherals replace the SH7750's.
+    pub navi: Option<Box<super::navi::Navi>>,
 }
 
 impl Default for OnChip {
@@ -309,6 +419,7 @@ impl OnChip {
             rtc_last: 0,
             next_event: u64::MAX,
             log: IoLog::new(false, 4),
+            navi: None,
         }
     }
 
@@ -597,6 +708,23 @@ impl OnChip {
     // ---- register access --------------------------------------------------
 
     pub fn read<B: Bus>(&mut self, _bus: &mut B, addr: u32, size: u32, now: u64, pc: u32) -> u32 {
+        if let Some(n) = self.navi.as_mut() {
+            if let (Some(int2), 0xff80_4000..=0xff80_41ff) = (self.intc.int2.as_ref(), addr) {
+                let v = match addr & 0x1ff {
+                    o @ 0x00..=0x2f => int2.pri[(o >> 2) as usize],
+                    0x38 => int2.mask as u32,
+                    0x3c => !int2.mask as u32,
+                    0x108 => (int2.mask >> 32) as u32,
+                    0x10c => !(int2.mask >> 32) as u32,
+                    _ => 0,
+                };
+                n.log.log("intc", false, addr, size, v, pc);
+                return v;
+            }
+            if super::navi::Navi::owns(addr) {
+                return n.read(addr, size, now, pc, &mut self.intc);
+            }
+        }
         let v = match addr {
             0xff00_0020 => self.tra,
             0xff00_0024 => self.expevt,
@@ -730,6 +858,24 @@ impl OnChip {
     }
 
     pub fn write<B: Bus>(&mut self, bus: &mut B, addr: u32, size: u32, v: u32, now: u64, pc: u32) {
+        if let Some(n) = self.navi.as_mut() {
+            if let (Some(int2), 0xff80_4000..=0xff80_41ff) = (self.intc.int2.as_mut(), addr) {
+                n.log.log("intc", true, addr, size, v, pc);
+                match addr & 0x1ff {
+                    o @ 0x00..=0x2f => int2.pri[(o >> 2) as usize] = v,
+                    0x38 => int2.mask |= v as u64,
+                    0x3c => int2.mask &= !(v as u64),
+                    0x108 => int2.mask |= (v as u64) << 32,
+                    0x10c => int2.mask &= !((v as u64) << 32),
+                    _ => {}
+                }
+                self.intc.recalc();
+                return;
+            }
+            if super::navi::Navi::owns(addr) {
+                return n.write(addr, size, v, now, pc, &mut self.intc);
+            }
+        }
         self.log.log("onchip", true, addr, size, v, pc);
         match addr {
             0xff00_0020 => self.tra = v & 0x3fc,

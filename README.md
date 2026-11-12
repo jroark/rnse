@@ -11,20 +11,30 @@ image.
 
 ## Status
 
-Work in progress.  What runs today, on the `V220` hardware variant:
+Work in progress.  The disc carries software for two generations of the
+unit, which are different computers.  What runs today on the older one
+(part number 8P0 035 192, firmware variant `V220`):
 
 | | |
 |---|---|
 | Update loader (`LDM`) | Boots, shows its screens, reads the CD, erases and programs the flash and finishes the update, exactly as on the unit. |
 | Main software (`OSM` + applications) | Boots into its user interface: radio, media, address book, telephone, navigation, info, car and set-up screens, menus and drop-down lists, drawn through the graphics chip's drawing engine.  The stand-ins for the car (ignition on the CAN bus), the radio processor and the faceplate are just enough for that; there is no tuner, sound, GPS or map behind the screens. |
 | Front end | `rnse ui` shows the unit's faceplate in a browser with the live screen.  Keys, soft keys and both knobs work (mouse, touch or keyboard); below are the firmware's debug log and switches for ignition and the disc. |
-| Other variants on the disc (`V574`, `VB48`) | Parsed and extractable; not bootable yet (different memory map). |
+
+And on the 2010 unit (8P0 035 193, variants `V574` and `VB48`), which is
+built around an SH7770-family system-on-chip:
+
+| | |
+|---|---|
+| Update loader | Boots, shows its screen on the 800 x 480 display, reads the CD and writes the flash; the result is byte-for-byte the modules on the disc.  `rnse loader disc.iso --variant V574` |
+| Main software | Not started yet. |
 
 Not done yet: the power button, opening the display, CD playback, the
 GPS and SD card processors, sound, the 3D half of the graphics chip.
 
-See [docs/hardware.md](docs/hardware.md) for what is known about the
-machine, [docs/firmware-format.md](docs/firmware-format.md) for the disc
+See [docs/hardware.md](docs/hardware.md) and
+[docs/hardware-193.md](docs/hardware-193.md) for what is known about the
+two machines, [docs/firmware-format.md](docs/firmware-format.md) for the disc
 and file formats, and [docs/boot-rom.md](docs/boot-rom.md) for how the
 missing boot ROM is replaced.
 
@@ -113,8 +123,8 @@ runs the unit tests.  With a disc image available,
     RNSE_DISC=disc.iso cargo test --release
 
 additionally runs the whole update in the emulator and checks that the
-flash contents the loader produces are byte-for-byte the modules from the
-disc, that the installed OS reaches its idle loop, and that it brings up
+flash contents each variant's loader produces are byte-for-byte the
+modules from the disc, that the installed OS reaches its idle loop, and that it brings up
 its user interface and reacts to a faceplate key.
 
 The CPU core is also checked against QEMU with randomly generated
@@ -131,7 +141,8 @@ written from the SH-4 manual instead (`src/sh4/tests.rs`).
 
 ## Layout
 
-    src/sh4/        SH-4 CPU: interpreter, FPU, MMU, on-chip peripherals
+    src/sh4/        SH-4 CPU: interpreter, FPU, MMU, on-chip peripherals of
+                    the SH7750R (192) and of the SH7770 family (193)
     src/dev/        devices: Coral graphics chip, ATAPI drive, flash, CAN,
                     serial channels, A/D converter, and stand-ins for
                     the radio processor and the faceplate controller

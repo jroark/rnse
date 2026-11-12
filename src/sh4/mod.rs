@@ -8,6 +8,7 @@ pub mod cpu;
 mod fpu;
 mod interp;
 pub mod mmu;
+pub mod navi;
 pub mod onchip;
 #[cfg(test)]
 mod tests;

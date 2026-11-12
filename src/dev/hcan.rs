@@ -12,6 +12,11 @@
 //! +0x10  acceptance mask (same layout as +0, 1 = don't care)
 //! ```
 //!
+//! The 193 unit's on-chip controller is the later RCAN-ET variant: same
+//! registers, but the mailbox has the identifier two bits further down
+//! (`STDID << 2`), the acceptance mask at +0x04 and the control word at
+//! +0x10.  [`Hcan::rcan_et`] builds that flavour.
+//!
 //! The model moves whole frames: a transmit request completes at once
 //! and is handed to the host through [`Hcan::tx`]; the host injects
 //! received frames with [`Hcan::receive`].  Bit timing, error counters
@@ -78,6 +83,11 @@ pub struct Hcan {
     pub rx_dropped: u64,
     pub log: IoLog,
     pub trace: bool,
+    /// Mailbox layout: bit position of the standard identifier in the
+    /// first word, offset of the control word, offset of the mask.
+    id_shift: u32,
+    ctl: usize,
+    mask: usize,
 }
 
 impl Default for Hcan {
@@ -88,9 +98,15 @@ impl Default for Hcan {
 
 impl Hcan {
     pub fn new() -> Self {
-        let mut h = Hcan { regs: vec![0; 0x500], tx: VecDeque::new(), tx_count: 0, rx_count: 0, rx_dropped: 0, log: IoLog::new(false, 4), trace: false };
+        let mut h = Hcan { regs: vec![0; 0x500], tx: VecDeque::new(), tx_count: 0, rx_count: 0, rx_dropped: 0, log: IoLog::new(false, 4), trace: false, id_shift: 4, ctl: 4, mask: 0x10 };
         h.reset();
         h
+    }
+
+    /// A controller with the RCAN-ET mailbox layout (see the module
+    /// documentation).
+    pub fn rcan_et() -> Self {
+        Hcan { id_shift: 2, ctl: 0x10, mask: 4, ..Self::new() }
     }
 
     /// Hardware reset state: reset mode, everything masked.
@@ -173,11 +189,11 @@ impl Hcan {
     }
 
     fn mb_id(&self, n: usize) -> u16 {
-        (self.r16(MB + n * 0x20) >> 4) & 0x7ff
+        (self.r16(MB + n * 0x20) >> self.id_shift) & 0x7ff
     }
 
     fn mb_mode(&self, n: usize) -> u8 {
-        self.regs[MB + n * 0x20 + 4] & 7
+        self.regs[MB + n * 0x20 + self.ctl] & 7
     }
 
     // ---- bus interface ----------------------------------------------------
@@ -204,7 +220,12 @@ impl Hcan {
             }
             return;
         }
-        // Control registers are accessed as 16-bit words.
+        // Control registers are 16-bit words; a 32-bit access covers two.
+        if size == 4 {
+            self.write(off, 2, v >> 16, pc);
+            self.write(off + 2, 2, v & 0xffff, pc);
+            return;
+        }
         let reg = o & !1;
         let old = self.r16(reg);
         let new = if size >= 2 {
@@ -263,7 +284,7 @@ impl Hcan {
                 continue;
             }
             let base = MB + n * 0x20;
-            let len = (self.regs[base + 5] & 0xf).min(8);
+            let len = (self.regs[base + self.ctl + 1] & 0xf).min(8);
             let mut f = Frame { id: self.mb_id(n), len, data: [0; 8] };
             f.data[..len as usize].copy_from_slice(&self.regs[base + 8..base + 8 + len as usize]);
             if self.trace {
@@ -295,7 +316,7 @@ impl Hcan {
                 continue;
             }
             let base = MB + n * 0x20;
-            let mask = (self.r16(base + 0x10) >> 4) & 0x7ff;
+            let mask = (self.r16(base + self.mask) >> self.id_shift) & 0x7ff;
             if (self.mb_id(n) ^ f.id) & !mask & 0x7ff != 0 {
                 continue;
             }
@@ -303,15 +324,15 @@ impl Hcan {
             let unread = self.r32(RXPR1) & bit != 0;
             if unread {
                 self.w32(UMSR1, self.r32(UMSR1) | bit);
-                if self.regs[base + 4] & 0x20 == 0 {
+                if self.regs[base + self.ctl] & 0x20 == 0 {
                     // NMC clear: keep the old message, drop the new one.
                     self.update_irr();
                     return true;
                 }
             }
-            let ctl0 = self.r16(base) & 0x000f;
-            self.w16(base, (f.id << 4) | (ctl0 & 0x3));
-            self.regs[base + 5] = (self.regs[base + 5] & 0xf0) | f.len;
+            let ctl0 = self.r16(base) & 0x0003;
+            self.w16(base, (f.id << self.id_shift) | ctl0);
+            self.regs[base + self.ctl + 1] = (self.regs[base + self.ctl + 1] & 0xf0) | f.len;
             self.regs[base + 8..base + 16].copy_from_slice(&f.data);
             self.w32(RXPR1, self.r32(RXPR1) | bit);
             self.update_irr();
@@ -387,5 +408,24 @@ mod tests {
         assert_eq!(h.read(0x02, 2, 0) & 8, 8);
         h.write(0x00, 2, 0, 0);
         assert_eq!(h.read(0x02, 2, 0) & 8, 0);
+    }
+
+    #[test]
+    fn rcan_et_mailbox_layout() {
+        let mut h = Hcan::rcan_et();
+        h.start();
+        // Mailbox 1 transmits 0x436 with six data bytes, as the 193's
+        // loader does; mailbox 3 receives 0x271.
+        h.write(0x120, 2, 0x10d8, 0);
+        h.write(0x128, 2, 0x1604, 0);
+        h.write(0x130, 2, 0x0006, 0);
+        h.write(0x160, 2, 0x271 << 2, 0);
+        h.write(0x170, 2, 0x0200, 0);
+        h.write(0x20, 4, 1 << 1, 0);
+        let f = h.tx.pop_front().expect("frame sent");
+        assert_eq!((f.id, f.len, &f.data[..2]), (0x436, 6, &[0x16u8, 0x04][..]));
+        assert!(h.receive(&Frame::new(0x271, &[3])));
+        assert_eq!(h.read(0x168, 1, 0), 3);
+        assert_eq!(h.read(0x170, 2, 0) & 0xf, 1);
     }
 }

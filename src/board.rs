@@ -39,7 +39,72 @@ pub const CORAL_BASE: u32 = 0x1800_0000;
 pub const NVRAM_BASE: u32 = 0x1000_0000;
 pub const NVRAM_SIZE: usize = 0x0010_0000;
 
+/// The two generations of the unit.  They share next to nothing below
+/// the firmware's module format.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Model {
+    /// 8P0 035 192: SH-4 (SH7750R class), Coral graphics chip, companion
+    /// logic.  Firmware variant `V220`.
+    Rnse192,
+    /// 8P0 035 193 (2010 on): an SH-4A system-on-chip of Renesas'
+    /// SH7770 "SH-Navi" family.  Firmware variants `V574` and `VB48`.
+    Rnse193,
+}
+
+impl Model {
+    /// The hardware a firmware variant on the disc is built for.
+    pub fn for_variant(name: &str) -> Option<Model> {
+        match name {
+            "V220" => Some(Model::Rnse192),
+            "V574" | "VB48" => Some(Model::Rnse193),
+            _ => None,
+        }
+    }
+
+    pub fn flash_size(self) -> usize {
+        match self {
+            Model::Rnse192 => FLASH_SIZE,
+            Model::Rnse193 => 0x0400_0000,
+        }
+    }
+
+    pub fn ram_base(self) -> u32 {
+        match self {
+            Model::Rnse192 => RAM_BASE,
+            Model::Rnse193 => 0x0800_0000,
+        }
+    }
+
+    pub fn ram_size(self) -> usize {
+        match self {
+            Model::Rnse192 => RAM_SIZE,
+            Model::Rnse193 => 0x0800_0000,
+        }
+    }
+
+    pub fn nvram_base(self) -> u32 {
+        match self {
+            Model::Rnse192 => NVRAM_BASE,
+            Model::Rnse193 => 0x1800_0000,
+        }
+    }
+
+    /// Whether `len` bytes at physical address `phys` lie entirely in
+    /// RAM or entirely in flash on this model.
+    pub fn can_load(self, phys: u32, len: usize) -> bool {
+        let a = phys as usize;
+        let ram = self.ram_base() as usize;
+        (a >= ram && a + len <= ram + self.ram_size()) || a + len <= self.flash_size()
+    }
+}
+
 pub struct Board {
+    pub model: Model,
+    /// Physical address of the first byte of `ram`.
+    pub ram_base: u32,
+    /// Where the Coral's video memory starts, or an address nothing
+    /// decodes to on a board without one.
+    coral_base: u32,
     pub flash: Vec<u8>,
     pub flash_ctl: Flash,
     /// Set while the flash is not in read-array mode.
@@ -83,12 +148,20 @@ impl Default for Board {
 }
 
 impl Board {
+    /// A 192 board.
     pub fn new() -> Self {
+        Self::for_model(Model::Rnse192)
+    }
+
+    pub fn for_model(model: Model) -> Self {
         Board {
-            flash: vec![0xff; FLASH_SIZE],
+            model,
+            ram_base: model.ram_base(),
+            coral_base: if model == Model::Rnse192 { CORAL_BASE } else { 0xf000_0000 },
+            flash: vec![0xff; model.flash_size()],
             flash_ctl: Flash::new(),
             flash_special: false,
-            ram: vec![0; RAM_SIZE],
+            ram: vec![0; model.ram_size()],
             nvram: vec![0; NVRAM_SIZE],
             unmapped: HashMap::new(),
             coral: Coral::new(),
@@ -106,20 +179,12 @@ impl Board {
         }
     }
 
-    /// Whether `len` bytes at physical address `phys` lie entirely in
-    /// RAM or entirely in flash on this board.
-    pub fn can_load(phys: u32, len: usize) -> bool {
-        let a = phys as usize;
-        let ram = RAM_BASE as usize;
-        (a >= ram && a + len <= ram + RAM_SIZE) || a + len <= FLASH_SIZE
-    }
-
     /// Copy bytes into RAM or flash (used by loaders).  The range must
-    /// satisfy [`Board::can_load`].
+    /// satisfy [`Model::can_load`].
     pub fn load(&mut self, phys: u32, data: &[u8]) {
         let a = phys as usize;
-        if phys >= RAM_BASE {
-            let o = a - RAM_BASE as usize;
+        if phys >= self.ram_base {
+            let o = a - self.ram_base as usize;
             self.ram[o..o + data.len()].copy_from_slice(data);
         } else {
             self.flash[a..a + data.len()].copy_from_slice(data);
@@ -190,6 +255,12 @@ impl Board {
     /// Level-triggered sources also show in the status register at
     /// +0x18 (see `irq_status`).
     pub fn update_irl(&mut self) {
+        if self.model == Model::Rnse193 {
+            // Everything on this board interrupts through the on-chip
+            // controller.
+            self.irl = 0;
+            return;
+        }
         let mut level = 0;
         if self.atapi.irq() {
             level = level.max((self.ipr(0x00) >> 4) & 0xf);
@@ -269,8 +340,11 @@ impl Board {
     }
 
     fn io_read_inner(&mut self, addr: u32, size: u32) -> u32 {
-        if (addr as usize) < FLASH_SIZE {
+        if (addr as usize) < self.flash.len() {
             return self.flash_ctl.read(&self.flash, addr, size);
+        }
+        if self.model == Model::Rnse193 {
+            return self.io_read_193(addr, size);
         }
         if addr >> 26 == 6 {
             return self.coral.read(addr - CORAL_BASE, size, self.pc);
@@ -329,6 +403,9 @@ impl Board {
     }
 
     fn io_write_inner(&mut self, addr: u32, size: u32, v: u32) {
+        if self.model == Model::Rnse193 {
+            return self.io_write_193(addr, size, v);
+        }
         if addr >> 26 == 6 {
             self.coral.write(addr - CORAL_BASE, size, v, self.pc);
             return;
@@ -346,7 +423,7 @@ impl Board {
             0x0790_0000 => return self.atapi.write(8, size, v, self.pc),
             _ => {}
         }
-        if addr < FLASH_SIZE as u32 {
+        if (addr as usize) < self.flash.len() {
             self.flash_ctl.write(&mut self.flash, addr, size, v);
             self.flash_special = self.flash_ctl.special_read();
             return;
@@ -375,19 +452,76 @@ impl Board {
             self.unmapped.entry(a >> 12).or_insert_with(|| Box::new([0; 4096]))[(a & 0xfff) as usize] = b;
         }
     }
+
+    // ---- 193 ---------------------------------------------------------------
+
+    fn nvram_offset(&self, addr: u32) -> Option<usize> {
+        let o = addr.wrapping_sub(self.model.nvram_base()) as usize;
+        (o < NVRAM_SIZE).then_some(o)
+    }
+
+    fn io_read_193(&mut self, addr: u32, size: u32) -> u32 {
+        if let Some(o) = self.nvram_offset(addr) {
+            let mut v = 0;
+            for i in 0..size as usize {
+                v = (v << 8) | self.nvram[(o + i) & (NVRAM_SIZE - 1)] as u32;
+            }
+            return v;
+        }
+        let mut v = 0u32;
+        for i in 0..size {
+            let a = addr + i;
+            let b = self.unmapped.get(&(a >> 12)).map_or(0, |p| p[(a & 0xfff) as usize]);
+            v = (v << 8) | b as u32;
+        }
+        self.log.log(Self::area_name_193(addr), false, addr, size, v, self.pc);
+        v
+    }
+
+    fn io_write_193(&mut self, addr: u32, size: u32, v: u32) {
+        if (addr as usize) < self.flash.len() {
+            self.flash_ctl.write(&mut self.flash, addr, size, v);
+            self.flash_special = self.flash_ctl.special_read();
+            return;
+        }
+        if let Some(o) = self.nvram_offset(addr) {
+            for i in 0..size as usize {
+                self.nvram[(o + i) & (NVRAM_SIZE - 1)] = (v >> ((size as usize - 1 - i) * 8)) as u8;
+            }
+            return;
+        }
+        self.log.log(Self::area_name_193(addr), true, addr, size, v, self.pc);
+        for i in 0..size {
+            let a = addr + i;
+            let b = (v >> ((size - 1 - i) * 8)) as u8;
+            self.unmapped.entry(a >> 12).or_insert_with(|| Box::new([0; 4096]))[(a & 0xfff) as usize] = b;
+        }
+    }
+
+    fn area_name_193(addr: u32) -> &'static str {
+        match addr >> 26 {
+            0 => "flash",
+            1 => "cs1",
+            2 | 3 => "ram",
+            4 => "cs4",
+            5 => "cs5",
+            6 => "cs6",
+            _ => "cs7",
+        }
+    }
 }
 
 impl Bus for Board {
     #[inline(always)]
     fn read8(&mut self, addr: u32) -> u8 {
-        let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if o < RAM_SIZE {
+        let o = addr.wrapping_sub(self.ram_base) as usize;
+        if o < self.ram.len() {
             return self.ram[o];
         }
-        if (addr as usize) < FLASH_SIZE && !self.flash_special {
+        if (addr as usize) < self.flash.len() && !self.flash_special {
             return self.flash[addr as usize];
         }
-        let c = addr.wrapping_sub(CORAL_BASE) as usize;
+        let c = addr.wrapping_sub(self.coral_base) as usize;
         if c < coral::VRAM_SIZE {
             return self.coral.vram[c];
         }
@@ -396,15 +530,15 @@ impl Bus for Board {
 
     #[inline(always)]
     fn read16(&mut self, addr: u32) -> u16 {
-        let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if o < RAM_SIZE - 1 {
+        let o = addr.wrapping_sub(self.ram_base) as usize;
+        if o < self.ram.len() - 1 {
             return u16::from_be_bytes([self.ram[o], self.ram[o + 1]]);
         }
         let a = addr as usize;
-        if a < FLASH_SIZE - 1 && !self.flash_special {
+        if a < self.flash.len() - 1 && !self.flash_special {
             return u16::from_be_bytes([self.flash[a], self.flash[a + 1]]);
         }
-        let c = addr.wrapping_sub(CORAL_BASE) as usize;
+        let c = addr.wrapping_sub(self.coral_base) as usize;
         if c < coral::VRAM_SIZE - 1 {
             let v = &self.coral.vram;
             return u16::from_be_bytes([v[c], v[c + 1]]);
@@ -414,15 +548,15 @@ impl Bus for Board {
 
     #[inline(always)]
     fn read32(&mut self, addr: u32) -> u32 {
-        let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if o < RAM_SIZE - 3 {
+        let o = addr.wrapping_sub(self.ram_base) as usize;
+        if o < self.ram.len() - 3 {
             return u32::from_be_bytes([self.ram[o], self.ram[o + 1], self.ram[o + 2], self.ram[o + 3]]);
         }
         let a = addr as usize;
-        if a < FLASH_SIZE - 3 && !self.flash_special {
+        if a < self.flash.len() - 3 && !self.flash_special {
             return u32::from_be_bytes([self.flash[a], self.flash[a + 1], self.flash[a + 2], self.flash[a + 3]]);
         }
-        let c = addr.wrapping_sub(CORAL_BASE) as usize;
+        let c = addr.wrapping_sub(self.coral_base) as usize;
         if c < coral::VRAM_SIZE - 3 {
             let v = &self.coral.vram;
             return u32::from_be_bytes([v[c], v[c + 1], v[c + 2], v[c + 3]]);
@@ -432,12 +566,12 @@ impl Bus for Board {
 
     #[inline(always)]
     fn write8(&mut self, addr: u32, v: u8) {
-        let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if o < RAM_SIZE {
+        let o = addr.wrapping_sub(self.ram_base) as usize;
+        if o < self.ram.len() {
             self.ram[o] = v;
             return;
         }
-        let c = addr.wrapping_sub(CORAL_BASE) as usize;
+        let c = addr.wrapping_sub(self.coral_base) as usize;
         if c < coral::VRAM_SIZE {
             self.coral.vram[c] = v;
             return;
@@ -447,12 +581,12 @@ impl Bus for Board {
 
     #[inline(always)]
     fn write16(&mut self, addr: u32, v: u16) {
-        let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if o < RAM_SIZE - 1 {
+        let o = addr.wrapping_sub(self.ram_base) as usize;
+        if o < self.ram.len() - 1 {
             self.ram[o..o + 2].copy_from_slice(&v.to_be_bytes());
             return;
         }
-        let c = addr.wrapping_sub(CORAL_BASE) as usize;
+        let c = addr.wrapping_sub(self.coral_base) as usize;
         if c < coral::VRAM_SIZE - 1 {
             self.coral.vram[c..c + 2].copy_from_slice(&v.to_be_bytes());
             return;
@@ -462,12 +596,12 @@ impl Bus for Board {
 
     #[inline(always)]
     fn write32(&mut self, addr: u32, v: u32) {
-        let o = addr.wrapping_sub(RAM_BASE) as usize;
-        if o < RAM_SIZE - 3 {
+        let o = addr.wrapping_sub(self.ram_base) as usize;
+        if o < self.ram.len() - 3 {
             self.ram[o..o + 4].copy_from_slice(&v.to_be_bytes());
             return;
         }
-        let c = addr.wrapping_sub(CORAL_BASE) as usize;
+        let c = addr.wrapping_sub(self.coral_base) as usize;
         if c < coral::VRAM_SIZE - 3 {
             self.coral.vram[c..c + 4].copy_from_slice(&v.to_be_bytes());
             return;

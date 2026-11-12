@@ -225,22 +225,23 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     let variants = fw::load_variants(&image)?;
     let v = variants.iter().find(|v| v.name == o.variant).ok_or_else(|| format!("no variant {} on this disc", o.variant))?;
     let ldm = v.module("LDM").ok_or("variant has no LDM module")?;
-    if let Some(bad) = v.modules.iter().find(|m| !rnse::board::Board::can_load(m.phys_addr(), m.size as usize)) {
-        return Err(format!(
-            "variant {} is built for a different memory map (module {} loads at {:#x}); only the V220 hardware is emulated so far",
-            v.name, bad.name, bad.load_addr
-        )
-        .into());
+    let model = rnse::board::Model::for_variant(&v.name).ok_or_else(|| format!("variant {} is for hardware this emulator does not know", v.name))?;
+    if let Some(bad) = v.modules.iter().find(|m| !model.can_load(m.phys_addr(), m.size as usize)) {
+        return Err(format!("module {} of variant {} loads at {:#x}, outside the {:?} memory map", bad.name, v.name, bad.load_addr, model).into());
     }
-    let mut m = Machine::new();
+    let mut m = Machine::for_model(model);
     let enable_logs = |m: &mut Machine| {
         if let Some(n) = o.io_log {
             m.board.log = rnse::iolog::IoLog::new(true, n);
             m.board.coral.log = rnse::iolog::IoLog::new(true, n);
-            m.board.atapi.log = rnse::iolog::IoLog::new(true, n);
-            m.board.can.log = rnse::iolog::IoLog::new(true, n);
+            m.atapi().log = rnse::iolog::IoLog::new(true, n);
+            m.can().log = rnse::iolog::IoLog::new(true, n);
             if o.onchip_log {
                 m.cpu.io.log = rnse::iolog::IoLog::new(true, n);
+            }
+            if let Some(navi) = m.cpu.io.navi.as_mut() {
+                // On the 193 nearly all hardware is on-chip.
+                navi.log = rnse::iolog::IoLog::new(true, n);
             }
         }
     };
@@ -254,17 +255,17 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     m.cpu.breakpoints = o.breaks.clone();
     m.cpu.breakpoints.extend(o.tracepoints.iter().copied());
     let printf = o.printf_hook.or_else(|| {
-        if loader || o.no_printf {
+        if o.no_printf {
             None
         } else {
-            v.module("OSM").and_then(|os| Machine::known_printf(&os.version))
+            v.module(if loader { "LDM" } else { "OSM" }).and_then(|m| Machine::known_printf(&m.version))
         }
     });
     if let Some(a) = printf {
         m.hook_printf(a);
     }
-    m.board.atapi.trace = o.trace_atapi;
-    m.board.can.trace = o.trace_can;
+    m.atapi().trace = o.trace_atapi;
+    m.can().trace = o.trace_can;
     m.board.coral.trace = o.trace_coral;
     m.board.coral.only_layer = o.only_layer;
     m.trace_serial = o.trace_serial;
@@ -274,7 +275,7 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     m.panel_present = !o.no_panel;
     m.panel_script = o.panel_script.clone();
     if !o.no_disc {
-        m.board.atapi.load(image.clone());
+        m.atapi().load(image.clone());
     }
     m.install_boot_stub(&v.name);
     m.trace_bios = o.trace_bios;
@@ -334,7 +335,7 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         }
         while shots.first().is_some_and(|(ms, _)| ms * per_ms <= m.cpu.cycles) {
             let (ms, path) = shots.remove(0);
-            let (w, h, rgb) = m.board.coral.render();
+            let (w, h, rgb) = m.render();
             std::fs::write(&path, rnse::png::encode_rgb(w, h, &rgb))?;
             eprintln!("screenshot at {} ms: {}", ms, path);
         }
@@ -373,7 +374,7 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         eprintln!("fault: {}", f);
     }
     eprint!("{}", m.cpu.dump());
-    eprint!("{}", m.board.coral.describe());
+    eprint!("{}", m.describe_display());
     {
         let io = &m.cpu.io;
         eprintln!(
@@ -387,7 +388,7 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     let irqs: Vec<String> = m.cpu.irq_counts.iter().enumerate().filter(|(_, &n)| n > 0).map(|(i, n)| format!("{:03x}:{}", i * 0x20, n)).collect();
     eprintln!("interrupts taken (INTEVT:count): {}", irqs.join(" "));
     {
-        let can = &m.board.can;
+        let can = &*m.can();
         let boxes: Vec<String> = can.mailboxes().iter().filter(|(_, id, _)| *id != 0).map(|(n, id, mode)| format!("{}:{:03x}{}", n, id, match mode { 0 => "t", 2 | 3 => "r", 7 => "-", _ => "?" })).collect();
         eprintln!("can: {} frames sent by the unit, {} delivered to it ({} matched no mailbox); mailboxes {}", can.tx_count, can.rx_count, can.rx_dropped, boxes.join(" "));
         let mut seen = std::collections::BTreeMap::new();
@@ -427,7 +428,7 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         eprintln!("peek {:08x}: {}", addr, bytes.join(" "));
     }
     if let Some(path) = &o.screenshot {
-        let (w, h, rgb) = m.board.coral.render();
+        let (w, h, rgb) = m.render();
         std::fs::write(path, rnse::png::encode_rgb(w, h, &rgb))?;
         eprintln!("screenshot: {} ({}x{})", path, w, h);
     }
@@ -479,8 +480,9 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let image = std::fs::read(path)?;
     let variants = fw::load_variants(&image)?;
     let v = variants.iter().find(|v| v.name == variant).ok_or_else(|| format!("no variant {} on this disc", variant))?;
-    if let Some(bad) = v.modules.iter().find(|m| !rnse::board::Board::can_load(m.phys_addr(), m.size as usize)) {
-        return Err(format!("variant {} is built for a different memory map (module {} loads at {:#x}); only the V220 hardware is emulated so far", v.name, bad.name, bad.load_addr).into());
+    let model = rnse::board::Model::for_variant(&v.name).ok_or_else(|| format!("variant {} is for hardware this emulator does not know", v.name))?;
+    if model != rnse::board::Model::Rnse192 {
+        return Err(format!("variant {} is for the 193 hardware, which cannot run in the browser front end yet; try `rnse loader --variant {}`", v.name, v.name).into());
     }
     let what = if loader { format!("{} update loader", v.name) } else { format!("{} software {}", v.name, v.version) };
 
@@ -489,7 +491,7 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         m.echo_console = false;
         m.install_boot_stub(&v.name);
         if disc {
-            m.board.atapi.load(image.clone());
+            m.atapi().load(image.clone());
         }
         if loader {
             m.start_loader(v.module("LDM").ok_or("variant has no LDM module")?, [0; 3]);
@@ -546,7 +548,7 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 UiEvent::Disc(present) => {
                     disc_in = present;
-                    m.board.atapi.insert(if present { Some(image.clone()) } else { None });
+                    m.atapi().insert(if present { Some(image.clone()) } else { None });
                     note = if present { "disc inserted".into() } else { "disc removed".into() };
                 }
                 UiEvent::Reset => {
@@ -574,7 +576,7 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Publish.
-        let (w, h, rgb) = m.board.coral.render();
+        let (w, h, rgb) = m.render();
         {
             let mut s = shared.lock().unwrap();
             if rgb != last_rgb || s.frame.is_empty() {

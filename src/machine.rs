@@ -63,8 +63,18 @@ impl Default for Machine {
 }
 
 impl Machine {
+    /// A 192 unit.
     pub fn new() -> Self {
-        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
+        Self::for_model(crate::board::Model::Rnse192)
+    }
+
+    pub fn for_model(model: crate::board::Model) -> Self {
+        let mut cpu = Cpu::new();
+        if model == crate::board::Model::Rnse193 {
+            cpu.io.navi = Some(Box::default());
+            cpu.io.intc.int2 = Some(Default::default());
+        }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -104,7 +114,8 @@ impl Machine {
         self.cpu.r[4] = args[0];
         self.cpu.r[5] = args[1];
         self.cpu.r[6] = args[2];
-        self.cpu.r[15] = 0x8dff_ff00;
+        // The 193's loader sets its own stack; the 192's uses this one.
+        self.cpu.r[15] = 0x8000_0000 + self.board.ram_base + self.board.ram.len() as u32 - 0x0200_0100;
         self.cpu.pr = 0;
     }
 
@@ -113,6 +124,10 @@ impl Machine {
     pub fn known_printf(os_version: &str) -> Option<u32> {
         match os_version {
             "V2200815" => Some(0x801e_b344),
+            // The 193's loaders format their log the same way and then
+            // drop it.
+            "V5740002" => Some(0x09e3_937a),
+            "vB480000" => Some(0x09e3_9372),
             _ => None,
         }
     }
@@ -172,6 +187,41 @@ impl Machine {
         };
         self.panel.knob(knob, delta);
         true
+    }
+
+    /// The CD/DVD drive, wherever this model has it.
+    pub fn atapi(&mut self) -> &mut crate::dev::atapi::Atapi {
+        match self.cpu.io.navi.as_mut() {
+            Some(navi) => &mut navi.atapi,
+            None => &mut self.board.atapi,
+        }
+    }
+
+    /// The CAN controller, wherever this model has it.
+    pub fn can(&mut self) -> &mut crate::dev::hcan::Hcan {
+        match self.cpu.io.navi.as_mut() {
+            Some(navi) => &mut navi.can,
+            None => &mut self.board.can,
+        }
+    }
+
+    /// The picture on the unit's screen: width, height, RGB888.
+    pub fn render(&self) -> (usize, usize, Vec<u8>) {
+        match self.cpu.io.navi.as_ref() {
+            Some(navi) => {
+                let (ram, base) = (&self.board.ram, self.board.ram_base);
+                navi.render(&|a| ram.get(a.wrapping_sub(base) as usize).copied().unwrap_or(0))
+            }
+            None => self.board.coral.render(),
+        }
+    }
+
+    /// Summary of the display hardware's state, for diagnostics.
+    pub fn describe_display(&self) -> String {
+        match self.cpu.io.navi.as_ref() {
+            Some(navi) => navi.describe(),
+            None => self.board.coral.describe(),
+        }
     }
 
     /// Exchange bytes with the faceplate controller.
@@ -244,12 +294,18 @@ impl Machine {
                 if *due <= now {
                     *due = now + *period;
                 }
-                self.board.can.receive(frame);
+                match self.cpu.io.navi.as_mut() {
+                    Some(navi) => navi.can.receive(frame),
+                    None => self.board.can.receive(frame),
+                };
                 any = true;
             }
         }
         if any {
             self.board.update_irl();
+            if let Some(navi) = self.cpu.io.navi.as_mut() {
+                navi.update_irqs(&mut self.cpu.io.intc);
+            }
         }
     }
 
@@ -269,7 +325,7 @@ impl Machine {
         self.cpu.io.intc.ipra = 0x7000;
         // Likewise the CAN controller: the OS sets up mailboxes and
         // handles interrupts but never takes the chip out of reset.
-        self.board.can.start();
+        self.can().start();
         self.boot_calls.clear();
         for (i, name) in ["init1", "init2", "start"].iter().enumerate() {
             self.boot_calls.push_back((format!("OSM {}", name), os.entries[i]));
@@ -399,7 +455,7 @@ impl Machine {
 
     /// Write a big-endian word to RAM through a P0/P1/P2 address.
     pub fn poke32(&mut self, addr: u32, v: u32) {
-        let o = (addr & 0x1fff_ffff).wrapping_sub(crate::board::RAM_BASE) as usize;
+        let o = (addr & 0x1fff_ffff).wrapping_sub(self.board.ram_base) as usize;
         if o + 4 <= self.board.ram.len() {
             self.board.ram[o..o + 4].copy_from_slice(&v.to_be_bytes());
         }
@@ -440,6 +496,20 @@ impl Machine {
             if self.cpu.cycles >= self.next_frame {
                 self.next_frame += self.frame_cycles;
                 self.board.vsync();
+                let watchdog_ms = 1500 * self.cycles_per_ms();
+                if let Some(navi) = self.cpu.io.navi.as_mut() {
+                    navi.vsync(&mut self.cpu.io.intc);
+                    // The external watchdog: once the firmware has
+                    // started strobing it, a pause this long resets the
+                    // unit.  (The update loader ends that way on purpose.)
+                    if navi.watchdog_strobe.is_some_and(|t| self.cpu.cycles - t > watchdog_ms) {
+                        navi.watchdog_strobe = None;
+                        eprintln!("[boot] the watchdog was not served: reset");
+                        self.reset_requested = true;
+                        self.cpu.fault = Some("reset requested".into());
+                        return Stop::Fault;
+                    }
+                }
                 self.board.step_display((self.frame_cycles / self.cycles_per_ms()) as u32);
             }
             if stop == Stop::Hypercall {
@@ -474,7 +544,7 @@ impl Machine {
     /// devices (RAM and flash only).
     pub fn peek8(&self, addr: u32) -> Option<u8> {
         let pa = addr & 0x1fff_ffff;
-        let o = pa.wrapping_sub(crate::board::RAM_BASE) as usize;
+        let o = pa.wrapping_sub(self.board.ram_base) as usize;
         if o < self.board.ram.len() {
             Some(self.board.ram[o])
         } else if (pa as usize) < self.board.flash.len() {
@@ -612,6 +682,9 @@ impl Machine {
         // companion chip; the SH-4's own SCIF is forwarded as well.
         let mut out: Vec<u8> = std::mem::take(&mut self.cpu.io.scif_tx);
         out.append(&mut self.board.uart[5].tx);
+        if let Some(navi) = self.cpu.io.navi.as_mut() {
+            out.append(&mut navi.console);
+        }
         if out.is_empty() {
             return;
         }

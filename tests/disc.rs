@@ -39,7 +39,7 @@ fn loader_installs_the_firmware() {
     let mut m = Machine::new();
     m.echo_console = false;
     m.install_boot_stub(&v.name);
-    m.board.atapi.load(image.clone());
+    m.atapi().load(image.clone());
     m.start_loader(ldm, [0; 3]);
     let stop = m.run(8_000_000_000);
     assert_eq!(stop, Stop::Fault, "the loader ends by jumping to the reset entry");
@@ -63,6 +63,42 @@ fn loader_installs_the_firmware() {
     assert_eq!(&m.board.flash[0xc000..0xc100], &direct.board.flash[0xc000..0xc100]);
 }
 
+/// The loaders of the 193-family variants: they finish by letting the
+/// watchdog reset the unit, having written every module and their own
+/// kind of module directory.
+#[test]
+fn loader_installs_the_firmware_193() {
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    for v in variants.iter().filter(|v| rnse::board::Model::for_variant(&v.name) == Some(rnse::board::Model::Rnse193)) {
+        let ldm = v.module("LDM").unwrap();
+        let mut m = Machine::for_model(rnse::board::Model::Rnse193);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.atapi().load(image.clone());
+        m.start_loader(ldm, [0; 3]);
+        m.hook_printf(Machine::known_printf(&ldm.version).expect("printf address of this loader"));
+        let stop = m.run(8_000_000_000);
+        assert_eq!(stop, Stop::Fault, "{}: the loader ends with a watchdog reset", v.name);
+        assert!(m.reset_requested, "{}: {:?}", v.name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console);
+        assert!(text.contains("[FINISH]"), "{} loader log:\n{}", v.name, text);
+        for module in &v.modules {
+            if module.kind == "LDR" {
+                continue;
+            }
+            let a = module.phys_addr() as usize;
+            let n = module.size as usize;
+            assert_eq!(&m.board.flash[a..a + n], &module.data[..n], "{}: module {} as written by the loader", v.name, module.name);
+        }
+        // The directory in front of the OS names the OS first.
+        let os = v.module("OSM").unwrap();
+        let dir = os.phys_addr() as usize - 0x200;
+        assert_eq!(&m.board.flash[dir..dir + 4], b".OS ");
+        assert_eq!(&m.board.flash[dir + 4..dir + 12], os.version.as_bytes());
+    }
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]
@@ -75,7 +111,7 @@ fn os_reaches_idle() {
     m.echo_console = false;
     m.install_boot_stub(&v.name);
     m.install(v, &index);
-    m.board.atapi.load(image.clone());
+    m.atapi().load(image.clone());
     m.start_os(v).unwrap();
     let stop = m.run(400_000_000);
     assert_eq!(stop, Stop::Budget, "{:?}", m.cpu.fault);
@@ -95,7 +131,7 @@ fn keys_reach_the_user_interface() {
     m.echo_console = false;
     m.install_boot_stub(&v.name);
     m.install(v, &index);
-    m.board.atapi.load(image.clone());
+    m.atapi().load(image.clone());
     m.start_os(v).unwrap();
     let printf = v.module("OSM").and_then(|os| Machine::known_printf(&os.version)).expect("printf address for this OS build");
     m.hook_printf(printf);
