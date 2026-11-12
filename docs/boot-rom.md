@@ -38,6 +38,8 @@ State the OS inherits:
 * TMU0 interrupt priority.  The OS programs and starts TMU0 for its 2 ms
   tick but only ever sets the *TMU2* field of IPRA.  The loader, which
   shares its hardware layer with the boot ROM, uses IPRA = 0x7000.
+* A running CAN controller.  The OS sets up its mailboxes but never
+  takes the controller out of its reset/halt state itself.
 
 ## Vector tables
 
@@ -70,6 +72,7 @@ Understood so far (all trap 0x3e):
 | 4 | pool | get the pool's memory break | Modules do `base = fn4(0); ...; fn5(0, base + size)` to claim their static RAM, |
 | 5 | pool, address | set the pool's memory break | and the OS starts by setting it to the end of its own data (0x8c19c84c). |
 | 6 | three out-pointers | start-up status | The OS clears all RAM when this returns 9. |
+| 0x13 | - | pointer to the software index block (SOFIDX, NAVVER, AUDVER) | The OS compares the radio processor's reported version with the AUDVER text found through it; the block sits in the module directory at flash 0xC01C. |
 
 Seen but not understood:
 

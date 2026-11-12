@@ -16,12 +16,12 @@ Work in progress.  What runs today, on the `V220` hardware variant:
 | | |
 |---|---|
 | Update loader (`LDM`) | Boots, shows its screens, reads the CD, erases and programs the flash and finishes the update, exactly as on the unit. |
-| Main software (`OSM` + applications) | Boots, switches on and draws its user interface through the graphics chip's drawing engine.  It currently stops at a "system software is being checked" notice: it is waiting for the radio/audio processor, which is not emulated, to report its version. |
-| Front end | `rnse ui` shows the unit's faceplate in a browser with the live screen, the firmware's debug log and controls for ignition and the disc.  The keys and knobs are click targets but are not connected to the emulated hardware yet. |
+| Main software (`OSM` + applications) | Boots into its user interface: radio, media, address book, telephone, navigation, info, car and set-up screens, menus and drop-down lists, drawn through the graphics chip's drawing engine.  The stand-ins for the car (ignition on the CAN bus), the radio processor and the faceplate are just enough for that; there is no tuner, sound, GPS or map behind the screens. |
+| Front end | `rnse ui` shows the unit's faceplate in a browser with the live screen.  Keys, soft keys and both knobs work (mouse, touch or keyboard); below are the firmware's debug log and switches for ignition and the disc. |
 | Other variants on the disc (`V574`, `VB48`) | Parsed and extractable; not bootable yet (different memory map). |
 
-Not done yet: front panel keys, the serial links to the radio and GPS
-processors, sound, the 3D half of the graphics chip, the SD card reader.
+Not done yet: the power button, opening the display, CD playback, the
+GPS and SD card processors, sound, the 3D half of the graphics chip.
 
 See [docs/hardware.md](docs/hardware.md) for what is known about the
 machine, [docs/firmware-format.md](docs/firmware-format.md) for the disc
@@ -72,7 +72,14 @@ What the main software says while it starts (shortened):
     [fw] MRADIO4 ON1
     [fw] [FP] DISP ON
     [fw] LAST_ON = TRUE!!
-    [fw] ROMID RETRY!!
+    [fw] init_dsp_pos = 2
+
+A scripted session, for example: wait for the radio screen, open the
+set-up menu, move two entries down, open the drop-down list.
+
+    rnse boot disc.iso --ignition --cycles 4000000000 \
+        --key SETUP@27000 --knob 1:2@29000 --key SELECT@30000 \
+        --screenshot menu.png
 
 Useful options while investigating (see `rnse` without arguments for the
 full list):
@@ -83,6 +90,12 @@ full list):
     --ignition         put the ignition status frame on the CAN bus
     --can ID:HEX[@MS]  send any other CAN frame periodically
     --trace-can        CAN frames in both directions
+    --trace-serial     the links to the radio processor and the faceplate
+    --key KEY@MS       press a faceplate key at a given time (ms)
+    --knob K:N@MS      turn a knob
+    --shot MS:FILE     screenshot at a given time
+    --peek ADDR,LEN    dump memory at the end
+    --trace-calls A:B  list the subroutines called in a time window
     --trace-coral      display lists sent to the graphics chip
     --surface ...      save an off-screen drawing surface as a PNG
     --trace-atapi      CD drive commands
@@ -101,7 +114,8 @@ runs the unit tests.  With a disc image available,
 
 additionally runs the whole update in the emulator and checks that the
 flash contents the loader produces are byte-for-byte the modules from the
-disc, and that the installed OS reaches its idle loop.
+disc, that the installed OS reaches its idle loop, and that it brings up
+its user interface and reacts to a faceplate key.
 
 The CPU core is also checked against QEMU with randomly generated
 programs:
@@ -118,7 +132,9 @@ written from the SH-4 manual instead (`src/sh4/tests.rs`).
 ## Layout
 
     src/sh4/        SH-4 CPU: interpreter, FPU, MMU, on-chip peripherals
-    src/dev/        devices: Coral graphics chip, ATAPI drive, flash, CAN
+    src/dev/        devices: Coral graphics chip, ATAPI drive, flash, CAN,
+                    serial channels, A/D converter, and stand-ins for
+                    the radio processor and the faceplate controller
     src/ui.rs       HTTP server for the browser front end
     assets/         the page and the faceplate picture it uses
     src/board.rs    memory map and interrupt routing of the main board

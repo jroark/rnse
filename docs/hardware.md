@@ -27,24 +27,36 @@ Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2
 | 0x07800000            | ATAPI drive, command block (register n at +2n+1, data at +0) | certain |
 | 0x07880000            | ATAPI drive, DMA data port | certain |
 | 0x07900000            | ATAPI drive, control block (alternate status at +0x0d) | certain |
-| 0x07aN0000            | serial channels, 16-bit registers (N = 1, 2, 3, 5, 6, a seen) | registers partly understood |
-| 0x07b00000            | interrupt priority and status registers | partly understood |
+| 0x07aN0000            | serial channels, 16-bit registers (N = 1, 2, 3, 5, 6, a seen) | 1, 3 and 5 identified, see below |
+| 0x07b00000            | interrupt priority and status registers | mostly understood |
 | 0x07b80000            | unknown (3 registers written at start-up) | - |
-| 0x07c00000            | CAN controller with the Renesas HCAN2 register layout (mailboxes from +0x100, 0x20 bytes each) | layout recognised, not emulated |
-| 0x07d80000, 0x07e00000 | unknown | - |
+| 0x07c00000            | CAN controller with the Renesas HCAN2 register layout (mailboxes from +0x100, 0x20 bytes each) | emulated as far as the OS uses it |
+| 0x07d00000, 0x07d80000 | A/D converter (results at +0..+6, control at +8) | certain |
+| 0x07e00000            | unknown | - |
 | 0x0c000000-0x0fffffff | SDRAM, 64 MiB | certain (loader heap ends at 0x8fffffff) |
 | 0x10000000-           | battery-backed SRAM for settings | likely (OS reads and writes it heavily; loader reads a "slot number" with complement check at +0, +1) |
-| 0x12300001            | watchdog strobe: bit 0 is toggled periodically | likely |
-| 0x12500001, 0x12600001, 0x12700001 | input ports | polled by the OS; bits unknown |
-| 0x12800001, 0x12900000, 0x12a00000-2, 0x12d00000-6 | output latches | bits unknown; 0x12d00001 is driven around CD DMA transfers |
+| 0x12N00000, 0x12N00001 | byte-wide ports, N = 3..a: direction register (1 = output) and data | see "Ports" |
+| 0x12d00000-6          | output latches | bits unknown; 0x12d00001 is driven around CD DMA transfers |
 | 0x16000000-0x16000020 | 32-bit control registers | unknown |
 | 0x18000000-0x19fbffff | Coral video memory | certain |
 | 0x19fc0000            | Coral host interface registers | certain |
 | 0x19fd0000            | Coral display controller registers | certain |
 | 0x19ff0000            | Coral drawing engine registers | by the chip's documentation; unused by the loader |
 
+### Ports
+
 The OS addresses its byte-wide ports through a table of eight (index 0-7
-= 0x1230.. 0x12a0, step 0x100000).
+= 0x1230.. 0x12a0, step 0x100000).  What is known of the bits:
+
+| port (data register) | bit | direction | meaning |
+|----------------------|-----|-----------|---------|
+| 0 (0x12300001) | 0 | out | watchdog strobe, toggled periodically |
+| 2 (0x12500001) | 4 | in  | supply voltage good.  Low for about six seconds and the OS masks all interrupts and waits for the watchdog to reset it |
+| 3 (0x12600001) | 4 | out | display motor, towards closed |
+| 3              | 3 | out | display motor, towards open |
+| 3              | 2 | in  | display position switch: low only when fully open |
+| 3              | 1 | in  | polled every tick, unknown |
+| 4 (0x12700001) | 7 | in  | polled every tick, unknown |
 
 ## Interrupts
 
@@ -67,13 +79,22 @@ Sources identified:
 |--------|-------------|-----------|------------|
 | ATAPI INTRQ | +0x00 bits 7:4 | - | 3 |
 | display vertical sync | +0x02 bits 11:8 | 6 | 14 |
+| Coral drawing engine | +0x02 bits 7:4 | - | 7 |
+| serial channel 1 (radio processor) | +0x08 bits 3:0 | - | 2 |
+| serial channel 3 (faceplate) | +0x08 bits 11:8 | - | 9 |
 | CAN | +0x12 bits 11:8 | - | 5 |
+| A/D converter | +0x12 bits 3:0 | - | 11 |
 
-The OS registers handlers for levels 1-3, 5-9 and 11-14 in total, so a
-dozen sources remain to be found.
+Several sources can share a level.  Their handlers then look at the
+32-bit status register at +0x18 to see who is asking: bit 14 = CAN, bit
+24 = serial channel 1.  (Bits 2, 13 and 29 are tested too; their sources
+are not identified.)
 
-On-chip sources in use: TMU0 (system tick), TMU2, DMAC channels 2, 3, 4
-and 7.
+The OS's table of interrupt handlers (vector = interrupt code / 0x20,
+level) is at 0x800328c4 in build V2200815.
+
+On-chip sources in use: TMU0 (system tick, level 7 inherited from the
+boot ROM), TMU2, DMAC channels 2, 3, 4 and 7.
 
 ## Display
 
@@ -92,8 +113,23 @@ firmware's own strings name it ("wait_coral_draw_begin").
   frame buffer at 0x110000, shown on the "BL" layer with the palette at
   +0x800) and keeps shadow copies of the display registers that its
   vertical-sync handler flushes to the chip.
-* The OS also builds display lists for the drawing engine; that part of
-  the chip is not emulated yet.
+* The OS draws with the chip's drawing engine.  It writes display lists
+  into video memory and starts them through the host interface (list
+  address, count, request); the engine's "done" interrupt paces it.  A
+  list is a sequence of 32-bit words, `type << 24 | command << 16 |
+  parameter` followed by operands.  The emulator implements the types
+  the firmware uses: register writes (0xF1, 0xC0, 0xCE), rectangle fill
+  (0x09, 0x41), lines (0x04/0x05, one packed vertex per command), blits
+  within and between surfaces (0x0D, 0x0F/0x1F), bitmap drawing (0x0B)
+  and the control words.  Triangle set-up (0x40-0x46) is skipped: the 3D
+  half of the chip is not emulated.
+* Six layers.  The OS runs them in the chip's extended mode: the order
+  comes from the layer select register (+0x180), each layer has a
+  transparent colour (+0x1a0 + 4n), and bit 0 of its extended mode
+  register (+0x110 + 0x10n) confines it to a window given by the four
+  registers that follow.  The user interface uses a 16 bpp layer for the
+  frame, titles and soft key labels and another, windowed to the middle
+  of the screen, for lists.
 
 ## CD/DVD drive
 
@@ -104,11 +140,96 @@ first byte of each pair is the high half of the word.
 
 ## Serial
 
-Each channel at 0x07aN0000 has 16-bit registers: +0 and +2 mode/baud,
-+4 control, +6 transmit data, +8 status (bit 9 = transmitter busy), +0xc
-control.  Channel 5 is the debug console: the loader's log comes out
-there (`rnse` prints it).  The others presumably serve GPS, the radio
-controller and diagnostics; the OS keeps channel 1 busy.
+Each channel at 0x07aN0000 has 16-bit registers:
+
+| offset | register |
+|--------|----------|
+| +0x00, +0x02 | mode, baud rate divisor |
+| +0x04 | control: 7 = TX interrupt enable, 6 = RX interrupt enable, 5 = transmitter on, 4 = receiver on, 2 = TX-end interrupt enable |
+| +0x06 | transmit data |
+| +0x08 | status: 9 = TX FIFO full, 8 = TX ready, 6 = RX data ready, 5..3 = receive errors (write 0 to clear), 2 = TX finished |
+| +0x0a | receive data |
+| +0x0c | FIFO control: 15 = reset RX FIFO, 7 = reset TX FIFO |
+
+Channel 5 is the debug console: the loader's log comes out there (`rnse`
+prints it).  Channel 1 goes to the radio processor, channel 3 to the
+faceplate.  The others presumably serve GPS and diagnostics.
+
+### Radio/audio processor (channel 1)
+
+A second processor handles tuner, amplifier and power.  The OS will not
+leave its "system software is being checked" notice until this
+processor has reported a software version that matches the `AUDVER`
+entry of the installed set.
+
+Frames: `start, command, length (16 bit, big-endian), data, checksum`
+with start = 0x01 from the unit and 0x00 from the radio, and the
+checksum the complement of the sum of everything before it.  The unit
+repeats an unanswered frame five times, 600 ms apart.  Command 0x0B
+asks for the version; the answer carries 16 bytes of which the first
+eight are the version text (`A2210141` for this disc).
+
+The emulator's stand-in answers 0x0B and acknowledges everything else
+with an empty frame of the same command, which is a guess: the proper
+replies to 0x80, 0x81, 0x17 and 0x19 are not known and the unit keeps
+retrying them.  The firmware also contains a second, FT1.2-style parser
+(`68 L L 68 ... CS 16`) for this processor's boot loader.
+
+### Faceplate (channel 3)
+
+Keys, the two rotary encoders and the lighting belong to a controller in
+the faceplate.  Protocol, key table and what is still unknown are
+described in [`src/dev/panel.rs`](../src/dev/panel.rs).  In short: frames
+are `command, L, data, sum` where L is the index of the last byte; each
+is answered with 0x15, or with 0x16 and a frame in return.  The
+controller announces itself with command 0x0F, after which the unit
+configures it (commands 0x02, 0x03, 0x0A, 0x09), sets the lighting (0x06,
+repeated while fading, and 0x07) and waits for key state (0x0C, six
+bytes, one bit per key) and encoder (0x0D) frames.
+
+The power button is not among the keys: it has to work while the main
+processor is off, so it presumably goes to the radio processor.
+
+## CAN
+
+The unit is a node on the car's infotainment CAN bus (100 kbit/s).  The
+controller is register-compatible with Renesas' HCAN2: mailbox n at
++0x100 + 0x20n holds the identifier (standard id << 4 in the first
+word), a control word (bits 10:8 = mailbox type, 0 transmit, 2/3
+receive; low nibble = length), eight data bytes at +8 and an acceptance
+mask at +0x10.
+
+Without the ignition lock status message the power manager (`PWM` in
+the debug log: `Now skon[0] Now Kl15[0]`) keeps the unit in standby.
+Identifier 0x271, first byte: bit 0 = key in the lock, bit 1 = ignition
+on.  (0x2C3 serves the same purpose for a second car type.)  The
+emulator sends it every 100 ms while its ignition switch is on.  The
+unit's own network management identifier is 0x436.
+
+## A/D converter and the fold-down display
+
+The display folds down on a motor to uncover the CD drive and the SD
+card slots.  Its position comes back through the A/D converter, a
+ten-bit, seven-input converter laid out like Hitachi's on-chip ones:
+results A-D left-justified at +0, +2, +4, +6, control/status at +8 (bit
+15 = done, written 0 to clear; 14 = interrupt enable; 13 = start; 2..0 =
+channel).  The OS converts inputs 0-3, then 4-6, on a timer, and
+averages eight samples of each (dropping the lowest and highest).
+
+Input 3 is the display position: at most 94 means fully open, at least
+894 closed (the OS prints `init_dsp_pos = 1` or `2` accordingly at
+start-up; 0 means somewhere in between).  The other inputs are not
+identified; they read 0 in the emulator.
+
+This matters more than it seems.  While the display is open the screen
+cannot be seen, so the OS shows only the media overview and turns every
+key press into a request to close the display.  An emulator that leaves
+the converter at 0 therefore gets a unit that ignores its keys.
+
+The motor is driven from port 3 (see "Ports"); the OS watches the
+position while it runs and stops when the reading no longer changes.
+The key that opens the display is honoured only once the CD drive's
+state is known to the OS, which is not the case in the emulator yet.
 
 ## Software structure
 
@@ -126,18 +247,18 @@ controller and diagnostics; the OS keeps channel 1 busy.
   output never reaches a port in this build; `rnse boot` intercepts the
   call and formats the message from the emulated stack.
 
-## What the OS is waiting for
+## Open ends
 
-Read from its debug messages after start-up:
-
-* `CAN_Pass_mzas() Error!!` and `Now skon[0] Now Kl15[0]`: the power
-  manager (`PWM`) wants the ignition lock status message from the car's
-  infotainment CAN bus.  With neither key contact nor ignition it runs
-  its standby and sleep timers instead of bringing the system up.
-* `ROMID RETRY!!`, repeated: something is asked for an identification
-  and does not answer (not traced yet).
+* The OS's view of the CD drive stays "unknown" (its 11-byte status
+  block at 0x8c0e9088 is never filled in), so the display-open key is
+  refused and a disc in the drive shows as "CD leer".
 * `SDCARD DSP0/1 BOOT ERROR`: the SD card reader's controllers are
   missing.
-* `SWM::*** FATAL_ERROR *** ... Adc_get_scrntype return ZERO`: the key
-  handling asks the application for the current screen type before
-  there is one; probably a consequence of the above.
+* The radio processor stand-in knows one command (see above); there is
+  no tuner, no sound and no power button.
+* Navigation stays at "Navigation wird initialisiert": no GPS receiver,
+  no map DVD.
+* The battery-backed SRAM starts empty, so the unit is uncoded
+  (`car_model = ffffffff`).
+* Interrupt status bits 2, 13 and 29, the ports' remaining bits and the
+  devices at 0x07b80000, 0x07e00000 and 0x16000000 are unidentified.
