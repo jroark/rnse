@@ -303,6 +303,10 @@ impl Cpu {
     pub(super) fn exec_fpu<B: Bus>(&mut self, bus: &mut B, op: u16) -> R {
         let n = ((op >> 8) & 0xf) as usize;
         let m = ((op >> 4) & 0xf) as usize;
+        if op == 0xfffd && self.hypercalls_enabled {
+            self.hypercall = Some(self.insn_pc);
+            return Ok(());
+        }
         self.fpu_check()?;
         let pr = self.fpscr & FPSCR_PR != 0;
         let sz = self.fpscr & FPSCR_SZ != 0;

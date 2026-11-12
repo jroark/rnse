@@ -12,7 +12,9 @@
 //! | 0x07b0_0000               | 1  | interrupt priority registers         |
 //! | 0x07c0_0000               | 1  | CAN controller (HCAN2 register map)  |
 //! | 0x0c00_0000 - 0x0fff_ffff | 3  | SDRAM                                |
-//! | 0x1000_0000 - 0x13ff_ffff | 4  | peripherals (not identified yet)     |
+//! | 0x1000_0000 - 0x100f_ffff | 4  | battery-backed SRAM (settings)       |
+//! | 0x1230_0001               | 4  | watchdog strobe (bit 0 toggled)      |
+//! | 0x12xx_xxxx               | 4  | further byte-wide control latches    |
 //! | 0x1400_0000 - 0x17ff_ffff | 5  | peripherals (not identified yet)     |
 //! | 0x1800_0000 - 0x1bff_ffff | 6  | Fujitsu Coral graphics controller    |
 //!
@@ -30,6 +32,8 @@ pub const FLASH_SIZE: usize = 0x0200_0000;
 pub const RAM_BASE: u32 = 0x0c00_0000;
 pub const RAM_SIZE: usize = 0x0400_0000;
 pub const CORAL_BASE: u32 = 0x1800_0000;
+pub const NVRAM_BASE: u32 = 0x1000_0000;
+pub const NVRAM_SIZE: usize = 0x0010_0000;
 
 pub struct Board {
     pub flash: Vec<u8>,
@@ -37,6 +41,9 @@ pub struct Board {
     /// Set while the flash is not in read-array mode.
     flash_special: bool,
     pub ram: Vec<u8>,
+    /// Battery-backed SRAM holding settings; survives power-off on the
+    /// real unit, so front ends may want to save and restore it.
+    pub nvram: Vec<u8>,
     /// Backing store for address space without a device model.
     pub unmapped: HashMap<u32, Box<[u8; 4096]>>,
     pub coral: Coral,
@@ -44,6 +51,10 @@ pub struct Board {
     /// Bytes transmitted on the companion chip's serial channels,
     /// indexed by the channel digit of its address (0x07aN_0000).
     pub uart_tx: [Vec<u8>; 16],
+    /// Levels on the byte-wide input ports at 0x1250_0001, 0x1260_0001
+    /// and 0x1270_0001 (indices 2, 3, 4 of the firmware's port table).
+    /// What the individual bits mean is not known yet.
+    pub gpio_in: [u8; 8],
     pub log: IoLog,
     pub pc: u32,
     pub irl: u8,
@@ -62,10 +73,12 @@ impl Board {
             flash_ctl: Flash::new(),
             flash_special: false,
             ram: vec![0; RAM_SIZE],
+            nvram: vec![0; NVRAM_SIZE],
             unmapped: HashMap::new(),
             coral: Coral::new(),
             atapi: Atapi::new(),
             uart_tx: Default::default(),
+            gpio_in: [0; 8],
             log: IoLog::new(false, 4),
             pc: 0,
             irl: 0,
@@ -165,6 +178,19 @@ impl Board {
             return self.coral.read(addr - CORAL_BASE, size, self.pc);
         }
         match addr & 0xfff0_0000 {
+            0x1250_0000 | 0x1260_0000 | 0x1270_0000 => {
+                let v = self.gpio_in[((addr >> 20) & 7) as usize - 3] as u32;
+                self.log.log("gpio", false, addr, size, v, self.pc);
+                return v;
+            }
+            NVRAM_BASE => {
+                let o = (addr - NVRAM_BASE) as usize;
+                let mut v = 0;
+                for i in 0..size as usize {
+                    v = (v << 8) | self.nvram[(o + i) & (NVRAM_SIZE - 1)] as u32;
+                }
+                return v;
+            }
             0x0780_0000 if addr & 0x8_0000 != 0 => return self.atapi.dma_read(size),
             0x0780_0000 => return self.atapi.read((addr & 0x1f) >> 1, size, self.pc),
             0x0790_0000 => return self.atapi.read(8, size, self.pc),
@@ -186,6 +212,13 @@ impl Board {
             return;
         }
         match addr & 0xfff0_0000 {
+            NVRAM_BASE => {
+                let o = (addr - NVRAM_BASE) as usize;
+                for i in 0..size as usize {
+                    self.nvram[(o + i) & (NVRAM_SIZE - 1)] = (v >> ((size as usize - 1 - i) * 8)) as u8;
+                }
+                return;
+            }
             0x0780_0000 => return self.atapi.write((addr & 0x1f) >> 1, size, v, self.pc),
             0x0790_0000 => return self.atapi.write(8, size, v, self.pc),
             _ => {}

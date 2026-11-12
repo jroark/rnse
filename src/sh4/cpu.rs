@@ -72,6 +72,10 @@ pub enum Stop {
     /// The CPU took an exception while SR.BL was set, or hit another
     /// unrecoverable condition.  Real hardware would reset.
     Fault,
+    /// The reserved opcode 0xFFFD was executed while hypercalls are
+    /// enabled; `Cpu::hypercall` holds its address.  Used by high-level
+    /// emulation of code that is not available (the boot ROM).
+    Hypercall,
 }
 
 pub struct Cpu {
@@ -111,6 +115,11 @@ pub struct Cpu {
     pub pc_hist: Vec<u32>,
     pub pc_hist_pos: usize,
     pub trace_exceptions: bool,
+    /// Interrupts accepted per INTEVT code / 0x20, for statistics.
+    pub irq_counts: [u64; 128],
+    pub hypercalls_enabled: bool,
+    /// Address of the hypercall instruction that stopped execution.
+    pub hypercall: Option<u32>,
 }
 
 impl Default for Cpu {
@@ -150,6 +159,9 @@ impl Cpu {
             pc_hist: vec![0; 256],
             pc_hist_pos: 0,
             trace_exceptions: false,
+            irq_counts: [0; 128],
+            hypercalls_enabled: false,
+            hypercall: None,
         };
         c.reset();
         c
@@ -211,6 +223,16 @@ impl Cpu {
             a.swap_with_slice(b);
         }
         self.fpscr = val;
+    }
+
+    /// R0-R7 of bank 0 (what non-exception code sees), whichever bank
+    /// is selected right now.
+    pub fn bank0(&mut self) -> &mut [u32] {
+        if Self::bank1(self.sr) {
+            &mut self.r_bank[..]
+        } else {
+            &mut self.r[..8]
+        }
     }
 
     /// Value of Rn_BANK (the non-selected bank) register.
@@ -442,6 +464,7 @@ impl Cpu {
     fn accept_interrupt(&mut self) {
         let (_, code) = self.io.intc.best();
         self.io.intevt = code;
+        self.irq_counts[((code >> 5) & 127) as usize] += 1;
         self.spc = self.pc;
         self.ssr = self.sr;
         self.sgr = self.r[15];
@@ -522,6 +545,9 @@ impl Cpu {
                 }
                 if self.fault.is_some() {
                     return Stop::Fault;
+                }
+                if self.hypercall.is_some() {
+                    return Stop::Hypercall;
                 }
                 if check_bp && self.breakpoints.contains(&self.pc) {
                     return Stop::Breakpoint;

@@ -1,8 +1,10 @@
 //! Ties the CPU and the board together and knows how to start firmware.
 
 use crate::board::Board;
-use crate::fw::{Module, Variant};
+use crate::bootrom::{self, Hook};
+use crate::fw::{IndexInfo, Module, Variant};
 use crate::sh4::cpu::Stop;
+use std::collections::{BTreeMap, VecDeque};
 use crate::sh4::{Cpu, SR_BL, SR_MD};
 
 pub struct Machine {
@@ -14,6 +16,15 @@ pub struct Machine {
     /// CPU cycles per display frame.
     pub frame_cycles: u64,
     next_frame: u64,
+    /// Module entry points still to be called by the boot stand-in.
+    boot_calls: VecDeque<(String, u32)>,
+    /// Set when the firmware asked for a restart.
+    pub reset_requested: bool,
+    pub trace_bios: bool,
+    /// Number of calls seen per boot ROM service (trap, function code).
+    pub bios_calls: BTreeMap<(u8, u32), u64>,
+    /// Memory break of the two pools managed by boot ROM services 4/5.
+    pub bios_break: [u32; 2],
 }
 
 impl Default for Machine {
@@ -24,36 +35,28 @@ impl Default for Machine {
 
 impl Machine {
     pub fn new() -> Self {
-        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000 }
+        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2] }
     }
 
     /// Place every module of a variant at its load address, the way the
     /// update loader leaves the flash.
-    pub fn install(&mut self, v: &Variant) {
+    pub fn install(&mut self, v: &Variant, index: &IndexInfo) {
         for m in &v.modules {
             if m.kind != "LDR" {
                 self.board.load(m.phys_addr(), &m.data[..m.size as usize]);
             }
         }
+        if let Some(os) = v.module("OSM") {
+            // The module directory sits in the 256 bytes below the OS.
+            let dir = crate::fw::module_directory(v, index);
+            self.board.load(os.phys_addr() - 0x100, &dir);
+        }
     }
 
-    /// Write the parts of the boot ROM that other software looks at.
-    ///
-    /// The real boot block (flash 0x0000-0xc0ff on V220 hardware) is not
-    /// part of an update disc.  What is known about it comes from how the
-    /// modules on the disc use it:
-    ///
-    /// * 0x0400 holds a module header like the ones in `fw.rs`; the
-    ///   loader reads the four characters at 0x0406 as the hardware's
-    ///   project code and only installs software sets with that name.
+    /// Write the boot ROM stand-in (see `bootrom.rs`).
     pub fn install_boot_stub(&mut self, project: &str) {
-        let mut hdr = [0u8; 0x80];
-        hdr[..6].copy_from_slice(b".BOT\r\n");
-        hdr[6..10].copy_from_slice(&project.as_bytes()[..4]);
-        hdr[10..14].copy_from_slice(b"0000");
-        hdr[14..16].copy_from_slice(b"\r\n");
-        hdr[0x30..0x3f].copy_from_slice(b"rnse emulator  ");
-        self.board.load(0x400, &hdr);
+        bootrom::install(&mut self.board, project);
+        self.cpu.hypercalls_enabled = true;
     }
 
     /// Start the update loader (LDM) the way the boot ROM does after it
@@ -70,6 +73,151 @@ impl Machine {
         self.cpu.r[6] = args[2];
         self.cpu.r[15] = 0x8dff_ff00;
         self.cpu.pr = 0;
+    }
+
+    /// Start the installed firmware the way the boot ROM does: call the
+    /// OS module's entry points in order (init 1, init 2, start).  The
+    /// last one does not return; it dispatches the first task.
+    pub fn start_os(&mut self, v: &Variant) -> Result<(), String> {
+        let os = v.module("OSM").ok_or("variant has no OSM module")?;
+        self.cpu.reset();
+        self.cpu.set_sr(SR_MD | 0xf0);
+        self.cpu.vbr = 0x8000_0000 | bootrom::VBR;
+        self.cpu.r[15] = 0x8fff_ff00;
+        // The OS starts TMU0 for its 2 ms tick but never gives the timer an
+        // interrupt priority, so it relies on the boot ROM having done
+        // that.  The loader, which shares the boot ROM's hardware layer,
+        // uses level 7 (IPRA = 0x7000).
+        self.cpu.io.intc.ipra = 0x7000;
+        self.boot_calls.clear();
+        for (i, name) in ["init1", "init2", "start"].iter().enumerate() {
+            self.boot_calls.push_back((format!("OSM {}", name), os.entries[i]));
+        }
+        self.next_boot_call();
+        Ok(())
+    }
+
+    fn next_boot_call(&mut self) {
+        match self.boot_calls.pop_front() {
+            Some((name, addr)) => {
+                eprintln!("[boot] calling {} at {:08x}", name, addr);
+                self.cpu.pc = addr;
+                self.cpu.pr = 0x8000_0000 | bootrom::CALL_RETURN;
+            }
+            None => {
+                self.cpu.fault = Some("boot sequence ran off its end".into());
+            }
+        }
+    }
+
+    /// Service a hypercall.  Returns false if execution cannot continue.
+    fn hypercall(&mut self) -> bool {
+        let Some(pc) = self.cpu.hypercall.take() else { return true };
+        match bootrom::classify(pc) {
+            Some(Hook::CallReturn) => {
+                eprintln!("[boot] returned r0={:08x}", self.cpu.r[0]);
+                self.next_boot_call();
+            }
+            Some(Hook::Reset) => {
+                eprintln!("[boot] firmware jumped to the reset entry");
+                self.reset_requested = true;
+                self.cpu.fault = Some("reset requested".into());
+            }
+            Some(Hook::Trap(n)) => {
+                // Reached through a trap dispatcher as an ordinary function:
+                // function code in r0, arguments in r4-r7, result in r0.
+                // The OS dispatcher pushed SPC, SSR and PR of the caller.
+                let sp = self.cpu.r[15];
+                let caller = self.peek32(sp.wrapping_add(8)).unwrap_or(0);
+                self.bios_trap(n, caller);
+            }
+            Some(Hook::Exception) => {
+                // The boot ROM's own vector base is still active.
+                let code = self.cpu.io.expevt;
+                if code == 0x160 {
+                    let n = (self.cpu.io.tra >> 2) as u8;
+                    let caller = self.cpu.pr;
+                    self.bios_trap(n, caller);
+                    // Return from the exception.
+                    let (ssr, spc) = (self.cpu.ssr, self.cpu.spc);
+                    self.cpu.set_sr(ssr);
+                    self.cpu.pc = spc;
+                } else {
+                    self.cpu.fault = Some(format!("exception {:03x} at {:08x} before the OS installed its handlers", code, self.cpu.spc));
+                }
+            }
+            Some(Hook::Interrupt) => {
+                self.cpu.fault = Some(format!("interrupt {:03x} before the OS installed its handlers", self.cpu.io.intevt));
+            }
+            Some(Hook::Unhandled) => {
+                self.cpu.fault = Some(format!(
+                    "unhandled exception: EXPEVT={:03x} INTEVT={:03x} SPC={:08x} TEA={:08x}",
+                    self.cpu.io.expevt, self.cpu.io.intevt, self.cpu.spc, self.cpu.mmu.tea
+                ));
+            }
+            None => {
+                self.cpu.fault = Some(format!("stray hypercall opcode at {:08x}", pc));
+            }
+        }
+        self.cpu.fault.is_none()
+    }
+
+    /// Boot ROM system services (`TRAPA #0x3d..0x3f`, function code in
+    /// r0).  The ones identified so far, all on trap 0x3e:
+    ///
+    /// | fn | arguments            | meaning                                  |
+    /// |----|----------------------|------------------------------------------|
+    /// | 1  | component number     | pointer to its version string ("V220...")|
+    /// | 4  | pool                 | return the pool's memory break           |
+    /// | 5  | pool, address        | set the pool's memory break              |
+    /// | 6  | three out-pointers   | start-up status; 9 = cold start          |
+    ///
+    /// Modules claim their static RAM with 4 and 5 (`base = get(); ...;
+    /// set(base + size)`), the OS first sets the break to the end of its
+    /// own data.  After a cold start the OS clears RAM from 0x8c00_0000
+    /// to 0x8fc8_0000, which is why the boot stack lives above that.
+    ///
+    /// Anything else is logged and answered with 0.
+    fn bios_trap(&mut self, n: u8, caller: u32) {
+        let regs: Vec<u32> = self.cpu.bank0().to_vec();
+        let code = regs[0];
+        let count = self.bios_calls.entry((n, code)).or_insert(0);
+        *count += 1;
+        let shown = *count <= 8;
+        let last = *count == 8;
+        let ret = match (n, code) {
+            (0x3e, 4) => self.bios_break[(regs[4] & 1) as usize],
+            (0x3e, 5) => {
+                self.bios_break[(regs[4] & 1) as usize] = regs[5];
+                0
+            }
+            // Version string of a boot component; the application checks
+            // the first three characters for other hardware projects.
+            (0x3e, 1) => 0x8000_0406,
+            (0x3e, 6) => {
+                for p in [regs[4], regs[5], regs[6]] {
+                    self.poke32(p, 0);
+                }
+                9
+            }
+            _ => 0,
+        };
+        if self.trace_bios && shown {
+            eprintln!(
+                "[bios] trap {:02x} fn {:04x} (r4={:08x} r5={:08x} r6={:08x} r7={:08x}) caller {:08x} -> {:08x}{}",
+                n, code, regs[4], regs[5], regs[6], regs[7], caller, ret,
+                if last { "  (further calls not shown)" } else { "" }
+            );
+        }
+        self.cpu.bank0()[0] = ret;
+    }
+
+    /// Write a big-endian word to RAM through a P0/P1/P2 address.
+    pub fn poke32(&mut self, addr: u32, v: u32) {
+        let o = (addr & 0x1fff_ffff).wrapping_sub(crate::board::RAM_BASE) as usize;
+        if o + 4 <= self.board.ram.len() {
+            self.board.ram[o..o + 4].copy_from_slice(&v.to_be_bytes());
+        }
     }
 
     /// Run for `cycles` CPU cycles, forwarding serial output.
@@ -89,7 +237,11 @@ impl Machine {
                 self.next_frame += self.frame_cycles;
                 self.board.vsync();
             }
-            if stop != Stop::Budget {
+            if stop == Stop::Hypercall {
+                if !self.hypercall() {
+                    return Stop::Fault;
+                }
+            } else if stop != Stop::Budget {
                 return stop;
             }
             left -= slice;

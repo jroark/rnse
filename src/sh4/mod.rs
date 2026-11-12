@@ -9,6 +9,8 @@ mod fpu;
 mod interp;
 pub mod mmu;
 pub mod onchip;
+#[cfg(test)]
+mod tests;
 
 pub use cpu::{Cpu, Exc, ExcKind};
 pub use onchip::{Irq, OnChip};

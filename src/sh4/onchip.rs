@@ -376,8 +376,10 @@ impl OnChip {
     }
 
     fn rtc_period(&self) -> u64 {
-        // One emulated second.  Pclk is assumed to be 33.33 MHz.
-        self.pclk_div * 33_333_333
+        // One emulated second.  The firmware's timer settings imply a
+        // peripheral clock of 29.4 MHz (TMU0 reload 14699 at Pclk/4 for
+        // its 2 ms tick).
+        self.pclk_div * 29_400_000
     }
 
     /// Called by the CPU when `cycles >= next_event`.

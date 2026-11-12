@@ -4,7 +4,7 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --trace-exc        log every exception and interrupt\n  --trace-atapi      log CD drive commands\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
     );
     std::process::exit(2);
 }
@@ -17,7 +17,8 @@ fn main() {
     let res = match args[0].as_str() {
         "info" if args.len() == 2 => info(&args[1]),
         "extract" if args.len() == 3 => extract(&args[1], &args[2]),
-        "loader" if args.len() >= 2 => loader(&args[1], &args[2..]),
+        "loader" if args.len() >= 2 => run(&args[1], &args[2..], true),
+        "boot" if args.len() >= 2 => run(&args[1], &args[2..], false),
         _ => usage(),
     };
     if let Err(e) = res {
@@ -80,10 +81,15 @@ struct Opts {
     trace_atapi: bool,
     no_disc: bool,
     tracepoints: Vec<u32>,
+    save_flash: Option<String>,
+    flash: Option<String>,
+    trace_bios: bool,
+    log_after: u64,
+    gpio: Vec<(usize, u8)>,
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
-    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![] };
+    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![] };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| -> Result<&String, Box<dyn std::error::Error>> {
@@ -101,9 +107,18 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
                 }
             }
             "--onchip-log" => o.onchip_log = true,
+            "--gpio" => {
+                let v = next(&mut i)?;
+                let (p, val) = v.split_once('=').ok_or("--gpio wants PORT=HEX")?;
+                o.gpio.push((p.parse()?, u8::from_str_radix(val, 16)?));
+            }
+            "--log-after" => o.log_after = next(&mut i)?.replace('_', "").parse()?,
             "--trace-atapi" => o.trace_atapi = true,
             "--no-disc" => o.no_disc = true,
             "--screenshot" => o.screenshot = Some(next(&mut i)?.clone()),
+            "--flash" => o.flash = Some(next(&mut i)?.clone()),
+            "--trace-bios" => o.trace_bios = true,
+            "--save-flash" => o.save_flash = Some(next(&mut i)?.clone()),
             "--trace-exc" => o.trace_exc = true,
             "--tp" => o.tracepoints.push(u32::from_str_radix(next(&mut i)?.trim_start_matches("0x"), 16)?),
             "--break" => o.breaks.push(u32::from_str_radix(next(&mut i)?.trim_start_matches("0x"), 16)?),
@@ -120,20 +135,28 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
     Ok(o)
 }
 
-fn loader(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::error::Error>> {
     let o = parse_opts(rest)?;
     let image = std::fs::read(path)?;
     let variants = fw::load_variants(&image)?;
     let v = variants.iter().find(|v| v.name == o.variant).ok_or_else(|| format!("no variant {} on this disc", o.variant))?;
     let ldm = v.module("LDM").ok_or("variant has no LDM module")?;
     let mut m = Machine::new();
-    if let Some(n) = o.io_log {
-        m.board.log = rnse::iolog::IoLog::new(true, n);
-        m.board.coral.log = rnse::iolog::IoLog::new(true, n);
-        m.board.atapi.log = rnse::iolog::IoLog::new(true, n);
-        if o.onchip_log {
-            m.cpu.io.log = rnse::iolog::IoLog::new(true, n);
+    let enable_logs = |m: &mut Machine| {
+        if let Some(n) = o.io_log {
+            m.board.log = rnse::iolog::IoLog::new(true, n);
+            m.board.coral.log = rnse::iolog::IoLog::new(true, n);
+            m.board.atapi.log = rnse::iolog::IoLog::new(true, n);
+            if o.onchip_log {
+                m.cpu.io.log = rnse::iolog::IoLog::new(true, n);
+            }
         }
+    };
+    if o.log_after == 0 {
+        enable_logs(&mut m);
+    }
+    for (p, v) in &o.gpio {
+        m.board.gpio_in[p & 7] = *v;
     }
     m.cpu.trace_exceptions = o.trace_exc;
     m.cpu.breakpoints = o.breaks.clone();
@@ -143,9 +166,30 @@ fn loader(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>>
         m.board.atapi.load(image.clone());
     }
     m.install_boot_stub(&v.name);
-    m.start_loader(ldm, o.args);
+    m.trace_bios = o.trace_bios;
+    if loader {
+        m.start_loader(ldm, o.args);
+    } else {
+        if let Some(path) = &o.flash {
+            let img = std::fs::read(path)?;
+            let n = img.len().min(m.board.flash.len());
+            m.board.flash[..n].copy_from_slice(&img[..n]);
+            m.install_boot_stub(&v.name);
+        } else {
+            let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap_or_default();
+            m.install(v, &index);
+        }
+        m.start_os(v)?;
+    }
     let end = m.cpu.cycles + o.cycles;
     let mut stop;
+    if o.log_after > 0 {
+        let stop = m.run(o.log_after.min(o.cycles));
+        if stop == Stop::Budget {
+            eprintln!("--- device log starts at cycle {}", m.cpu.cycles);
+            enable_logs(&mut m);
+        }
+    }
     loop {
         stop = m.run(end.saturating_sub(m.cpu.cycles).max(1));
         if stop == Stop::Breakpoint && o.tracepoints.contains(&m.cpu.pc) {
@@ -176,6 +220,37 @@ fn loader(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>>
     }
     eprint!("{}", m.cpu.dump());
     eprint!("{}", m.board.coral.describe());
+    {
+        let io = &m.cpu.io;
+        eprintln!(
+            "intc: ICR={:04x} IPRA={:04x} IPRB={:04x} IPRC={:04x} IPRD={:04x} pending={:08x} irl={} level={}",
+            io.intc.icr, io.intc.ipra, io.intc.iprb, io.intc.iprc, io.intc.iprd, io.intc.pending, io.intc.irl, io.intc.level
+        );
+        for (i, t) in io.tmu.iter().enumerate() {
+            eprintln!("tmu{}: running={} TCOR={:08x} TCNT={:08x} TCR={:04x}", i, t.running, t.tcor, t.tcnt, t.tcr);
+        }
+    }
+    let irqs: Vec<String> = m.cpu.irq_counts.iter().enumerate().filter(|(_, &n)| n > 0).map(|(i, n)| format!("{:03x}:{}", i * 0x20, n)).collect();
+    eprintln!("interrupts taken (INTEVT:count): {}", irqs.join(" "));
+    for (i, tx) in m.board.uart_tx.iter().enumerate() {
+        if !tx.is_empty() {
+            let shown: Vec<String> = tx.iter().take(24).map(|b| format!("{:02x}", b)).collect();
+            eprintln!("serial channel {}: {} bytes sent: {}{}", i, tx.len(), shown.join(" "), if tx.len() > 24 { " ..." } else { "" });
+        }
+    }
+    if !m.cpu.io.sci_tx.is_empty() {
+        eprintln!("SCI: {} bytes sent", m.cpu.io.sci_tx.len());
+    }
+    if !m.bios_calls.is_empty() {
+        eprintln!("boot ROM services called:");
+        for ((n, code), count) in &m.bios_calls {
+            eprintln!("  trap {:02x} fn {:04x}: {} calls", n, code, count);
+        }
+    }
+    if let Some(path) = &o.save_flash {
+        std::fs::write(path, &m.board.flash)?;
+        eprintln!("flash image: {} ({} sectors erased, {} words programmed)", path, m.board.flash_ctl.erased_sectors, m.board.flash_ctl.programmed_words);
+    }
     if let Some(path) = &o.screenshot {
         let (w, h, rgb) = m.board.coral.render();
         std::fs::write(path, rnse::png::encode_rgb(w, h, &rgb))?;

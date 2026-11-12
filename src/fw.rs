@@ -295,6 +295,87 @@ pub fn parse_kwi(d: &[u8]) -> Result<Vec<Variant>, FwError> {
     Ok(out)
 }
 
+/// Values from the `INDEX.TXT` file that accompanies a variant on the
+/// disc (`KEY:value$` lines).
+#[derive(Clone, Debug, Default)]
+pub struct IndexInfo {
+    pub sofidx: String,
+    pub navver: String,
+    pub audver: String,
+}
+
+impl IndexInfo {
+    pub fn parse(text: &[u8]) -> IndexInfo {
+        let mut info = IndexInfo::default();
+        for line in String::from_utf8_lossy(text).lines() {
+            let line = line.trim_end_matches('$');
+            if let Some((k, v)) = line.split_once(':') {
+                match k {
+                    "SOFIDX" => info.sofidx = v.to_string(),
+                    "NAVVER" => info.navver = v.to_string(),
+                    "AUDVER" => info.audver = v.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        info
+    }
+
+    /// The index file for a variant: `INDEX.TXT` for the first one on the
+    /// disc, `<xxx>INDEX.TXT` (variant name without the V) for others.
+    pub fn from_disc(image: &[u8], variant: &str) -> Option<IndexInfo> {
+        let iso = Iso::new(image).ok()?;
+        let named = format!("{}INDEX.TXT", &variant[1..]);
+        iso.file(&named).or_else(|| iso.file("INDEX.TXT")).map(IndexInfo::parse)
+    }
+}
+
+/// Build the 256 byte module directory the update loader writes to flash
+/// just below the OS module once everything is installed.  The OS walks
+/// it at start-up to find and initialise the other modules.
+///
+/// ```text
+/// 0x00  ".OS "  version[8]  address          the OS module
+/// 0x10  project code "00", ' ', software version "0815"
+/// 0x1c  SOFIDX "0650"
+/// 0x20  NAVVER[8]  AUDVER[8]
+/// 0x30  ".IDX"
+/// 0x5c  number of further modules
+/// 0x60  tag[4] version[8] address            one per module
+/// ```
+pub fn module_directory(v: &Variant, index: &IndexInfo) -> [u8; 0x100] {
+    let mut d = [0u8; 0x100];
+    fn put(d: &mut [u8], off: usize, s: &[u8], max: usize) {
+        let n = s.len().min(max);
+        d[off..off + n].copy_from_slice(&s[..n]);
+    }
+    fn entry(d: &mut [u8], off: usize, m: &Module) {
+        d[off] = b'.';
+        put(d, off + 1, format!("{:<3}", m.kind).as_bytes(), 3);
+        put(d, off + 4, m.version.as_bytes(), 8);
+        d[off + 12..off + 16].copy_from_slice(&m.load_addr.to_be_bytes());
+    }
+    if let Some(os) = v.module("OSM") {
+        entry(&mut d, 0, os);
+    }
+    put(&mut d, 0x10, format!("00 {}", v.version).as_bytes(), 8);
+    put(&mut d, 0x1c, index.sofidx.as_bytes(), 4);
+    put(&mut d, 0x20, index.navver.as_bytes(), 8);
+    put(&mut d, 0x28, index.audver.as_bytes(), 8);
+    put(&mut d, 0x30, b".IDX", 4);
+    // The loader registers modules in this fixed order.
+    let order = ["APM", "APFM", "AUM", "DIG", "FONT", "VRM"];
+    let mut n = 0u32;
+    for name in order {
+        if let Some(m) = v.module(name) {
+            entry(&mut d, 0x60 + n as usize * 16, m);
+            n += 1;
+        }
+    }
+    d[0x5c..0x60].copy_from_slice(&n.to_be_bytes());
+    d
+}
+
 /// Load the variants from either an ISO image of the update disc or a
 /// bare `LOADING.KWI` file.
 pub fn load_variants(image: &[u8]) -> Result<Vec<Variant>, FwError> {
@@ -304,5 +385,97 @@ pub fn load_variants(image: &[u8]) -> Result<Vec<Variant>, FwError> {
         parse_kwi(kwi)
     } else {
         parse_kwi(image)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_module(tag: &[u8; 4], version: &[u8; 8], load: u32, body: &[u8]) -> Vec<u8> {
+        let mut d = vec![0u8; 0x90];
+        d[..4].copy_from_slice(tag);
+        d[4..6].copy_from_slice(b"\r\n");
+        d[6..14].copy_from_slice(version);
+        d[14..16].copy_from_slice(b"\r\n");
+        d[0x10..0x1b].copy_from_slice(b"Jan  1 2000");
+        d[0x20..0x28].copy_from_slice(b"12:00:00");
+        d[0x80..0x84].copy_from_slice(&(load + 0x90).to_be_bytes());
+        d.extend_from_slice(body);
+        let size = d.len() as u32;
+        d[0x70..0x74].copy_from_slice(&load.to_be_bytes());
+        d[0x74..0x78].copy_from_slice(&size.to_be_bytes());
+        let mut sum = 0u32;
+        for c in d[0x80..].chunks(4) {
+            let mut w = [0u8; 4];
+            w[..c.len()].copy_from_slice(c);
+            sum = sum.wrapping_add(u32::from_be_bytes(w));
+        }
+        d[0x78..0x7c].copy_from_slice(&sum.to_be_bytes());
+        d.resize((d.len() + 0x7ff) & !0x7ff, 0);
+        d
+    }
+
+    #[test]
+    fn module_header_and_checksum() {
+        let raw = fake_module(b".OS ", b"V9990001", 0x0000_c100, &[1, 2, 3, 4, 5, 6, 7]);
+        let m = Module::parse("OSM", &raw).unwrap();
+        assert_eq!(m.kind, "OS");
+        assert_eq!(m.version, "V9990001");
+        assert_eq!(m.load_addr, 0xc100);
+        assert_eq!(m.size, 0x97);
+        assert_eq!(m.entries[0], 0xc190);
+        assert!(m.checksum_ok());
+        let mut bad = raw.clone();
+        bad[0x92] ^= 1;
+        assert!(!Module::parse("OSM", &bad).unwrap().checksum_ok());
+    }
+
+    #[test]
+    fn kwi_container_round_trip() {
+        let os = fake_module(b".OS ", b"V9990001", 0x0000_c100, b"operating system");
+        let apm = fake_module(b".APL", b"V9990002", 0x0028_0000, b"application");
+        // One variant, two modules, data from sector 1.
+        let mut kwi = vec![0u8; 0x800];
+        kwi[0x11] = 1;
+        kwi[0x14 + 4..0x14 + 8].copy_from_slice(b"V999");
+        kwi[0x14 + 0x38..0x14 + 0x3c].copy_from_slice(b"0001");
+        let b = 0x14 + 0x40;
+        kwi[b + 4..b + 8].copy_from_slice(b"V999");
+        kwi[b + 0x45] = 2;
+        let mut off = 0u32;
+        for (j, (name, data)) in [("OSM", &os), ("APM", &apm)].iter().enumerate() {
+            let e = b + 0x48 + j * 16;
+            kwi[e..e + name.len()].copy_from_slice(name.as_bytes());
+            kwi[e + 8..e + 12].copy_from_slice(&(off / 2).to_be_bytes());
+            kwi[e + 12..e + 16].copy_from_slice(&(data.len() as u32).to_be_bytes());
+            off += data.len() as u32;
+        }
+        kwi[b + 0xfc] = 1; // start sector
+        kwi.extend_from_slice(&os);
+        kwi.extend_from_slice(&apm);
+
+        let variants = parse_kwi(&kwi).unwrap();
+        assert_eq!(variants.len(), 1);
+        let v = &variants[0];
+        assert_eq!((v.name.as_str(), v.version.as_str()), ("V999", "0001"));
+        assert_eq!(v.modules.len(), 2);
+        assert!(v.modules.iter().all(|m| m.checksum_ok()));
+        assert_eq!(v.module("APM").unwrap().load_addr, 0x0028_0000);
+
+        let index = IndexInfo::parse(b"SOFIDX:0650$\r\nNAVVER:V9990001$\r\nAUDVER:A9990001$\r\n");
+        let dir = module_directory(v, &index);
+        assert_eq!(&dir[..16], b".OS V9990001\x00\x00\xc1\x00");
+        assert_eq!(&dir[0x10..0x17], b"00 0001");
+        assert_eq!(&dir[0x1c..0x20], b"0650");
+        assert_eq!(dir[0x5f], 1);
+        assert_eq!(&dir[0x60..0x70], b".APLV9990002\x00\x28\x00\x00");
+    }
+
+    #[test]
+    fn rejects_garbage() {
+        assert!(Iso::new(&[0u8; 100]).is_err());
+        assert!(parse_kwi(&[0u8; 0x1000]).is_err());
+        assert!(Module::parse("X", &[0u8; 0x200]).is_err());
     }
 }
