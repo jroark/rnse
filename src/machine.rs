@@ -25,6 +25,10 @@ pub struct Machine {
     pub bios_calls: BTreeMap<(u8, u32), u64>,
     /// Memory break of the two pools managed by boot ROM services 4/5.
     pub bios_break: [u32; 2],
+    /// Address of the firmware's `printf`, if known.  The main software
+    /// formats debug messages but does not send them to a serial port;
+    /// with this set the emulator prints them itself.
+    pub printf_hook: Option<u32>,
 }
 
 impl Default for Machine {
@@ -35,7 +39,7 @@ impl Default for Machine {
 
 impl Machine {
     pub fn new() -> Self {
-        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2] }
+        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -73,6 +77,23 @@ impl Machine {
         self.cpu.r[6] = args[2];
         self.cpu.r[15] = 0x8dff_ff00;
         self.cpu.pr = 0;
+    }
+
+    /// Address of `printf` in OS builds that have been looked at, keyed
+    /// by the OS module's version string.
+    pub fn known_printf(os_version: &str) -> Option<u32> {
+        match os_version {
+            "V2200815" => Some(0x801e_b344),
+            _ => None,
+        }
+    }
+
+    /// Print the firmware's own debug messages (see `printf_hook`).
+    pub fn hook_printf(&mut self, addr: u32) {
+        self.printf_hook = Some(addr);
+        if !self.cpu.breakpoints.contains(&addr) {
+            self.cpu.breakpoints.push(addr);
+        }
     }
 
     /// Start the installed firmware the way the boot ROM does: call the
@@ -241,6 +262,20 @@ impl Machine {
                 if !self.hypercall() {
                     return Stop::Fault;
                 }
+            } else if stop == Stop::Breakpoint && Some(self.cpu.pc) == self.printf_hook {
+                if let Some(text) = self.format_printf(self.cpu.r[15]) {
+                    let line = format!("[fw] {}\n", text.trim_end_matches(['\n', '\r']));
+                    let bytes: Vec<u8> = line.chars().map(|c| c as u8).collect();
+                    if self.echo_console {
+                        use std::io::Write;
+                        let _ = std::io::stdout().write_all(&bytes);
+                    }
+                    self.console.extend_from_slice(&bytes);
+                }
+                // Step over the hooked instruction.
+                let saved = std::mem::take(&mut self.cpu.breakpoints);
+                self.cpu.run(&mut self.board, 1);
+                self.cpu.breakpoints = saved;
             } else if stop != Stop::Budget {
                 return stop;
             }
@@ -287,6 +322,101 @@ impl Machine {
         } else {
             Some(s)
         }
+    }
+
+    /// Format a C printf call made by the firmware: format string and
+    /// arguments are 32-bit words on the stack at `sp` (the Hitachi C
+    /// compiler passes all variadic arguments there).
+    pub fn format_printf(&self, sp: u32) -> Option<String> {
+        let fmt_ptr = self.peek32(sp)?;
+        let mut out = String::new();
+        let mut arg = sp.wrapping_add(4);
+        let mut p = fmt_ptr;
+        fn next(m: &Machine, arg: &mut u32) -> u32 {
+            let v = m.peek32(*arg).unwrap_or(0);
+            *arg = arg.wrapping_add(4);
+            v
+        }
+        for _ in 0..512 {
+            let c = self.peek8(p)?;
+            p = p.wrapping_add(1);
+            if c == 0 {
+                break;
+            }
+            if c != b'%' {
+                // Keep bytes above 0x7f (EUC-JP text) as they are.
+                out.push(c as char);
+                continue;
+            }
+            let mut spec = String::from("%");
+            let mut conv = 0u8;
+            for _ in 0..12 {
+                let c = self.peek8(p)?;
+                p = p.wrapping_add(1);
+                if c == 0 {
+                    break;
+                }
+                if c.is_ascii_alphabetic() && c != b'l' && c != b'h' {
+                    conv = c;
+                    break;
+                }
+                if c == b'%' {
+                    conv = c;
+                    break;
+                }
+                spec.push(c as char);
+            }
+            let flags: String = spec[1..].chars().filter(|c| !matches!(c, 'l' | 'h')).collect();
+            let zero = flags.starts_with('0');
+            let left = flags.starts_with('-');
+            let width: usize = flags.trim_start_matches(['0', '-', '+', ' ', '#']).split('.').next().unwrap_or("").parse().unwrap_or(0);
+            let pad = |s: String| -> String {
+                if s.len() >= width {
+                    s
+                } else if left {
+                    format!("{:<w$}", s, w = width)
+                } else if zero {
+                    format!("{:0>w$}", s, w = width)
+                } else {
+                    format!("{:>w$}", s, w = width)
+                }
+            };
+            match conv {
+                b'%' => out.push('%'),
+                b'd' | b'i' => out += &pad((next(self, &mut arg) as i32).to_string()),
+                b'u' => out += &pad(next(self, &mut arg).to_string()),
+                b'x' | b'p' => out += &pad(format!("{:x}", next(self, &mut arg))),
+                b'X' => out += &pad(format!("{:X}", next(self, &mut arg))),
+                b'c' => out.push((next(self, &mut arg) as u8) as char),
+                b's' => {
+                    let sp = next(self, &mut arg);
+                    let mut t = String::new();
+                    for i in 0..256 {
+                        match self.peek8(sp.wrapping_add(i)) {
+                            Some(0) | None => break,
+                            Some(b) => t.push(b as char),
+                        }
+                    }
+                    out += &pad(t);
+                }
+                b'f' | b'g' | b'e' => {
+                    // Doubles take two words, aligned to 8 bytes.
+                    if arg & 4 != 0 {
+                        arg = arg.wrapping_add(4);
+                    }
+                    let hi = next(self, &mut arg) as u64;
+                    let lo = next(self, &mut arg) as u64;
+                    out += &format!("{}", f64::from_bits(hi << 32 | lo));
+                }
+                _ => {
+                    out += &spec;
+                    if conv != 0 {
+                        out.push(conv as char);
+                    }
+                }
+            }
+        }
+        Some(out)
     }
 
     fn drain_console(&mut self) {

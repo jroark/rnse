@@ -16,7 +16,7 @@ Work in progress.  What runs today, on the `V220` hardware variant:
 | | |
 |---|---|
 | Update loader (`LDM`) | Boots, shows its screens, reads the CD, erases and programs the flash and finishes the update, exactly as on the unit. |
-| Main software (`OSM` + applications) | The OS and all modules initialise, the scheduler runs with its 2 ms tick, tasks start, and the system settles in its idle loop.  The display stays off: the firmware is waiting for a wake-up condition from the car (CAN bus, front panel) that is not emulated yet. |
+| Main software (`OSM` + applications) | The OS and all modules initialise, the scheduler runs with its 2 ms tick, tasks start, the file systems get formatted, and the system settles in its idle loop.  The display stays off: the power manager sees neither the key (S-contact) nor the ignition (terminal 15) on the CAN bus and goes to standby.  The CAN controller is the next thing to emulate. |
 | Other variants on the disc (`V574`, `VB48`) | Parsed and extractable; not bootable yet (different memory map). |
 
 Not done yet: CAN bus, front panel keys, the serial links to the radio
@@ -52,9 +52,25 @@ Make an ISO image of a firmware update CD (2048-byte sectors, e.g.
     # Start the installed firmware
     rnse boot disc.iso --trace-bios --screenshot screen.png
 
-The firmware's own debug log (it talks on a serial port inside the unit)
-is printed on standard output.  Much of it is Japanese in EUC-JP; pipe it
-through `iconv -f EUC-JP -t UTF-8 -c` to read it.
+The firmware's own debug log is printed on standard output.  The loader
+writes it to a serial port inside the unit; the main software formats its
+messages but sends them nowhere, so the emulator hooks its `printf` and
+prints them as `[fw] ...` lines.  Much of the text is Japanese in EUC-JP;
+pipe it through `iconv -f EUC-JP -t UTF-8 -c` to read it.
+
+What the main software says while it starts (shortened):
+
+    [fw] _/_/_/ [Fugue]Formatting system ... _/_/_/
+    [fw] Call PWM_Init_Proc()
+    [fw] ---------------------PWM_Tpm_Boot !!
+    [fw] ★★★★★★★★★★ CAN_Pass_mzas() Error!! [00]
+    [fw] KLINE task started!
+    [fw] PWM_LAST_ON [1]
+    [fw] Now State[1] Change State[3]
+    [fw] Now skon[0] Now Kl15[0]
+    [fw] T_STANDBY
+    [fw] [FP] DISP ON
+    [fw] Time Up t_sleepindication_wait  pwm_t_sleepindication_wait()
 
 Useful options while investigating (see `rnse` without arguments for the
 full list):

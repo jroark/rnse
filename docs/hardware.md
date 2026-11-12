@@ -121,3 +121,23 @@ controller and diagnostics; the OS keeps channel 1 busy.
   SDCARD, SOUND, TEL, TELCAN, TMC, ...
 * The OS inherits a few services from the boot ROM; see
   [boot-rom.md](boot-rom.md).
+* Debug output.  The loader prints through serial channel 5.  The OS and
+  applications call a C `printf` (0x801eb344 in OS build V2200815) whose
+  output never reaches a port in this build; `rnse boot` intercepts the
+  call and formats the message from the emulated stack.
+
+## What the OS is waiting for
+
+Read from its debug messages after start-up:
+
+* `CAN_Pass_mzas() Error!!` and `Now skon[0] Now Kl15[0]`: the power
+  manager (`PWM`) wants the ignition lock status message from the car's
+  infotainment CAN bus.  With neither key contact nor ignition it runs
+  its standby and sleep timers instead of bringing the system up.
+* `ROMID RETRY!!`, repeated: something is asked for an identification
+  and does not answer (not traced yet).
+* `SDCARD DSP0/1 BOOT ERROR`: the SD card reader's controllers are
+  missing.
+* `SWM::*** FATAL_ERROR *** ... Adc_get_scrntype return ZERO`: the key
+  handling asks the application for the current screen type before
+  there is one; probably a consequence of the above.

@@ -4,7 +4,7 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
     );
     std::process::exit(2);
 }
@@ -86,10 +86,12 @@ struct Opts {
     trace_bios: bool,
     log_after: u64,
     gpio: Vec<(usize, u8)>,
+    printf_hook: Option<u32>,
+    no_printf: bool,
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
-    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![] };
+    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| -> Result<&String, Box<dyn std::error::Error>> {
@@ -120,6 +122,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
             "--trace-bios" => o.trace_bios = true,
             "--save-flash" => o.save_flash = Some(next(&mut i)?.clone()),
             "--trace-exc" => o.trace_exc = true,
+            "--printf" => o.printf_hook = Some(u32::from_str_radix(next(&mut i)?.trim_start_matches("0x"), 16)?),
+            "--no-printf" => o.no_printf = true,
             "--tp" => o.tracepoints.push(u32::from_str_radix(next(&mut i)?.trim_start_matches("0x"), 16)?),
             "--break" => o.breaks.push(u32::from_str_radix(next(&mut i)?.trim_start_matches("0x"), 16)?),
             "--args" => {
@@ -141,6 +145,13 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     let variants = fw::load_variants(&image)?;
     let v = variants.iter().find(|v| v.name == o.variant).ok_or_else(|| format!("no variant {} on this disc", o.variant))?;
     let ldm = v.module("LDM").ok_or("variant has no LDM module")?;
+    if let Some(bad) = v.modules.iter().find(|m| !rnse::board::Board::can_load(m.phys_addr(), m.size as usize)) {
+        return Err(format!(
+            "variant {} is built for a different memory map (module {} loads at {:#x}); only the V220 hardware is emulated so far",
+            v.name, bad.name, bad.load_addr
+        )
+        .into());
+    }
     let mut m = Machine::new();
     let enable_logs = |m: &mut Machine| {
         if let Some(n) = o.io_log {
@@ -161,6 +172,16 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     m.cpu.trace_exceptions = o.trace_exc;
     m.cpu.breakpoints = o.breaks.clone();
     m.cpu.breakpoints.extend(o.tracepoints.iter().copied());
+    let printf = o.printf_hook.or_else(|| {
+        if loader || o.no_printf {
+            None
+        } else {
+            v.module("OSM").and_then(|os| Machine::known_printf(&os.version))
+        }
+    });
+    if let Some(a) = printf {
+        m.hook_printf(a);
+    }
     m.board.atapi.trace = o.trace_atapi;
     if !o.no_disc {
         m.board.atapi.load(image.clone());
@@ -203,6 +224,11 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
                 if let Some(t) = m.peek_str(c.r[i], 48) {
                     eprintln!("[tp]    r{} -> {:?}", i, t);
                 }
+            }
+            // First stack argument (the firmware's printf takes its
+            // format string there).
+            if let Some(t) = m.peek32(c.r[15]).and_then(|p| m.peek_str(p, 96)) {
+                eprintln!("[tp]    [sp] -> {:?}", t);
             }
             // Step off the tracepoint and carry on.
             let saved = std::mem::take(&mut m.cpu.breakpoints);

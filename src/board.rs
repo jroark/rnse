@@ -85,7 +85,16 @@ impl Board {
         }
     }
 
-    /// Copy bytes into RAM or flash (used by loaders).
+    /// Whether `len` bytes at physical address `phys` lie entirely in
+    /// RAM or entirely in flash on this board.
+    pub fn can_load(phys: u32, len: usize) -> bool {
+        let a = phys as usize;
+        let ram = RAM_BASE as usize;
+        (a >= ram && a + len <= ram + RAM_SIZE) || a + len <= FLASH_SIZE
+    }
+
+    /// Copy bytes into RAM or flash (used by loaders).  The range must
+    /// satisfy [`Board::can_load`].
     pub fn load(&mut self, phys: u32, data: &[u8]) {
         let a = phys as usize;
         if phys >= RAM_BASE {
