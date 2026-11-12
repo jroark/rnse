@@ -28,25 +28,32 @@
          padding: 8px 10px; margin: 0; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; }
   kbd { background: #222226; border: 1px solid #3a3a40; border-radius: 4px; padding: 0 5px; font: 12px ui-monospace, monospace; }
   #help { color: #77777e; margin-top: 8px; }
+  #flap { position: absolute; left: 8.709%; top: 19.464%; width: 65.658%; height: 56.643%; display: none;
+          align-items: center; justify-content: center; text-align: center; color: #9a9aa2; background: rgba(0, 0, 0, .78); }
+  #unit.open #flap { display: flex; }
 </style>
 </head>
 <body>
 <main>
   <div id="unit">
     <canvas id="screen" width="400" height="235"></canvas>
+    <div id="flap">display folded down<br>(CD drive and card slots accessible)</div>
     <img id="plate" src="faceplate.png" alt="">
   </div>
   <div id="bar">
     <button id="ign" title="Ignition lock status on the CAN bus (key in, ignition on)">Ignition</button>
     <button id="disc" title="Put the disc image in the drive or take it out">Disc</button>
+    <button id="cdeject" title="The CD eject key sits behind the fold-down display">CD eject key</button>
     <button id="reset" title="Restart the firmware">Restart</button>
     <span id="status">connecting…</span>
   </div>
   <div id="note"></div>
   <pre id="log" aria-label="Firmware debug log"></pre>
   <div id="help">
-    Keys: <kbd>←</kbd> <kbd>→</kbd> turn the main knob, <kbd>Enter</kbd> press it, <kbd>Esc</kbd> RETURN,
-    <kbd>1</kbd>–<kbd>8</kbd> RADIO … SETUP, mouse wheel over a knob turns it.
+    Keys: <kbd>↑</kbd> <kbd>↓</kbd> (or <kbd>←</kbd> <kbd>→</kbd>) turn the main knob, <kbd>Enter</kbd> presses it, <kbd>Esc</kbd> RETURN,
+    <kbd>1</kbd>–<kbd>8</kbd> RADIO … SETUP, <kbd>Q</kbd> <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> the four soft keys,
+    <kbd>,</kbd> <kbd>.</kbd> previous / next, <kbd>-</kbd> <kbd>+</kbd> volume.  On a knob, the middle presses it and the left or right edge (or the mouse wheel) turns it.
+    The power button is not connected to the main processor and does nothing here.
   </div>
 </main>
 <script>
@@ -82,18 +89,41 @@ function addZone(name, x0, y0, x1, y1, round) {
   return z;
 }
 for (const [name, x0, y0, x1, y1] of KEYS) addZone(name, x0, y0, x1, y1, false);
+// A knob: the middle presses it, the rim turns it (right half clockwise,
+// left half anticlockwise), and so does the mouse wheel.
 for (const [name, knob, cx, cy, r] of KNOBS) {
-  const z = addZone(name, cx - r, cy - r, cx + r, cy + r, true);
-  z.addEventListener("wheel", (e) => { e.preventDefault(); post(`type=knob&name=${knob}&delta=${e.deltaY < 0 ? 1 : -1}`); }, { passive: false });
+  const z = document.createElement("div");
+  z.className = "zone round";
+  z.title = `${name}: click the middle to press, the left or right edge (or the mouse wheel) to turn`;
+  z.style.left = (100 * (cx - r) / W) + "%"; z.style.top = (100 * (cy - r) / H) + "%";
+  z.style.width = (200 * r / W) + "%"; z.style.height = (200 * r / H) + "%";
+  const turn = (d) => post(`type=knob&name=${knob}&delta=${d}`);
+  let pressed = false;
+  z.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const b = z.getBoundingClientRect();
+    const dx = (e.clientX - b.left) / b.width - 0.5, dy = (e.clientY - b.top) / b.height - 0.5;
+    if (Math.hypot(dx, dy) < 0.24) { pressed = true; z.setPointerCapture(e.pointerId); z.classList.add("down"); keyEvent(name, true); }
+    else turn(dx > 0 ? 1 : -1);
+  });
+  const up = () => { if (pressed) { pressed = false; z.classList.remove("down"); keyEvent(name, false); } };
+  z.addEventListener("pointerup", up);
+  z.addEventListener("pointercancel", up);
+  // Wheel down moves down a list (clockwise); wheel up is louder.
+  z.addEventListener("wheel", (e) => { e.preventDefault(); turn((e.deltaY > 0) === (knob === "main") ? 1 : -1); }, { passive: false });
+  unit.appendChild(z);
 }
 if (location.search.includes("debug")) document.body.classList.add("debug");
 
 const KEYMAP = { Enter: "SELECT", Escape: "RETURN", Backspace: "RETURN",
-  1: "RADIO", 2: "MEDIA", 3: "NAME", 4: "TEL", 5: "NAV", 6: "INFO", 7: "CAR", 8: "SETUP" };
+  1: "RADIO", 2: "MEDIA", 3: "NAME", 4: "TEL", 5: "NAV", 6: "INFO", 7: "CAR", 8: "SETUP",
+  q: "SOFT_TL", w: "SOFT_TR", a: "SOFT_BL", s: "SOFT_BR", ",": "PREV", ".": "NEXT" };
+const TURN = { ArrowRight: ["main", 1], ArrowDown: ["main", 1], ArrowLeft: ["main", -1], ArrowUp: ["main", -1],
+  "+": ["volume", 1], "=": ["volume", 1], "-": ["volume", -1] };
 addEventListener("keydown", (e) => {
   if (e.repeat && KEYMAP[e.key]) return;
-  if (e.key === "ArrowRight") post("type=knob&name=main&delta=1");
-  else if (e.key === "ArrowLeft") post("type=knob&name=main&delta=-1");
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (TURN[e.key]) post(`type=knob&name=${TURN[e.key][0]}&delta=${TURN[e.key][1]}`);
   else if (KEYMAP[e.key]) keyEvent(KEYMAP[e.key], true);
   else return;
   e.preventDefault();
@@ -134,11 +164,13 @@ let st = {};
 ign.onclick = () => post("type=ignition&on=" + (st.ignition ? 0 : 1));
 disc.onclick = () => post("type=disc&in=" + (st.disc ? 0 : 1));
 document.getElementById("reset").onclick = () => post("type=reset");
+document.getElementById("cdeject").onclick = () => { keyEvent("CD_EJECT", true); setTimeout(() => keyEvent("CD_EJECT", false), 200); };
 async function pollStatus() {
   try {
     st = await (await fetch("/status")).json();
     ign.classList.toggle("on", !!st.ignition); ign.textContent = "Ignition " + (st.ignition ? "on" : "off");
     disc.classList.toggle("on", !!st.disc); disc.textContent = st.disc ? "Disc in drive" : "No disc";
+    unit.classList.toggle("open", st.display !== undefined && st.display < 894);
     document.getElementById("status").textContent =
       `${st.what} · ${(st.seconds || 0).toFixed(1)} s emulated · ${(st.speed || 0).toFixed(0)} % speed` + (st.stopped ? " · STOPPED: " + st.stopped : "");
     document.getElementById("note").textContent = st.note || "";

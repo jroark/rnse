@@ -4,7 +4,7 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n  rnse ui <disc.iso> [ui options]      run it with the faceplate in a browser\n\nui options:\n  --port N           port to serve on (default 8080)\n  --bind ADDR        address to listen on (default 127.0.0.1)\n  --loader           run the update loader instead of the installed firmware\n  --no-ignition      start with the ignition off\n  --no-disc          start with an empty CD drive\n  --variant NAME     hardware variant (default V220)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-serial     log the serial link to the radio processor\n  --no-radio         leave the radio processor's link unanswered\n  --trace-coral      dump the display lists sent to the graphics chip\n  --only-layer N     screenshot shows display layer N (0-5) alone\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n  rnse ui <disc.iso> [ui options]      run it with the faceplate in a browser\n\nui options:\n  --port N           port to serve on (default 8080)\n  --bind ADDR        address to listen on (default 127.0.0.1)\n  --loader           run the update loader instead of the installed firmware\n  --no-ignition      start with the ignition off\n  --no-disc          start with an empty CD drive\n  --variant NAME     hardware variant (default V220)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-serial     log the serial links (radio processor, faceplate)\n  --no-radio         leave the radio processor's link unanswered\n  --no-panel         leave the faceplate controller's link unanswered\n  --key KEY@MS[+HOLD]  press a faceplate key at MS milliseconds for HOLD ms\n                     (default 200).  KEY is RADIO, MEDIA, NAME, TEL, NAV,\n                     INFO, CAR, SETUP, RETURN, PREV, NEXT, SELECT, EJECT,\n                     SOFT_TL, SOFT_TR, SOFT_BL, SOFT_BR, CD_EJECT, or a\n                     key state bit number (0-47)\n  --knob K:N@MS      turn knob K (0 volume, 1 select) by N detents at MS\n                     milliseconds, positive = clockwise\n  --shot MS:FILE     also write a screenshot at MS milliseconds\n  --peek ADDR[,LEN]  hex dump of LEN bytes of memory (default 16) at the end\n  --trace-calls A:B  list the subroutines called between A and B ms\n  --trace-coral      dump the display lists sent to the graphics chip\n  --only-layer N     screenshot shows display layer N (0-5) alone\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
     );
     std::process::exit(2);
 }
@@ -96,11 +96,16 @@ struct Opts {
     ignition: bool,
     trace_serial: bool,
     no_radio: bool,
+    no_panel: bool,
+    panel_script: Vec<(u64, rnse::machine::PanelAction)>,
+    shots: Vec<(u64, String)>,
+    call_windows: Vec<(u64, u64)>,
+    peeks: Vec<(u32, u32)>,
     only_layer: Option<usize>,
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
-    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false, trace_serial: false, no_radio: false, only_layer: None };
+    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false, trace_serial: false, no_radio: false, only_layer: None, no_panel: false, panel_script: vec![], shots: vec![], call_windows: vec![], peeks: vec![] };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| -> Result<&String, Box<dyn std::error::Error>> {
@@ -138,6 +143,47 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
             "--trace-serial" => o.trace_serial = true,
             "--only-layer" => o.only_layer = Some(next(&mut i)?.parse()?),
             "--no-radio" => o.no_radio = true,
+            "--no-panel" => o.no_panel = true,
+            "--key" => {
+                // KEY@MS[+HOLD_MS]: key name or raw state bit, pressed at MS.
+                let v = next(&mut i)?;
+                let (bit, when) = v.split_once('@').ok_or("--key wants BIT@MS[+HOLD_MS]")?;
+                let (at, hold) = match when.split_once('+') {
+                    Some((a, h)) => (a.parse()?, h.parse()?),
+                    None => (when.parse::<u64>()?, 200u64),
+                };
+                let bit: usize = match rnse::dev::panel::key_bit(bit) {
+                    Some(b) => b,
+                    None => bit.parse().map_err(|_| format!("--key: {} is neither a key name nor a bit number", bit))?,
+                };
+                o.panel_script.push((at, rnse::machine::PanelAction::Key(bit, true)));
+                o.panel_script.push((at + hold, rnse::machine::PanelAction::Key(bit, false)));
+            }
+            "--knob" => {
+                // KNOB:DELTA@MS, knob 0 or 1.
+                let v = next(&mut i)?;
+                let (what, at) = v.split_once('@').ok_or("--knob wants KNOB:DELTA@MS")?;
+                let (knob, delta) = what.split_once(':').ok_or("--knob wants KNOB:DELTA@MS")?;
+                o.panel_script.push((at.parse()?, rnse::machine::PanelAction::Knob(knob.parse()?, delta.parse()?)));
+            }
+            "--peek" => {
+                // ADDR[,LEN]: hex dump of memory when stopping.
+                let v = next(&mut i)?;
+                let (a, n) = v.split_once(',').unwrap_or((v.as_str(), "16"));
+                o.peeks.push((u32::from_str_radix(a.trim_start_matches("0x"), 16)?, n.parse()?));
+            }
+            "--trace-calls" => {
+                // FROM:TO in ms: list the subroutines called in that window.
+                let v = next(&mut i)?;
+                let (a, b) = v.split_once(':').ok_or("--trace-calls wants FROM_MS:TO_MS")?;
+                o.call_windows.push((a.parse()?, b.parse()?));
+            }
+            "--shot" => {
+                // MS:FILE, a screenshot on the way.
+                let v = next(&mut i)?;
+                let (at, file) = v.split_once(':').ok_or("--shot wants MS:FILE")?;
+                o.shots.push((at.parse()?, file.to_string()));
+            }
             "--surface" => {
                 // ADDR,STRIDE,W,H,FILE
                 let v: Vec<&str> = next(&mut i)?.split(',').collect();
@@ -224,6 +270,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     m.trace_serial = o.trace_serial;
     m.radio.trace = o.trace_serial;
     m.radio_present = !o.no_radio;
+    m.panel.trace = o.trace_serial;
+    m.panel_present = !o.no_panel;
+    m.panel_script = o.panel_script.clone();
     if !o.no_disc {
         m.board.atapi.load(image.clone());
     }
@@ -258,8 +307,40 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
             enable_logs(&mut m);
         }
     }
+    let mut shots = o.shots.clone();
+    shots.sort();
+    let per_ms = m.cycles_per_ms();
+    // Times at which a call-trace window opens (true) or closes.
+    let mut windows: Vec<(u64, bool)> = o.call_windows.iter().flat_map(|&(a, b)| [(a, true), (b, false)]).collect();
+    windows.sort();
     loop {
-        stop = m.run(end.saturating_sub(m.cpu.cycles).max(1));
+        let mut target = shots.first().map_or(end, |(ms, _)| (ms * per_ms).min(end));
+        if let Some((ms, _)) = windows.first() {
+            target = target.min(ms * per_ms);
+        }
+        stop = m.run(target.saturating_sub(m.cpu.cycles).max(1));
+        while windows.first().is_some_and(|(ms, _)| ms * per_ms <= m.cpu.cycles) {
+            let (ms, open) = windows.remove(0);
+            if open {
+                m.cpu.calls = Some(Default::default());
+            } else if let Some(calls) = m.cpu.calls.take() {
+                let mut list: Vec<_> = calls.into_iter().collect();
+                list.sort_by_key(|(_, (_, first, _))| *first);
+                eprintln!("--- calls up to {} ms: {} subroutines", ms, list.len());
+                for (target, (n, first, caller)) in list {
+                    eprintln!("[call] {:08x} x{:<6} first at {} ms from {:08x}", target, n, first / per_ms, caller);
+                }
+            }
+        }
+        while shots.first().is_some_and(|(ms, _)| ms * per_ms <= m.cpu.cycles) {
+            let (ms, path) = shots.remove(0);
+            let (w, h, rgb) = m.board.coral.render();
+            std::fs::write(&path, rnse::png::encode_rgb(w, h, &rgb))?;
+            eprintln!("screenshot at {} ms: {}", ms, path);
+        }
+        if stop == Stop::Budget && m.cpu.cycles < end {
+            continue;
+        }
         if stop == Stop::Breakpoint && o.tracepoints.contains(&m.cpu.pc) {
             let c = &m.cpu;
             let mut line = format!("[tp] {:08x} pr={:08x}", c.pc, c.pr);
@@ -340,6 +421,10 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         let rgb = m.board.coral.render_surface(*addr, *stride, *w, *h);
         std::fs::write(path, rnse::png::encode_rgb(*w, *h, &rgb))?;
         eprintln!("surface {:x}: {}", addr, path);
+    }
+    for (addr, len) in &o.peeks {
+        let bytes: Vec<String> = (0..*len).map(|k| m.peek8(addr + k).map_or("??".into(), |b| format!("{:02x}", b))).collect();
+        eprintln!("peek {:08x}: {}", addr, bytes.join(" "));
     }
     if let Some(path) = &o.screenshot {
         let (w, h, rgb) = m.board.coral.render();
@@ -445,12 +530,12 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 UiEvent::Key { name, down } => {
                     let delivered = m.panel_key(&name, down);
                     if down {
-                        note = format!("{} pressed{}", name, if delivered { "" } else { " (the front panel is not connected to the emulated hardware yet)" });
+                        note = format!("{} pressed{}", name, if delivered { "" } else { " (this button is not wired to the main processor; nothing to emulate yet)" });
                     }
                 }
                 UiEvent::Knob { name, delta } => {
                     let delivered = m.panel_knob(&name, delta);
-                    note = format!("{} knob turned {}{}", name, if delta > 0 { "right" } else { "left" }, if delivered { "" } else { " (the front panel is not connected to the emulated hardware yet)" });
+                    note = format!("{} knob turned {}{}", name, if delta > 0 { "right" } else { "left" }, if delivered { "" } else { " (unknown knob)" });
                 }
                 UiEvent::Ignition(on) => {
                     ignition = on;
@@ -503,12 +588,13 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 log_sent = m.console.len();
             }
             s.status = format!(
-                "{{\"what\":{},\"seconds\":{:.2},\"speed\":{:.0},\"ignition\":{},\"disc\":{},\"stopped\":{},\"note\":{}}}",
+                "{{\"what\":{},\"seconds\":{:.2},\"speed\":{:.0},\"ignition\":{},\"disc\":{},\"display\":{},\"stopped\":{},\"note\":{}}}",
                 json_str(&what),
                 m.cpu.cycles as f64 / m.cycles_per_ms() as f64 / 1000.0,
                 speed,
                 ignition,
                 disc_in,
+                m.board.display_pos,
                 stopped.as_deref().map(json_str).unwrap_or_else(|| "null".into()),
                 json_str(&note)
             );

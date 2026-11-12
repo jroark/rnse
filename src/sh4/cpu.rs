@@ -120,6 +120,10 @@ pub struct Cpu {
     pub(super) run_end: u64,
     /// Interrupts accepted per INTEVT code / 0x20, for statistics.
     pub irq_counts: [u64; 128],
+    /// When set, every subroutine call is recorded here: target ->
+    /// (times called, cycle of the first call, first caller).  A reverse
+    /// engineering aid; see `--trace-calls`.
+    pub calls: Option<std::collections::BTreeMap<u32, (u64, u64, u32)>>,
     pub hypercalls_enabled: bool,
     /// Address of the hypercall instruction that stopped execution.
     pub hypercall: Option<u32>,
@@ -132,6 +136,14 @@ impl Default for Cpu {
 }
 
 impl Cpu {
+    #[inline(always)]
+    pub(super) fn note_call(&mut self, target: u32) {
+        if let Some(calls) = &mut self.calls {
+            let e = calls.entry(target).or_insert((0, self.cycles, self.pc));
+            e.0 += 1;
+        }
+    }
+
     pub fn new() -> Self {
         let mut c = Cpu {
             r: [0; 16],
@@ -160,6 +172,7 @@ impl Cpu {
             fault: None,
             breakpoints: Vec::new(),
             pc_hist: vec![0; 256],
+            calls: None,
             pc_hist_pos: 0,
             trace_exceptions: false,
             run_end: u64::MAX,

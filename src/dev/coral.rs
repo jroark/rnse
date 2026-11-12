@@ -230,6 +230,10 @@ impl Coral {
         self.r32(DRAW + off)
     }
 
+    fn set_dreg(&mut self, off: u32, v: u32) {
+        self.w32(DRAW + off, v)
+    }
+
     /// Frame buffer addresses are given either as offsets into video
     /// memory or as the CPU's address of the same byte.
     #[inline]
@@ -461,20 +465,24 @@ impl Coral {
                     3
                 }
                 0x04 | 0x05 => {
-                    // Line from the start point registers to each vertex.
+                    // DrawLine2iP: one packed vertex follows.  The low bit
+                    // of the parameter says which: vertex 1 draws a line
+                    // from the start point (registers 0x540/0x544) and
+                    // becomes the new start point, vertex 0 only moves
+                    // the start point.
                     let (mut x0, mut y0) = ((self.dreg(0x540) >> 16) as i16 as i32, (self.dreg(0x544) >> 16) as i16 as i32);
                     if self.dreg(0x540) & 0xffff_0000 == 0 && self.dreg(0x540) != 0 {
                         // Integer rather than 16.16 fixed point.
                         x0 = self.dreg(0x540) as i32;
                         y0 = self.dreg(0x544) as i32;
                     }
-                    for k in 0..param as usize {
-                        let (x1, y1) = xy(arg(1 + k));
+                    let (x1, y1) = xy(arg(1));
+                    if param & 1 != 0 {
                         self.line(x0, y0, x1, y1);
-                        x0 = x1;
-                        y0 = y1;
                     }
-                    1 + param as usize
+                    self.set_dreg(0x540, (x1 as u32) << 16);
+                    self.set_dreg(0x544, (y1 as u32) << 16);
+                    2
                 }
                 0x0d => {
                     // BltCopyP within the current frame buffer.
@@ -615,9 +623,12 @@ impl Coral {
     /// window mode is on (always for L1).
     fn layer_window(&self, i: usize, w: usize, h: usize) -> (usize, usize, usize, usize) {
         let ext = DISP + 0x110 + i as u32 * 0x10;
-        let (wx, wy, ww, wh) = if i == 1 && self.r32(ext) & 2 == 0 {
+        // LxEM bit 0 (window position enable) puts the layer in a window
+        // given by the four registers after it; bit 1 selects the
+        // extended overlay mode.
+        let (wx, wy, ww, wh) = if i == 1 && self.r32(ext) & 1 == 0 {
             (self.r16(DISP + 0x18), self.r16(DISP + 0x1a), self.r16(DISP + 0x1c), self.r16(DISP + 0x1e) + 1)
-        } else if self.r32(ext) & 2 != 0 {
+        } else if self.r32(ext) & 1 != 0 {
             (self.r16(ext + 4), self.r16(ext + 6), self.r16(ext + 8), self.r16(ext + 10) + 1)
         } else {
             (0, 0, w as u32, h as u32)
@@ -749,7 +760,7 @@ impl Coral {
         for (i, l) in LAYERS.iter().enumerate() {
             let mode = self.r32(l.mode);
             s += &format!(
-                "  {:<6} {} mode={:08x} ({}bpp stride {} height {}) origin={:07x} disp={:07x} ext={:x} etc={:08x}\n",
+                "  {:<6} {} mode={:08x} ({}bpp stride {} height {}) origin={:07x} disp={:07x} ext={:x} window={},{} {}x{} etc={:08x}\n",
                 l.name,
                 if self.layer_enabled(i) { "on " } else { "off" },
                 mode,
@@ -759,6 +770,10 @@ impl Coral {
                 self.r32(l.origin),
                 self.r32(l.disp_addr),
                 self.r32(DISP + 0x110 + i as u32 * 0x10),
+                self.r16(DISP + 0x114 + i as u32 * 0x10),
+                self.r16(DISP + 0x116 + i as u32 * 0x10),
+                self.r16(DISP + 0x118 + i as u32 * 0x10),
+                self.r16(DISP + 0x11a + i as u32 * 0x10) + 1,
                 self.r32(DISP + 0x1a0 + i as u32 * 4)
             );
         }

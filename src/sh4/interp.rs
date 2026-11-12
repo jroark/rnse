@@ -123,6 +123,7 @@ impl Cpu {
                         self.no_slot()?;
                         let target = self.pc.wrapping_add(2).wrapping_add(self.r[n]);
                         self.pr = self.pc.wrapping_add(2);
+                        self.note_call(target);
                         self.delay(bus, target)?;
                     }
                     2 => {
@@ -545,6 +546,7 @@ impl Cpu {
                     self.no_slot()?;
                     let target = self.r[n];
                     self.pr = self.pc.wrapping_add(2);
+                    self.note_call(target);
                     self.delay(bus, target)?;
                 }
                 0x1b => {
@@ -755,6 +757,7 @@ impl Cpu {
                 self.no_slot()?;
                 let target = self.pc.wrapping_add(2).wrapping_add(sext12(op) << 1);
                 self.pr = self.pc.wrapping_add(2);
+                self.note_call(target);
                 self.delay(bus, target)?;
             }
 

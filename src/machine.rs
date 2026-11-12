@@ -40,6 +40,20 @@ pub struct Machine {
     pub radio: crate::dev::radio::Radio,
     /// When false, nothing answers on that link (as if unplugged).
     pub radio_present: bool,
+    /// Stand-in for the faceplate controller on serial channel 3.
+    pub panel: crate::dev::panel::Panel,
+    pub panel_present: bool,
+    /// Scripted faceplate input: (time in ms, action), any order.
+    pub panel_script: Vec<(u64, PanelAction)>,
+}
+
+/// Raw faceplate input, in terms of the controller's protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelAction {
+    /// Key state bit (0..47) goes down or up.
+    Key(usize, bool),
+    /// Knob 0 or 1 turned by so many detents.
+    Knob(usize, i32),
 }
 
 impl Default for Machine {
@@ -50,7 +64,7 @@ impl Default for Machine {
 
 impl Machine {
     pub fn new() -> Self {
-        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true }
+        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -135,16 +149,79 @@ impl Machine {
         self.can_send_cyclic(Frame::new(0x271, &[if on { 0x03 } else { 0x00 }]), 100);
     }
 
-    /// A faceplate key was pressed or released.  Returns whether the
-    /// event reached the firmware; the front panel's interface has not
-    /// been reverse engineered yet, so for now it never does.
-    pub fn panel_key(&mut self, _name: &str, _down: bool) -> bool {
-        false
+    /// A faceplate key went down or up.  Names are those of
+    /// [`crate::dev::panel::KEYS`]; returns false for a key the emulated
+    /// faceplate controller does not have (the power button).
+    pub fn panel_key(&mut self, name: &str, down: bool) -> bool {
+        match crate::dev::panel::key_bit(name) {
+            Some(bit) => {
+                self.panel.key(bit, down);
+                true
+            }
+            None => false,
+        }
     }
 
-    /// A faceplate knob was turned (see [`Machine::panel_key`]).
-    pub fn panel_knob(&mut self, _name: &str, _delta: i32) -> bool {
-        false
+    /// A faceplate knob ("main" or "volume") was turned by `delta`
+    /// detents, positive = clockwise.
+    pub fn panel_knob(&mut self, name: &str, delta: i32) -> bool {
+        let knob = match name {
+            "main" => crate::dev::panel::KNOB_SELECT,
+            "volume" => crate::dev::panel::KNOB_VOLUME,
+            _ => return false,
+        };
+        self.panel.knob(knob, delta);
+        true
+    }
+
+    /// Exchange bytes with the faceplate controller.
+    fn panel_link(&mut self) {
+        let ms = self.cpu.cycles / self.cycles_per_ms();
+        if !self.panel_script.is_empty() {
+            let mut i = 0;
+            while i < self.panel_script.len() {
+                if self.panel_script[i].0 <= ms {
+                    match self.panel_script.remove(i).1 {
+                        PanelAction::Key(bit, down) => self.panel.key(bit, down),
+                        PanelAction::Knob(knob, delta) => self.panel.knob(knob, delta),
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        let uart = &mut self.board.uart[3];
+        let mut changed = false;
+        if !uart.tx.is_empty() {
+            let bytes = std::mem::take(&mut uart.tx);
+            if self.trace_serial {
+                eprintln!("[panel] {:>7} ms  unit -> {}", ms, bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+            }
+            if self.panel_present {
+                let reply = self.panel.receive(&bytes, ms);
+                if !reply.is_empty() {
+                    if self.trace_serial {
+                        eprintln!("[panel] {:>7} ms  unit <- {}", ms, reply.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+                    }
+                    uart.receive(&reply);
+                }
+            }
+            changed = true;
+        }
+        // The controller only talks once the unit's receiver is on, and
+        // not into the middle of something the unit has yet to read.
+        if self.panel_present && uart.control & 0x10 != 0 && uart.rx.is_empty() {
+            if let Some(f) = self.panel.poll(ms) {
+                if self.trace_serial {
+                    eprintln!("[panel] {:>7} ms  unit <- {}", ms, f.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+                }
+                uart.receive(&f);
+                changed = true;
+            }
+        }
+        if changed {
+            self.board.update_irl();
+        }
     }
 
     /// Bytes arrived from the unit on the radio processor's link.
@@ -359,9 +436,11 @@ impl Machine {
                 self.radio_link(&bytes);
                 self.board.update_irl();
             }
+            self.panel_link();
             if self.cpu.cycles >= self.next_frame {
                 self.next_frame += self.frame_cycles;
                 self.board.vsync();
+                self.board.step_display((self.frame_cycles / self.cycles_per_ms()) as u32);
             }
             if stop == Stop::Hypercall {
                 if !self.hypercall() {

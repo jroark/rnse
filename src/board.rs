@@ -11,16 +11,18 @@
 //! | 0x07aN_0000               | 1  | serial channels (N = 5: debug text)  |
 //! | 0x07b0_0000               | 1  | interrupt priority registers         |
 //! | 0x07c0_0000               | 1  | CAN controller (HCAN2 register map)  |
+//! | 0x07d0_0000               | 1  | A/D converter                        |
 //! | 0x0c00_0000 - 0x0fff_ffff | 3  | SDRAM                                |
 //! | 0x1000_0000 - 0x100f_ffff | 4  | battery-backed SRAM (settings)       |
 //! | 0x1230_0001               | 4  | watchdog strobe (bit 0 toggled)      |
-//! | 0x12xx_xxxx               | 4  | further byte-wide control latches    |
+//! | 0x12N0_0000 / 0x12N0_0001 | 4  | port N: direction (1 = output), data |
 //! | 0x1400_0000 - 0x17ff_ffff | 5  | peripherals (not identified yet)     |
 //! | 0x1800_0000 - 0x1bff_ffff | 6  | Fujitsu Coral graphics controller    |
 //!
 //! Regions without a device model behave like RAM (so that register
 //! read-back works) and every access can be logged.
 
+use crate::dev::adc::Adc;
 use crate::dev::atapi::Atapi;
 use crate::dev::coral::{self, Coral};
 use crate::dev::flash::Flash;
@@ -61,6 +63,14 @@ pub struct Board {
     /// low for about six seconds the firmware masks interrupts and
     /// spins, waiting for the watchdog to reset the unit.
     pub gpio_in: [u8; 8],
+    /// Output latches and direction registers (1 = output) of the same
+    /// ports.
+    pub gpio_out: [u8; 8],
+    pub gpio_dir: [u8; 8],
+    pub adc: Adc,
+    /// Position of the motorised display, 0 (folded down, the drive and
+    /// card slots accessible) to 1023 (closed).
+    pub display_pos: u16,
     pub log: IoLog,
     pub pc: u32,
     pub irl: u8,
@@ -85,7 +95,11 @@ impl Board {
             atapi: Atapi::new(),
             can: Hcan::new(),
             uart: Default::default(),
-            gpio_in: [0, 0, 0x10, 0, 0, 0, 0, 0],
+            gpio_in: [0, 0, 0x10, 0x04, 0, 0, 0, 0],
+            gpio_out: [0; 8],
+            gpio_dir: [0; 8],
+            adc: Adc::with_inputs([0, 0, 0, 1023, 0, 0, 0, 0]),
+            display_pos: 1023,
             log: IoLog::new(false, 4),
             pc: 0,
             irl: 0,
@@ -169,6 +183,8 @@ impl Board {
     /// | display VSYNC   | +0x02, 11:8  | 6         |
     /// | Coral INT       | +0x02, 7:4   | -         |
     /// | serial ch. 1    | +0x08, 3:0   | -         |
+    /// | serial ch. 3    | +0x08, 11:8  | -         |
+    /// | A/D converter   | +0x12, 3:0   | -         |
     /// | CAN             | +0x12, 11:8  | -         |
     ///
     /// Level-triggered sources also show in the status register at
@@ -187,10 +203,48 @@ impl Board {
         if self.uart[1].irq() {
             level = level.max(self.ipr(0x08) & 0xf);
         }
+        if self.uart[3].irq() {
+            level = level.max((self.ipr(0x08) >> 8) & 0xf);
+        }
+        if self.adc.irq() {
+            level = level.max(self.ipr(0x12) & 0xf);
+        }
         if self.ipr(0x16) & self.ipr(0x1e) & 0x40 != 0 {
             level = level.max((self.ipr(0x02) >> 8) & 0xf);
         }
         self.irl = level as u8;
+    }
+
+    /// Advance the fold-down display by `ms` milliseconds.
+    ///
+    /// The display tilts down on a motor to uncover the CD drive and the
+    /// card slots.  Port 3 (0x1260_0001) drives it:
+    ///
+    /// | port 3 bit | direction | meaning                              |
+    /// |------------|-----------|--------------------------------------|
+    /// | 4          | out       | run the motor towards high readings  |
+    /// | 3          | out       | run the motor towards low readings   |
+    /// | 2          | in        | 0 only at the low end stop           |
+    ///
+    /// A/D input 3 follows the position (at most 94 at the low stop, at
+    /// least 894 at the high stop as far as the firmware is concerned).
+    /// A full sweep takes about 1.5 s here.
+    pub fn step_display(&mut self, ms: u32) {
+        let drive = self.gpio_out[3] & self.gpio_dir[3];
+        let step = (ms * 1023 / 1500).max(1) as i32;
+        let mut pos = self.display_pos as i32;
+        if drive & 0x10 != 0 && drive & 0x08 == 0 {
+            pos += step;
+        } else if drive & 0x08 != 0 && drive & 0x10 == 0 {
+            pos -= step;
+        }
+        self.display_pos = pos.clamp(0, 1023) as u16;
+        self.adc.input[3] = self.display_pos;
+        if self.display_pos > 94 {
+            self.gpio_in[3] |= 0x04;
+        } else {
+            self.gpio_in[3] &= !0x04;
+        }
     }
 
     /// Start of vertical blanking: latch the VSYNC interrupt request.
@@ -239,9 +293,15 @@ impl Board {
             return v;
         }
         match addr & 0xfff0_0000 {
-            0x1250_0000 | 0x1260_0000 | 0x1270_0000 => {
-                let v = self.gpio_in[((addr >> 20) & 7) as usize - 3] as u32;
+            0x1250_0000 | 0x1260_0000 | 0x1270_0000 if size == 1 => {
+                let i = ((addr >> 20) & 7) as usize - 3;
+                let v = if addr & 1 == 0 { self.gpio_dir[i] } else { (self.gpio_in[i] & !self.gpio_dir[i]) | (self.gpio_out[i] & self.gpio_dir[i]) } as u32;
                 self.log.log("gpio", false, addr, size, v, self.pc);
+                return v;
+            }
+            0x07d0_0000 => {
+                let v = self.adc.read(addr) as u32;
+                self.log.log("adc", false, addr, size, v, self.pc);
                 return v;
             }
             NVRAM_BASE => {
@@ -292,6 +352,19 @@ impl Board {
             return;
         }
         self.log.log(Self::area_name(addr), true, addr, size, v, self.pc);
+        match addr & 0xfff0_0000 {
+            0x1250_0000 | 0x1260_0000 | 0x1270_0000 if size == 1 => {
+                let i = ((addr >> 20) & 7) as usize - 3;
+                if addr & 1 == 0 {
+                    self.gpio_dir[i] = v as u8;
+                } else {
+                    self.gpio_out[i] = v as u8;
+                }
+                return;
+            }
+            0x07d0_0000 => return self.adc.write(addr, v as u16),
+            _ => {}
+        }
         if addr & 0xfff0_0000 == 0x07a0_0000 {
             self.uart[((addr >> 16) & 0xf) as usize].write(addr & 0xffff, v as u16);
             return;
