@@ -33,6 +33,7 @@ pub struct Machine {
     /// Frames sent to the unit periodically, standing in for the rest
     /// of the car: (frame, period in cycles, next due).
     can_cyclic: Vec<(Frame, u64, u64)>,
+    pub ignition: bool,
 }
 
 impl Default for Machine {
@@ -43,7 +44,7 @@ impl Default for Machine {
 
 impl Machine {
     pub fn new() -> Self {
-        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new() }
+        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new(), ignition: false }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -113,6 +114,27 @@ impl Machine {
         let due = self.cpu.cycles + period;
         self.can_cyclic.retain(|(f, _, _)| f.id != frame.id);
         self.can_cyclic.push((frame, period, due));
+    }
+
+    /// Ignition lock status as broadcast on the infotainment CAN bus
+    /// (identifier 0x271, byte 0: bit 0 = key in the lock, bit 1 =
+    /// ignition on).  The power manager reads it to decide whether to
+    /// run.
+    pub fn set_ignition(&mut self, on: bool) {
+        self.ignition = on;
+        self.can_send_cyclic(Frame::new(0x271, &[if on { 0x03 } else { 0x00 }]), 100);
+    }
+
+    /// A faceplate key was pressed or released.  Returns whether the
+    /// event reached the firmware; the front panel's interface has not
+    /// been reverse engineered yet, so for now it never does.
+    pub fn panel_key(&mut self, _name: &str, _down: bool) -> bool {
+        false
+    }
+
+    /// A faceplate knob was turned (see [`Machine::panel_key`]).
+    pub fn panel_knob(&mut self, _name: &str, _delta: i32) -> bool {
+        false
     }
 
     fn can_tick(&mut self) {

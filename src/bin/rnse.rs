@@ -4,7 +4,7 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-coral      dump the display lists sent to the graphics chip\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n  rnse ui <disc.iso> [ui options]      run it with the faceplate in a browser\n\nui options:\n  --port N           port to serve on (default 8080)\n  --bind ADDR        address to listen on (default 127.0.0.1)\n  --loader           run the update loader instead of the installed firmware\n  --no-ignition      start with the ignition off\n  --no-disc          start with an empty CD drive\n  --variant NAME     hardware variant (default V220)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-coral      dump the display lists sent to the graphics chip\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
     );
     std::process::exit(2);
 }
@@ -19,6 +19,7 @@ fn main() {
         "extract" if args.len() == 3 => extract(&args[1], &args[2]),
         "loader" if args.len() >= 2 => run(&args[1], &args[2..], true),
         "boot" if args.len() >= 2 => run(&args[1], &args[2..], false),
+        "ui" if args.len() >= 2 => ui(&args[1], &args[2..]),
         _ => usage(),
     };
     if let Err(e) = res {
@@ -92,10 +93,11 @@ struct Opts {
     trace_can: bool,
     trace_coral: bool,
     surfaces: Vec<(u32, usize, usize, usize, String)>,
+    ignition: bool,
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
-    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![] };
+    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| -> Result<&String, Box<dyn std::error::Error>> {
@@ -138,10 +140,7 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
                 }
                 o.surfaces.push((u32::from_str_radix(v[0].trim_start_matches("0x"), 16)?, v[1].parse()?, v[2].parse()?, v[3].parse()?, v[4].to_string()));
             }
-            "--ignition" => {
-                // Ignition lock status: key in (bit 0) and ignition on (bit 1).
-                o.can.push((rnse::dev::hcan::Frame::new(0x271, &[0x03]), 100));
-            }
+            "--ignition" => o.ignition = true,
             "--can" => {
                 // ID:HEXBYTES[@PERIOD_MS]
                 let v = next(&mut i)?;
@@ -233,6 +232,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
             m.install(v, &index);
         }
         m.start_os(v)?;
+    }
+    if o.ignition {
+        m.set_ignition(true);
     }
     for (frame, period) in &o.can {
         m.can_send_cyclic(frame.clone(), *period);
@@ -337,4 +339,189 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     let h = m.cpu.history();
     eprintln!("last PCs: {}", h[h.len() - 24..].iter().map(|p| format!("{:08x}", p)).collect::<Vec<_>>().join(" "));
     Ok(())
+}
+
+fn json_str(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '"' => out += "\\\"",
+            '\\' => out += "\\\\",
+            '\n' => out += "\\n",
+            c if (c as u32) < 0x20 => out += " ",
+            c => out.push(c),
+        }
+    }
+    out + "\""
+}
+
+/// Run the machine behind the browser front end.
+fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use rnse::ui::{encode_frame, serve, Shared, UiEvent};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    let (mut port, mut bind, mut loader, mut ignition, mut disc, mut variant) = (8080u16, "127.0.0.1".to_string(), false, true, true, "V220".to_string());
+    let mut i = 0;
+    while i < rest.len() {
+        let opt = rest[i].as_str();
+        let mut value = || -> Result<String, Box<dyn std::error::Error>> {
+            i += 1;
+            rest.get(i).cloned().ok_or_else(|| format!("{} needs a value", opt).into())
+        };
+        match opt {
+            "--port" => port = value()?.parse()?,
+            "--bind" => bind = value()?,
+            "--variant" => variant = value()?.to_uppercase(),
+            "--loader" => loader = true,
+            "--no-ignition" => ignition = false,
+            "--no-disc" => disc = false,
+            other => return Err(format!("unknown option {}", other).into()),
+        }
+        i += 1;
+    }
+
+    let image = std::fs::read(path)?;
+    let variants = fw::load_variants(&image)?;
+    let v = variants.iter().find(|v| v.name == variant).ok_or_else(|| format!("no variant {} on this disc", variant))?;
+    if let Some(bad) = v.modules.iter().find(|m| !rnse::board::Board::can_load(m.phys_addr(), m.size as usize)) {
+        return Err(format!("variant {} is built for a different memory map (module {} loads at {:#x}); only the V220 hardware is emulated so far", v.name, bad.name, bad.load_addr).into());
+    }
+    let what = if loader { format!("{} update loader", v.name) } else { format!("{} software {}", v.name, v.version) };
+
+    let build = |ignition: bool, disc: bool| -> Result<Machine, Box<dyn std::error::Error>> {
+        let mut m = Machine::new();
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        if disc {
+            m.board.atapi.load(image.clone());
+        }
+        if loader {
+            m.start_loader(v.module("LDM").ok_or("variant has no LDM module")?, [0; 3]);
+        } else {
+            let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap_or_default();
+            m.install(v, &index);
+            if let Some(a) = v.module("OSM").and_then(|os| Machine::known_printf(&os.version)) {
+                m.hook_printf(a);
+            }
+            m.start_os(v)?;
+            m.set_ignition(ignition);
+        }
+        Ok(m)
+    };
+
+    let shared = Arc::new(Mutex::new(Shared::default()));
+    let addr = serve(&format!("{}:{}", bind, port), shared.clone())?;
+    println!("rnse: {} running; open http://{}/ in a browser (Ctrl-C to quit)", what, addr);
+
+    let mut m = build(ignition, disc)?;
+    let mut stopped: Option<String> = None;
+    let mut last_rgb: Vec<u8> = Vec::new();
+    let mut seq = 0u32;
+    let mut log_sent = 0usize;
+    let mut note = String::new();
+    let mut disc_in = disc;
+    let (mut wall, mut cycles_mark, mut speed) = (Instant::now(), 0u64, 0.0f64);
+    let start = Instant::now();
+    // Emulated time is `emu_base_ms` (machines before the last restart)
+    // plus the current machine's clock.  It is held to wall-clock time
+    // minus `paused_ms`, the time spent stopped or given up as lag.
+    let (mut emu_base_ms, mut paused_ms) = (0u64, 0u64);
+    loop {
+        // Input from the page.
+        let events: Vec<UiEvent> = shared.lock().unwrap().events.drain(..).collect();
+        for ev in events {
+            match ev {
+                UiEvent::Key { name, down } => {
+                    let delivered = m.panel_key(&name, down);
+                    if down {
+                        note = format!("{} pressed{}", name, if delivered { "" } else { " (the front panel is not connected to the emulated hardware yet)" });
+                    }
+                }
+                UiEvent::Knob { name, delta } => {
+                    let delivered = m.panel_knob(&name, delta);
+                    note = format!("{} knob turned {}{}", name, if delta > 0 { "right" } else { "left" }, if delivered { "" } else { " (the front panel is not connected to the emulated hardware yet)" });
+                }
+                UiEvent::Ignition(on) => {
+                    ignition = on;
+                    if !loader {
+                        m.set_ignition(on);
+                    }
+                    note = format!("ignition {}", if on { "on" } else { "off" });
+                }
+                UiEvent::Disc(present) => {
+                    disc_in = present;
+                    m.board.atapi.insert(if present { Some(image.clone()) } else { None });
+                    note = if present { "disc inserted".into() } else { "disc removed".into() };
+                }
+                UiEvent::Reset => {
+                    emu_base_ms += m.cpu.cycles / m.cycles_per_ms();
+                    m = build(ignition, disc_in)?;
+                    stopped = None;
+                    log_sent = 0;
+                    note = "restarted".into();
+                    shared.lock().unwrap().push_log(b"\n--- restart ---\n");
+                }
+            }
+        }
+
+        // One display frame of emulated time.
+        let frame_cycles = m.frame_cycles;
+        if stopped.is_none() {
+            let stop = m.run(frame_cycles);
+            if stop != Stop::Budget {
+                stopped = Some(match &m.cpu.fault {
+                    Some(f) if m.reset_requested => format!("the firmware asked for a restart ({})", f),
+                    Some(f) => f.clone(),
+                    None => format!("{:?}", stop),
+                });
+            }
+        }
+
+        // Publish.
+        let (w, h, rgb) = m.board.coral.render();
+        {
+            let mut s = shared.lock().unwrap();
+            if rgb != last_rgb || s.frame.is_empty() {
+                seq = seq.wrapping_add(1);
+                s.frame = encode_frame(w, h, &rgb, seq);
+                s.frame_seq = seq;
+                last_rgb = rgb;
+            }
+            if m.console.len() > log_sent {
+                s.push_log(&m.console[log_sent..]);
+                log_sent = m.console.len();
+            }
+            s.status = format!(
+                "{{\"what\":{},\"seconds\":{:.2},\"speed\":{:.0},\"ignition\":{},\"disc\":{},\"stopped\":{},\"note\":{}}}",
+                json_str(&what),
+                m.cpu.cycles as f64 / m.cycles_per_ms() as f64 / 1000.0,
+                speed,
+                ignition,
+                disc_in,
+                stopped.as_deref().map(json_str).unwrap_or_else(|| "null".into()),
+                json_str(&note)
+            );
+        }
+
+        // Keep to real time, and measure how close we get.
+        let emulated_ms_total = emu_base_ms + m.cpu.cycles / m.cycles_per_ms();
+        let target = Duration::from_millis(emulated_ms_total);
+        let elapsed = start.elapsed() - Duration::from_millis(paused_ms);
+        if stopped.is_some() {
+            std::thread::sleep(Duration::from_millis(30));
+            paused_ms += 30;
+        } else if target > elapsed {
+            std::thread::sleep(target - elapsed);
+        } else if elapsed - target > Duration::from_millis(500) {
+            // Too slow to keep up: do not try to catch up later.
+            paused_ms += (elapsed - target).as_millis() as u64;
+        }
+        if wall.elapsed() >= Duration::from_secs(1) {
+            let ms = (m.cpu.cycles.saturating_sub(cycles_mark)) / m.cycles_per_ms();
+            speed = ms as f64 * 100.0 / wall.elapsed().as_millis().max(1) as f64;
+            wall = Instant::now();
+            cycles_mark = m.cpu.cycles;
+        }
+    }
 }

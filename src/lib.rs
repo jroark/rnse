@@ -8,3 +8,4 @@ pub mod iolog;
 pub mod machine;
 pub mod png;
 pub mod sh4;
+pub mod ui;

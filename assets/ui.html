@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>rnse</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0c0c0d; color: #c8c8cc; font: 14px/1.4 system-ui, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  /* The faceplate is 1619 x 971; everything inside is placed in percent
+     of that so the whole thing scales with the window. */
+  #unit { position: relative; width: 100%; aspect-ratio: 1619 / 971; user-select: none; }
+  #screen { position: absolute; left: 8.709%; top: 19.464%; width: 65.658%; height: 56.643%; background: #000; }
+  #plate { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .zone { position: absolute; cursor: pointer; border-radius: 6px; }
+  .zone.round { border-radius: 50%; }
+  .zone:hover { background: rgba(255, 60, 40, .10); }
+  .zone.down { background: rgba(255, 60, 40, .28); }
+  body.debug .zone { outline: 1px solid #3cf; }
+  #bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 14px 0 8px; }
+  button { background: #222226; color: #ddd; border: 1px solid #3a3a40; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  button:hover { background: #2c2c32; }
+  button.on { border-color: #d0392b; color: #ff6a55; }
+  #status { margin-left: auto; color: #88888f; font-variant-numeric: tabular-nums; }
+  #note { color: #b9954a; margin: 4px 0 10px; min-height: 1.4em; }
+  #log { height: 220px; overflow: auto; background: #111113; border: 1px solid #26262b; border-radius: 6px;
+         padding: 8px 10px; margin: 0; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; }
+  kbd { background: #222226; border: 1px solid #3a3a40; border-radius: 4px; padding: 0 5px; font: 12px ui-monospace, monospace; }
+  #help { color: #77777e; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <div id="unit">
+    <canvas id="screen" width="400" height="235"></canvas>
+    <img id="plate" src="faceplate.png" alt="">
+  </div>
+  <div id="bar">
+    <button id="ign" title="Ignition lock status on the CAN bus (key in, ignition on)">Ignition</button>
+    <button id="disc" title="Put the disc image in the drive or take it out">Disc</button>
+    <button id="reset" title="Restart the firmware">Restart</button>
+    <span id="status">connecting…</span>
+  </div>
+  <div id="note"></div>
+  <pre id="log" aria-label="Firmware debug log"></pre>
+  <div id="help">
+    Keys: <kbd>←</kbd> <kbd>→</kbd> turn the main knob, <kbd>Enter</kbd> press it, <kbd>Esc</kbd> RETURN,
+    <kbd>1</kbd>–<kbd>8</kbd> RADIO … SETUP, mouse wheel over a knob turns it.
+  </div>
+</main>
+<script>
+"use strict";
+const W = 1619, H = 971;
+// Click targets in faceplate pixels: [name, x0, y0, x1, y1] or, for the
+// knobs, [name, cx, cy, radius].
+const KEYS = [
+  ["EJECT", 112, 78, 250, 148], ["PREV", 1300, 90, 1422, 156], ["NEXT", 1438, 90, 1556, 156],
+  ["SOFT_TL", 1308, 205, 1424, 332], ["SOFT_TR", 1440, 205, 1562, 332],
+  ["SOFT_BL", 1308, 468, 1424, 588], ["SOFT_BR", 1440, 468, 1562, 588],
+  ["RETURN", 1305, 605, 1563, 677],
+  ["RADIO", 70, 833, 218, 900], ["MEDIA", 236, 833, 388, 900], ["NAME", 405, 833, 548, 900], ["TEL", 562, 833, 705, 900],
+  ["NAV", 722, 833, 865, 900], ["INFO", 882, 833, 1030, 900], ["CAR", 1050, 833, 1192, 900], ["SETUP", 1210, 833, 1362, 900],
+];
+const KNOBS = [["SELECT", "main", 1433, 400, 104], ["POWER", "volume", 1470, 787, 70]];
+
+const unit = document.getElementById("unit");
+const post = (q) => fetch("/input?" + q, { method: "POST" }).catch(() => {});
+const keyEvent = (name, down) => post(`type=key&name=${name}&down=${down ? 1 : 0}`);
+
+function addZone(name, x0, y0, x1, y1, round) {
+  const z = document.createElement("div");
+  z.className = "zone" + (round ? " round" : "");
+  z.title = name;
+  z.style.left = (100 * x0 / W) + "%"; z.style.top = (100 * y0 / H) + "%";
+  z.style.width = (100 * (x1 - x0) / W) + "%"; z.style.height = (100 * (y1 - y0) / H) + "%";
+  const up = () => { if (z.classList.contains("down")) { z.classList.remove("down"); keyEvent(name, false); } };
+  z.addEventListener("pointerdown", (e) => { e.preventDefault(); z.setPointerCapture(e.pointerId); z.classList.add("down"); keyEvent(name, true); });
+  z.addEventListener("pointerup", up);
+  z.addEventListener("pointercancel", up);
+  unit.appendChild(z);
+  return z;
+}
+for (const [name, x0, y0, x1, y1] of KEYS) addZone(name, x0, y0, x1, y1, false);
+for (const [name, knob, cx, cy, r] of KNOBS) {
+  const z = addZone(name, cx - r, cy - r, cx + r, cy + r, true);
+  z.addEventListener("wheel", (e) => { e.preventDefault(); post(`type=knob&name=${knob}&delta=${e.deltaY < 0 ? 1 : -1}`); }, { passive: false });
+}
+if (location.search.includes("debug")) document.body.classList.add("debug");
+
+const KEYMAP = { Enter: "SELECT", Escape: "RETURN", Backspace: "RETURN",
+  1: "RADIO", 2: "MEDIA", 3: "NAME", 4: "TEL", 5: "NAV", 6: "INFO", 7: "CAR", 8: "SETUP" };
+addEventListener("keydown", (e) => {
+  if (e.repeat && KEYMAP[e.key]) return;
+  if (e.key === "ArrowRight") post("type=knob&name=main&delta=1");
+  else if (e.key === "ArrowLeft") post("type=knob&name=main&delta=-1");
+  else if (KEYMAP[e.key]) keyEvent(KEYMAP[e.key], true);
+  else return;
+  e.preventDefault();
+});
+addEventListener("keyup", (e) => { if (KEYMAP[e.key]) keyEvent(KEYMAP[e.key], false); });
+
+// ---- screen -------------------------------------------------------------
+const canvas = document.getElementById("screen");
+const ctx = canvas.getContext("2d");
+let seq = 0xffffffff, image = null;
+async function pollFrame() {
+  try {
+    const r = await fetch("/frame?since=" + seq);
+    if (r.status === 200) {
+      const buf = new Uint8Array(await r.arrayBuffer());
+      const dv = new DataView(buf.buffer);
+      const w = dv.getUint16(4, true), h = dv.getUint16(6, true);
+      seq = dv.getUint32(8, true);
+      if (!image || image.width !== w || image.height !== h) {
+        canvas.width = w; canvas.height = h; image = ctx.createImageData(w, h);
+      }
+      const out = image.data;
+      let o = 0;
+      for (let i = 12; i + 3 < buf.length; i += 4) {
+        const r8 = buf[i + 1], g8 = buf[i + 2], b8 = buf[i + 3];
+        for (let n = buf[i]; n > 0; n--) { out[o] = r8; out[o + 1] = g8; out[o + 2] = b8; out[o + 3] = 255; o += 4; }
+      }
+      ctx.putImageData(image, 0, 0);
+    }
+  } catch (e) { /* server gone; keep trying */ }
+  setTimeout(pollFrame, 50);
+}
+pollFrame();
+
+// ---- status and log -----------------------------------------------------
+const ign = document.getElementById("ign"), disc = document.getElementById("disc");
+let st = {};
+ign.onclick = () => post("type=ignition&on=" + (st.ignition ? 0 : 1));
+disc.onclick = () => post("type=disc&in=" + (st.disc ? 0 : 1));
+document.getElementById("reset").onclick = () => post("type=reset");
+async function pollStatus() {
+  try {
+    st = await (await fetch("/status")).json();
+    ign.classList.toggle("on", !!st.ignition); ign.textContent = "Ignition " + (st.ignition ? "on" : "off");
+    disc.classList.toggle("on", !!st.disc); disc.textContent = st.disc ? "Disc in drive" : "No disc";
+    document.getElementById("status").textContent =
+      `${st.what} · ${(st.seconds || 0).toFixed(1)} s emulated · ${(st.speed || 0).toFixed(0)} % speed` + (st.stopped ? " · STOPPED: " + st.stopped : "");
+    document.getElementById("note").textContent = st.note || "";
+  } catch (e) { document.getElementById("status").textContent = "not connected"; }
+  setTimeout(pollStatus, 500);
+}
+pollStatus();
+
+const logEl = document.getElementById("log");
+const decoder = new TextDecoder("euc-jp");   // the firmware's messages are partly Japanese
+let logFrom = 0;
+async function pollLog() {
+  try {
+    const r = await fetch("/log?from=" + logFrom);
+    const next = parseInt(r.headers.get("X-Next") || "0", 10);
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    if (bytes.length) {
+      const stick = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8;
+      logEl.append(decoder.decode(bytes, { stream: true }));
+      if (logEl.textContent.length > 200000) logEl.textContent = logEl.textContent.slice(-150000);
+      if (stick) logEl.scrollTop = logEl.scrollHeight;
+    }
+    logFrom = next;
+  } catch (e) { /* keep trying */ }
+  setTimeout(pollLog, 400);
+}
+pollLog();
+</script>
+</body>
+</html>

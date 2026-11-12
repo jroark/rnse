@@ -7,7 +7,7 @@ It runs the unit's real firmware, taken from an ordinary firmware update
 CD.  No firmware is included in this repository; you need your own disc
 image.
 
-![The update loader running in the emulator](docs/loader.png)
+![The emulator's browser front end](docs/ui.png)
 
 ## Status
 
@@ -16,12 +16,12 @@ Work in progress.  What runs today, on the `V220` hardware variant:
 | | |
 |---|---|
 | Update loader (`LDM`) | Boots, shows its screens, reads the CD, erases and programs the flash and finishes the update, exactly as on the unit. |
-| Main software (`OSM` + applications) | The OS and all modules initialise, the scheduler runs with its 2 ms tick, tasks start, the file systems get formatted, and the system settles in its idle loop.  The display stays off: the power manager sees neither the key (S-contact) nor the ignition (terminal 15) on the CAN bus and goes to standby.  The CAN controller is the next thing to emulate. |
+| Main software (`OSM` + applications) | Boots, switches on and draws its user interface through the graphics chip's drawing engine.  It currently stops at a "system software is being checked" notice: it is waiting for the radio/audio processor, which is not emulated, to report its version. |
+| Front end | `rnse ui` shows the unit's faceplate in a browser with the live screen, the firmware's debug log and controls for ignition and the disc.  The keys and knobs are click targets but are not connected to the emulated hardware yet. |
 | Other variants on the disc (`V574`, `VB48`) | Parsed and extractable; not bootable yet (different memory map). |
 
-Not done yet: CAN bus, front panel keys, the serial links to the radio
-and GPS processors, sound, the Coral drawing engine (only display layers
-are implemented), a window to watch it live.
+Not done yet: front panel keys, the serial links to the radio and GPS
+processors, sound, the 3D half of the graphics chip, the SD card reader.
 
 See [docs/hardware.md](docs/hardware.md) for what is known about the
 machine, [docs/firmware-format.md](docs/firmware-format.md) for the disc
@@ -49,8 +49,11 @@ Make an ISO image of a firmware update CD (2048-byte sectors, e.g.
     rnse loader disc.iso --cycles 6000000000 \
         --screenshot update.png --save-flash flash.img
 
-    # Start the installed firmware
-    rnse boot disc.iso --trace-bios --screenshot screen.png
+    # Run the installed firmware with the faceplate in a browser
+    rnse ui disc.iso                 # then open http://127.0.0.1:8080/
+
+    # Or headless, for investigating
+    rnse boot disc.iso --ignition --trace-bios --screenshot screen.png
 
 The firmware's own debug log is printed on standard output.  The loader
 writes it to a serial port inside the unit; the main software formats its
@@ -63,14 +66,13 @@ What the main software says while it starts (shortened):
     [fw] _/_/_/ [Fugue]Formatting system ... _/_/_/
     [fw] Call PWM_Init_Proc()
     [fw] ---------------------PWM_Tpm_Boot !!
-    [fw] ★★★★★★★★★★ CAN_Pass_mzas() Error!! [00]
     [fw] KLINE task started!
     [fw] PWM_LAST_ON [1]
     [fw] Now State[1] Change State[3]
-    [fw] Now skon[0] Now Kl15[0]
-    [fw] T_STANDBY
+    [fw] MRADIO4 ON1
     [fw] [FP] DISP ON
-    [fw] Time Up t_sleepindication_wait  pwm_t_sleepindication_wait()
+    [fw] LAST_ON = TRUE!!
+    [fw] ROMID RETRY!!
 
 Useful options while investigating (see `rnse` without arguments for the
 full list):
@@ -78,6 +80,11 @@ full list):
     --io-log [N]       log the first N accesses to every device register
     --log-after N      ... but only start after N CPU cycles
     --onchip-log       include the SH-4's own peripheral registers
+    --ignition         put the ignition status frame on the CAN bus
+    --can ID:HEX[@MS]  send any other CAN frame periodically
+    --trace-can        CAN frames in both directions
+    --trace-coral      display lists sent to the graphics chip
+    --surface ...      save an off-screen drawing surface as a PNG
     --trace-atapi      CD drive commands
     --trace-bios       calls into the boot ROM
     --trace-exc        every exception and interrupt
@@ -111,7 +118,9 @@ written from the SH-4 manual instead (`src/sh4/tests.rs`).
 ## Layout
 
     src/sh4/        SH-4 CPU: interpreter, FPU, MMU, on-chip peripherals
-    src/dev/        devices: Coral display controller, ATAPI drive, flash
+    src/dev/        devices: Coral graphics chip, ATAPI drive, flash, CAN
+    src/ui.rs       HTTP server for the browser front end
+    assets/         the page and the faceplate picture it uses
     src/board.rs    memory map and interrupt routing of the main board
     src/bootrom.rs  stand-in for the boot ROM (not on the disc)
     src/machine.rs  start-up sequences, boot ROM services, run loop

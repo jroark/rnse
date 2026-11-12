@@ -58,6 +58,32 @@ impl Cpu {
         }
     }
 
+    /// Fast path for the classic busy-wait `1: dt Rn ; bf 1b`.
+    ///
+    /// Called when the BF is taken back to the instruction before it.  If
+    /// that is a DT, the remaining iterations do nothing but count Rn
+    /// down, so most of them are applied at once: Rn and the cycle
+    /// counter move exactly as if the loop had run, stopping short of the
+    /// next peripheral event so interrupt timing is unchanged.
+    #[inline]
+    fn skip_delay_loop<B: Bus>(&mut self, bus: &mut B, target: u32) {
+        let Ok(prev) = self.fetch(bus, target) else { return };
+        if prev & 0xf0ff != 0x4010 {
+            return;
+        }
+        let n = ((prev >> 8) & 0xf) as usize;
+        let left = self.r[n] as u64;
+        if left < 4 {
+            return;
+        }
+        let budget = self.io.next_event.min(self.run_end).saturating_sub(self.cycles) / 2;
+        let k = (left - 2).min(budget.saturating_sub(1));
+        if k > 0 {
+            self.r[n] -= k as u32;
+            self.cycles += 2 * k;
+        }
+    }
+
     pub(super) fn exec<B: Bus>(&mut self, bus: &mut B, op: u16) -> R {
         let n = ((op >> 8) & 0xf) as usize;
         let m = ((op >> 4) & 0xf) as usize;
@@ -682,7 +708,11 @@ impl Cpu {
                     // BF
                     self.no_slot()?;
                     if !self.t() {
-                        self.pc = self.pc.wrapping_add(2).wrapping_add(sext8(op) << 1);
+                        let target = self.pc.wrapping_add(2).wrapping_add(sext8(op) << 1);
+                        if op == 0x8bfd {
+                            self.skip_delay_loop(bus, target);
+                        }
+                        self.pc = target;
                     }
                 }
                 0xd => {

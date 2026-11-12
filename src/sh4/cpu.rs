@@ -115,6 +115,9 @@ pub struct Cpu {
     pub pc_hist: Vec<u32>,
     pub pc_hist_pos: usize,
     pub trace_exceptions: bool,
+    /// Cycle at which the current `run` call ends (fast paths must not
+    /// run past it).
+    pub(super) run_end: u64,
     /// Interrupts accepted per INTEVT code / 0x20, for statistics.
     pub irq_counts: [u64; 128],
     pub hypercalls_enabled: bool,
@@ -159,6 +162,7 @@ impl Cpu {
             pc_hist: vec![0; 256],
             pc_hist_pos: 0,
             trace_exceptions: false,
+            run_end: u64::MAX,
             irq_counts: [0; 128],
             hypercalls_enabled: false,
             hypercall: None,
@@ -518,6 +522,7 @@ impl Cpu {
     /// cycle counter; while the CPU sleeps, time skips to the next event.
     pub fn run<B: Bus>(&mut self, bus: &mut B, budget: u64) -> Stop {
         let end = self.cycles + budget;
+        self.run_end = end;
         let check_bp = !self.breakpoints.is_empty();
         while self.cycles < end {
             if self.cycles >= self.io.next_event {

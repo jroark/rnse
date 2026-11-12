@@ -329,3 +329,45 @@ fn tmu_underflow_raises_its_interrupt() {
     assert_eq!(cpu.io.intevt, 0x400);
     assert_eq!(cpu.irq_counts[0x400 >> 5], 1);
 }
+
+#[test]
+fn delay_loop_fast_path_keeps_register_and_time_exact() {
+    // mov.l count,r4 is done by setup; 1: dt r4 ; bf 1b ; mov #7,r1
+    let code = [0x4410, 0x8bfd, 0xe107];
+    let (c, _) = run(&code, |c, _| c.r[4] = 100_000);
+    assert_eq!(c.r[4], 0);
+    assert!(c.t());
+    assert_eq!(c.r[1], 7);
+    // The same loop one step at a time takes 2 instructions per count.
+    // `run` here only calls step(), which does not advance `cycles`
+    // itself, so the counter holds exactly what the fast path added.
+    assert!(c.cycles > 0 && c.cycles < 200_000);
+
+    // A timer interrupt due in the middle of the loop still arrives on
+    // time: run with TMU0 set to underflow after 400 cycles.
+    let mut ram = Ram(vec![0; 0x10000]);
+    for (i, op) in code.iter().enumerate() {
+        ram.write16(0x1000 + i as u32 * 2, *op);
+    }
+    ram.write16(0x3600, 0x0009);
+    let mut cpu = Cpu::new();
+    cpu.set_sr(SR_MD);
+    cpu.vbr = 0x8000_3000;
+    cpu.pc = 0x8000_1000;
+    cpu.r[4] = 1_000_000;
+    cpu.io.write(&mut ram, 0xffd0_0004, 2, 0x7000, 0, 0);
+    cpu.io.write(&mut ram, 0xffd8_0008, 4, 24, 0, 0);
+    cpu.io.write(&mut ram, 0xffd8_000c, 4, 24, 0, 0);
+    cpu.io.write(&mut ram, 0xffd8_0010, 2, 0x20, 0, 0);
+    cpu.io.write(&mut ram, 0xffd8_0004, 1, 1, 0, 0);
+    while cpu.io.intevt == 0 {
+        cpu.run(&mut ram, 16);
+        assert!(cpu.cycles < 2000, "interrupt was skipped over");
+    }
+    // 25 timer ticks of 16 cycles each = 400 cycles.
+    assert!((400..=404).contains(&cpu.cycles), "interrupt at cycle {}", cpu.cycles);
+    // Loop iterations done so far: two cycles each.
+    // (The handler runs on register bank 1; the loop counter is in bank 0.)
+    let done = 1_000_000 - cpu.r_bank[4] as u64;
+    assert!((198..=202).contains(&done), "{} iterations in 400 cycles", done);
+}
