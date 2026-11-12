@@ -34,6 +34,12 @@ pub struct Machine {
     /// of the car: (frame, period in cycles, next due).
     can_cyclic: Vec<(Frame, u64, u64)>,
     pub ignition: bool,
+    /// Print traffic on the radio processor's serial link.
+    pub trace_serial: bool,
+    /// Stand-in for the radio/audio processor on serial channel 1.
+    pub radio: crate::dev::radio::Radio,
+    /// When false, nothing answers on that link (as if unplugged).
+    pub radio_present: bool,
 }
 
 impl Default for Machine {
@@ -44,7 +50,7 @@ impl Default for Machine {
 
 impl Machine {
     pub fn new() -> Self {
-        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new(), ignition: false }
+        Machine { cpu: Cpu::new(), board: Board::new(), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -54,6 +60,10 @@ impl Machine {
             if m.kind != "LDR" {
                 self.board.load(m.phys_addr(), &m.data[..m.size as usize]);
             }
+        }
+        if index.audver.len() == 8 {
+            // A radio processor running the software that goes with this set.
+            self.radio.version.copy_from_slice(index.audver.as_bytes());
         }
         if let Some(os) = v.module("OSM") {
             // The module directory sits in the 256 bytes below the OS.
@@ -135,6 +145,17 @@ impl Machine {
     /// A faceplate knob was turned (see [`Machine::panel_key`]).
     pub fn panel_knob(&mut self, _name: &str, _delta: i32) -> bool {
         false
+    }
+
+    /// Bytes arrived from the unit on the radio processor's link.
+    fn radio_link(&mut self, from_unit: &[u8]) {
+        if !self.radio_present {
+            return;
+        }
+        let reply = self.radio.from_unit(from_unit);
+        if !reply.is_empty() {
+            self.board.uart[1].receive(&reply);
+        }
     }
 
     fn can_tick(&mut self) {
@@ -254,6 +275,7 @@ impl Machine {
     /// | 4  | pool                 | return the pool's memory break           |
     /// | 5  | pool, address        | set the pool's memory break              |
     /// | 6  | three out-pointers   | start-up status; 9 = cold start          |
+    /// | 13 | -                    | pointer to SOFIDX/NAVVER/AUDVER strings  |
     ///
     /// Modules claim their static RAM with 4 and 5 (`base = get(); ...;
     /// set(base + size)`), the OS first sets the break to the end of its
@@ -277,6 +299,9 @@ impl Machine {
             // Version string of a boot component; the application checks
             // the first three characters for other hardware projects.
             (0x3e, 1) => 0x8000_0406,
+            // Version block of the installed software: SOFIDX[4],
+            // NAVVER[8], AUDVER[8] as stored in the module directory.
+            (0x3e, 0x13) => 0x8000_c01c,
             (0x3e, 6) => {
                 for p in [regs[4], regs[5], regs[6]] {
                     self.poke32(p, 0);
@@ -318,6 +343,21 @@ impl Machine {
             }
             if !self.can_cyclic.is_empty() {
                 self.can_tick();
+            }
+            // `bra .` with every interrupt masked: the firmware has given
+            // up and is waiting for the watchdog.
+            if self.cpu.imask() == 15 && self.peek16(self.cpu.pc) == Some(0xaffe) {
+                self.cpu.fault = Some(format!("the firmware stopped itself at {:08x} with interrupts off (it expects the watchdog to reset the unit)", self.cpu.pc));
+                return Stop::Fault;
+            }
+            if !self.board.uart[1].tx.is_empty() {
+                let bytes = std::mem::take(&mut self.board.uart[1].tx);
+                if self.trace_serial {
+                    let ms = self.cpu.cycles / self.cycles_per_ms();
+                    eprintln!("[radio] {:>7} ms  unit -> {}", ms, bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+                }
+                self.radio_link(&bytes);
+                self.board.update_irl();
             }
             if self.cpu.cycles >= self.next_frame {
                 self.next_frame += self.frame_cycles;
@@ -363,6 +403,10 @@ impl Machine {
         } else {
             None
         }
+    }
+
+    pub fn peek16(&self, addr: u32) -> Option<u16> {
+        Some(u16::from_be_bytes([self.peek8(addr)?, self.peek8(addr.wrapping_add(1))?]))
     }
 
     pub fn peek32(&self, addr: u32) -> Option<u32> {
@@ -488,7 +532,7 @@ impl Machine {
         // The firmware's debug text goes out on serial channel 5 of the
         // companion chip; the SH-4's own SCIF is forwarded as well.
         let mut out: Vec<u8> = std::mem::take(&mut self.cpu.io.scif_tx);
-        out.append(&mut self.board.uart_tx[5]);
+        out.append(&mut self.board.uart[5].tx);
         if out.is_empty() {
             return;
         }

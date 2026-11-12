@@ -93,6 +93,8 @@ pub struct Coral {
     /// Display lists executed.
     pub lists: u64,
     pub trace: bool,
+    /// Debugging aid: show only this layer when set.
+    pub only_layer: Option<usize>,
     /// Display list commands executed, by type byte.
     pub cmd_counts: Vec<u64>,
     unknown: Vec<u32>,
@@ -118,7 +120,7 @@ impl Default for Coral {
 
 impl Coral {
     pub fn new() -> Self {
-        let mut c = Coral { vram: vec![0; VRAM_SIZE], regs: vec![0; REG_SIZE], log: IoLog::new(false, 4), frame: 0, fifo_words: 0, lists: 0, trace: false, cmd_counts: vec![0; 256], unknown: Vec::new() };
+        let mut c = Coral { vram: vec![0; VRAM_SIZE], regs: vec![0; REG_SIZE], log: IoLog::new(false, 4), frame: 0, fifo_words: 0, lists: 0, trace: false, only_layer: None, cmd_counts: vec![0; 256], unknown: Vec::new() };
         c.reset();
         c
     }
@@ -638,7 +640,11 @@ impl Coral {
             px[1] = (bg >> 8) as u8;
             px[2] = bg as u8;
         }
-        for i in self.layer_order() {
+        let order = match self.only_layer {
+            Some(l) => vec![l],
+            None => self.layer_order(),
+        };
+        for i in order {
             if !self.layer_enabled(i) {
                 continue;
             }

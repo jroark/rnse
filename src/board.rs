@@ -25,6 +25,7 @@ use crate::dev::atapi::Atapi;
 use crate::dev::coral::{self, Coral};
 use crate::dev::flash::Flash;
 use crate::dev::hcan::Hcan;
+use crate::dev::uart::Uart;
 use crate::iolog::IoLog;
 use crate::sh4::Bus;
 use std::collections::HashMap;
@@ -50,12 +51,15 @@ pub struct Board {
     pub coral: Coral,
     pub atapi: Atapi,
     pub can: Hcan,
-    /// Bytes transmitted on the companion chip's serial channels,
-    /// indexed by the channel digit of its address (0x07aN_0000).
-    pub uart_tx: [Vec<u8>; 16],
+    /// The companion chip's serial channels, indexed by the channel
+    /// digit of the address (0x07aN_0000).  Channel 5 carries the
+    /// loader's debug text, channel 1 the link to the radio processor.
+    pub uart: [Uart; 16],
     /// Levels on the byte-wide input ports at 0x1250_0001, 0x1260_0001
     /// and 0x1270_0001 (indices 2, 3, 4 of the firmware's port table).
-    /// What the individual bits mean is not known yet.
+    /// Known bits: port 2 bit 4 is a "supply good" signal; when it stays
+    /// low for about six seconds the firmware masks interrupts and
+    /// spins, waiting for the watchdog to reset the unit.
     pub gpio_in: [u8; 8],
     pub log: IoLog,
     pub pc: u32,
@@ -80,8 +84,8 @@ impl Board {
             coral: Coral::new(),
             atapi: Atapi::new(),
             can: Hcan::new(),
-            uart_tx: Default::default(),
-            gpio_in: [0; 8],
+            uart: Default::default(),
+            gpio_in: [0, 0, 0x10, 0, 0, 0, 0, 0],
             log: IoLog::new(false, 4),
             pc: 0,
             irl: 0,
@@ -138,12 +142,15 @@ impl Board {
     }
 
     /// The 32-bit interrupt status register at 0x07b0_0018.  Bits known
-    /// from the OS's handlers: 14 = CAN.  (2, 13 and 29 are tested too;
+    /// from the OS's handlers: 14 = CAN, 24 = serial channel 1.  (2, 13 and 29 are tested too;
     /// their sources are not identified.)
     fn irq_status(&self) -> u32 {
         let mut s = 0;
         if self.can.irq() {
             s |= 1 << 14;
+        }
+        if self.uart[1].irq() {
+            s |= 1 << 24;
         }
         s
     }
@@ -161,6 +168,7 @@ impl Board {
     /// | ATAPI INTRQ     | +0x00, 7:4   | -         |
     /// | display VSYNC   | +0x02, 11:8  | 6         |
     /// | Coral INT       | +0x02, 7:4   | -         |
+    /// | serial ch. 1    | +0x08, 3:0   | -         |
     /// | CAN             | +0x12, 11:8  | -         |
     ///
     /// Level-triggered sources also show in the status register at
@@ -175,6 +183,9 @@ impl Board {
         }
         if self.coral.irq() {
             level = level.max((self.ipr(0x02) >> 4) & 0xf);
+        }
+        if self.uart[1].irq() {
+            level = level.max(self.ipr(0x08) & 0xf);
         }
         if self.ipr(0x16) & self.ipr(0x1e) & 0x40 != 0 {
             level = level.max((self.ipr(0x02) >> 8) & 0xf);
@@ -220,6 +231,11 @@ impl Board {
                 _ => (status >> ((3 - (addr & 3)) * 8)) & 0xff,
             };
             self.log.log("intc", false, addr, size, v, self.pc);
+            return v;
+        }
+        if addr & 0xfff0_0000 == 0x07a0_0000 {
+            let v = self.uart[((addr >> 16) & 0xf) as usize].read(addr & 0xffff) as u32;
+            self.log.log("uart", false, addr, size, v, self.pc);
             return v;
         }
         match addr & 0xfff0_0000 {
@@ -276,9 +292,8 @@ impl Board {
             return;
         }
         self.log.log(Self::area_name(addr), true, addr, size, v, self.pc);
-        if addr & 0xfff0_ffff == 0x07a0_0006 {
-            // Serial channel transmit data register.
-            self.uart_tx[((addr >> 16) & 0xf) as usize].push(v as u8);
+        if addr & 0xfff0_0000 == 0x07a0_0000 {
+            self.uart[((addr >> 16) & 0xf) as usize].write(addr & 0xffff, v as u16);
             return;
         }
         for i in 0..size {
