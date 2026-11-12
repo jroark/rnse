@@ -9,11 +9,13 @@ pub struct IoLog {
     /// Print at most this many accesses per (address, direction).
     pub limit: u32,
     counts: HashMap<(u32, bool), u32>,
+    /// Return address at the time of the access (set by the owner).
+    pub pr: u32,
 }
 
 impl IoLog {
     pub fn new(enabled: bool, limit: u32) -> Self {
-        IoLog { enabled, limit, counts: HashMap::new() }
+        IoLog { enabled, limit, counts: HashMap::new(), pr: 0 }
     }
 
     #[inline]
@@ -21,17 +23,17 @@ impl IoLog {
         if !self.enabled {
             return;
         }
-        self.log_slow(what, write, addr, size, val, pc);
+        self.log_slow(what, write, addr, size, val, pc, self.pr);
     }
 
     #[cold]
-    fn log_slow(&mut self, what: &str, write: bool, addr: u32, size: u32, val: u32, pc: u32) {
+    fn log_slow(&mut self, what: &str, write: bool, addr: u32, size: u32, val: u32, pc: u32, pr: u32) {
         let c = self.counts.entry((addr, write)).or_insert(0);
         *c += 1;
         if *c <= self.limit {
             let w = (size * 2) as usize;
             eprintln!(
-                "[io] {:<6} {} {:08x}.{} {} {:0w$x}  pc={:08x}{}",
+                "[io] {:<6} {} {:08x}.{} {} {:0w$x}  pc={:08x} pr={:08x}{}",
                 what,
                 if write { "W" } else { "R" },
                 addr,
@@ -39,6 +41,7 @@ impl IoLog {
                 if write { "<=" } else { "=>" },
                 val,
                 pc,
+                pr,
                 if *c == self.limit { "  (further accesses not shown)" } else { "" },
                 w = w
             );

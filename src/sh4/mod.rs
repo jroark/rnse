@@ -25,10 +25,11 @@ pub trait Bus {
     fn write16(&mut self, addr: u32, val: u16);
     fn write32(&mut self, addr: u32, val: u32);
 
-    /// Called before each instruction with its address, so that devices
-    /// can attribute accesses when logging.  Optional.
+    /// Called before each instruction with its address and the current
+    /// return address, so that devices can attribute accesses when
+    /// logging.  Optional.
     #[inline(always)]
-    fn set_pc(&mut self, _pc: u32) {}
+    fn set_pc(&mut self, _pc: u32, _pr: u32) {}
 
     /// Level currently encoded on the IRL3-0 pins (0 = none, 15 = highest).
     #[inline(always)]

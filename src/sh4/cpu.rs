@@ -479,7 +479,7 @@ impl Cpu {
         self.insn_pc = pc;
         self.pc_hist[self.pc_hist_pos & 255] = pc;
         self.pc_hist_pos = self.pc_hist_pos.wrapping_add(1);
-        bus.set_pc(pc);
+        bus.set_pc(pc, self.pr);
         match self.fetch(bus, pc) {
             Ok(op) => {
                 self.pc = pc.wrapping_add(2);
