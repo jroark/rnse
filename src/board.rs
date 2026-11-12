@@ -55,8 +55,10 @@ impl Model {
     /// The hardware a firmware variant on the disc is built for.
     pub fn for_variant(name: &str) -> Option<Model> {
         match name {
-            "V220" => Some(Model::Rnse192),
-            "V574" | "VB48" => Some(Model::Rnse193),
+            // V220: Europe; V222: North America.
+            "V220" | "V222" => Some(Model::Rnse192),
+            // V574: Europe; V575: North America; VB48: not known.
+            "V574" | "V575" | "VB48" => Some(Model::Rnse193),
             _ => None,
         }
     }

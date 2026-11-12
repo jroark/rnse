@@ -391,6 +391,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         let can = &*m.can();
         let boxes: Vec<String> = can.mailboxes().iter().filter(|(_, id, _)| *id != 0).map(|(n, id, mode)| format!("{}:{:03x}{}", n, id, match mode { 0 => "t", 2 | 3 => "r", 7 => "-", _ => "?" })).collect();
         eprintln!("can: {} frames sent by the unit, {} delivered to it ({} matched no mailbox); mailboxes {}", can.tx_count, can.rx_count, can.rx_dropped, boxes.join(" "));
+        if o.trace_can {
+            eprint!("{}", can.describe());
+        }
         let mut seen = std::collections::BTreeMap::new();
         for f in &can.tx {
             *seen.entry(f.id).or_insert((0u32, f.clone())) = (seen.get(&f.id).map(|x: &(u32, rnse::dev::hcan::Frame)| x.0).unwrap_or(0) + 1, f.clone());

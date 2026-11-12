@@ -345,6 +345,41 @@ impl Hcan {
         false
     }
 
+    /// Program a mailbox the way firmware would: `mode` 0 = transmit,
+    /// 2 or 3 = receive; `mask` bits set are "don't care".
+    pub fn configure_mailbox(&mut self, n: usize, id: u16, mask: u16, mode: u8) {
+        let base = MB + n * 0x20;
+        self.w16(base, (id & 0x7ff) << self.id_shift);
+        self.w16(base + self.mask, (mask & 0x7ff) << self.id_shift);
+        self.regs[base + self.ctl] = (self.regs[base + self.ctl] & !7) | (mode & 7);
+    }
+
+    /// One line per mailbox that is in use: identifier, type, acceptance
+    /// mask, length, data, and whether its interrupt is unmasked.
+    pub fn describe(&self) -> String {
+        let mbimr = self.r32(MBIMR1);
+        let mut out = String::new();
+        for n in 0..32 {
+            let base = MB + n * 0x20;
+            if self.regs[base..base + 0x14].iter().all(|b| *b == 0) {
+                continue;
+            }
+            let mask = (self.r16(base + self.mask) >> self.id_shift) & 0x7ff;
+            let data: Vec<String> = self.regs[base + 8..base + 16].iter().map(|b| format!("{:02x}", b)).collect();
+            out += &format!(
+                "  mailbox {:2}: id {:03x} type {} mask {:03x} dlc {} data {} irq {}\n",
+                n,
+                self.mb_id(n),
+                self.mb_mode(n),
+                mask,
+                self.regs[base + self.ctl + 1] & 0xf,
+                data.join(" "),
+                if mbimr & (1 << n) == 0 { "on" } else { "off" }
+            );
+        }
+        out
+    }
+
     /// Identifiers the firmware has set up, as (mailbox, id, mode).
     pub fn mailboxes(&self) -> Vec<(usize, u16, u8)> {
         (0..32).map(|n| (n, self.mb_id(n), self.mb_mode(n))).collect()

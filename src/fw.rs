@@ -333,8 +333,8 @@ impl IndexInfo {
     }
 }
 
-/// Build the 256 byte module directory the update loader writes to flash
-/// just below the OS module once everything is installed.  The OS walks
+/// Build the 256 byte module directory V220's update loader writes to
+/// flash just below the OS module once everything is installed.  The OS walks
 /// it at start-up to find and initialise the other modules.
 ///
 /// ```text
@@ -379,18 +379,31 @@ pub fn module_directory(v: &Variant, index: &IndexInfo) -> [u8; 0x100] {
     d
 }
 
-/// The module directory of the 193 family: 512 bytes at 0x400000, in
-/// front of the OS module.  The boot ROM walks it to start the modules.
+/// The two-digit code in front of the software version in a module
+/// directory.  It follows the variant name (V220 "00", V222 "02"; V574
+/// "00", V575 "01"), so it is presumably a market code that the loader
+/// derives from the project number.
+pub fn market_code(variant: &str) -> &'static str {
+    match variant {
+        "V222" => "02",
+        "V575" => "01",
+        _ => "00",
+    }
+}
+
+/// The compact module directory, written by every loader except V220's:
+/// in the 256 bytes below the OS on the 192 (V222), in the 512 bytes
+/// below it on the 193.  Whoever starts the modules walks it.
 ///
 /// ```text
 /// 0x00  ".OS "  version[8]  address          the OS module
-/// 0x10  "00", ' ', software version "1040"
+/// 0x10  market code, ' ', software version, e.g. "00 1040"
 /// 0x18  number of further modules
 /// 0x1c  tag[4] version[8] address            one per module
-///       then SOFIDX[4] NAVVER[8] AUDVER[8] TXTVER[4] ".IDX"
+///       then SOFIDX[4] NAVVER[8] AUDVER[8] (TXTVER[4]) ".IDX"
 /// ```
-pub fn module_directory_193(v: &Variant, index: &IndexInfo) -> [u8; 0x200] {
-    let mut d = [0u8; 0x200];
+pub fn module_directory_compact(v: &Variant, index: &IndexInfo, size: usize) -> Vec<u8> {
+    let mut d = vec![0u8; size];
     fn put(d: &mut [u8], off: usize, s: &[u8], max: usize) {
         let n = s.len().min(max);
         d[off..off + n].copy_from_slice(&s[..n]);
@@ -404,7 +417,7 @@ pub fn module_directory_193(v: &Variant, index: &IndexInfo) -> [u8; 0x200] {
     if let Some(os) = v.module("OSM") {
         entry(&mut d, 0, os);
     }
-    put(&mut d, 0x10, format!("00 {}", v.version).as_bytes(), 8);
+    put(&mut d, 0x10, format!("{} {}", market_code(&v.name), v.version).as_bytes(), 8);
     let order = ["APM", "APFM", "AUM", "FONT", "VRM", "DIG"];
     let mut n = 0usize;
     for name in order {
@@ -414,13 +427,27 @@ pub fn module_directory_193(v: &Variant, index: &IndexInfo) -> [u8; 0x200] {
         }
     }
     d[0x18..0x1c].copy_from_slice(&(n as u32).to_be_bytes());
-    let o = 0x1c + n * 16;
+    let mut o = 0x1c + n * 16;
     put(&mut d, o, index.sofidx.as_bytes(), 4);
     put(&mut d, o + 4, index.navver.as_bytes(), 8);
     put(&mut d, o + 12, index.audver.as_bytes(), 8);
-    put(&mut d, o + 20, index.txtver.as_bytes(), 4);
-    put(&mut d, o + 24, b".IDX", 4);
+    o += 20;
+    if !index.txtver.is_empty() {
+        put(&mut d, o, index.txtver.as_bytes(), 4);
+        o += 4;
+    }
+    put(&mut d, o, b".IDX", 4);
     d
+}
+
+/// The module directory for a variant, as its loader writes it, and its
+/// distance below the OS module.
+pub fn module_directory_for(v: &Variant, index: &IndexInfo) -> Vec<u8> {
+    match v.name.as_str() {
+        "V220" => module_directory(v, index).to_vec(),
+        n if n.starts_with("V22") => module_directory_compact(v, index, 0x100),
+        _ => module_directory_compact(v, index, 0x200),
+    }
 }
 
 /// Load the variants from either an ISO image of the update disc or a

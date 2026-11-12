@@ -11,9 +11,10 @@ image.
 
 ## Status
 
-Work in progress.  The disc carries software for two generations of the
-unit, which are different computers.  What runs today on the older one
-(part number 8P0 035 192, firmware variant `V220`):
+Work in progress.  The update discs carry software for two generations
+of the unit, which are different computers, each in a European and a
+North American version.  What runs today on the older one (part number
+8P0 035 192, firmware variant `V220`; see below for `V222`):
 
 | | |
 |---|---|
@@ -21,13 +22,16 @@ unit, which are different computers.  What runs today on the older one
 | Main software (`OSM` + applications) | Boots into its user interface: radio, media, address book, telephone, navigation, info, car and set-up screens, menus and drop-down lists, drawn through the graphics chip's drawing engine.  The stand-ins for the car (ignition on the CAN bus), the radio processor and the faceplate are just enough for that; there is no tuner, sound, GPS or map behind the screens. |
 | Front end | `rnse ui` shows the unit's faceplate in a browser with the live screen.  Keys, soft keys and both knobs work (mouse, touch or keyboard); below are the firmware's debug log and switches for ignition and the disc. |
 
-And on the 2010 unit (8P0 035 193, variants `V574` and `VB48`), which is
-built around an SH7770-family system-on-chip:
+And on the 2010 unit (8P0 035 193, variants `V574`, `V575` and `VB48`),
+which is built around an SH7770-family system-on-chip:
 
 | | |
 |---|---|
 | Update loader | Boots, shows its screen on the 800 x 480 display, reads the CD and writes the flash; the result is byte-for-byte the modules on the disc.  `rnse loader disc.iso --variant V574` |
-| Main software | Starts: all modules initialise, the tick runs, the tasks come up and write the same kind of log as on the 192.  Nothing on the screen yet, and the car, radio processor and faceplate are not connected on this model.  `rnse boot disc.iso --variant V574` |
+| Main software | Starts: all modules initialise, the tick runs, the tasks come up and write the same kind of log as on the 192.  It sees the ignition on the CAN bus.  Nothing on the screen yet; the radio processor and faceplate are not connected on this model.  `rnse boot disc.iso --variant V574` |
+
+The North American 192 software (`V222`) is installed by its loader and
+starts, but stays on a dark screen where `V220` shows its first picture.
 
 Not done yet: the power button, opening the display, CD playback, the
 GPS and SD card processors, sound, the 3D half of the graphics chip.

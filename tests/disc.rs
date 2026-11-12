@@ -60,7 +60,7 @@ fn loader_installs_the_firmware() {
         assert_eq!(&m.board.flash[a..a + n], &module.data[..n], "module {} as written by the loader", module.name);
     }
     // Module directory below the OS.
-    assert_eq!(&m.board.flash[0xc000..0xc100], &direct.board.flash[0xc000..0xc100]);
+    assert_eq!(&m.board.flash[0xc000..0xc100], &direct.board.flash[0xc000..0xc100], "module directory");
 }
 
 /// The loaders of the 193-family variants: they finish by letting the
@@ -95,7 +95,7 @@ fn loader_installs_the_firmware_193() {
         let os = v.module("OSM").unwrap();
         let dir = os.phys_addr() as usize - 0x200;
         let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
-        assert_eq!(&m.board.flash[dir..dir + 0x200], &fw::module_directory_193(v, &index)[..], "{}: module directory", v.name);
+        assert_eq!(&m.board.flash[dir..dir + 0x200], &fw::module_directory_for(v, &index)[..], "{}: module directory", v.name);
     }
 }
 
@@ -146,7 +146,8 @@ fn os_reaches_idle() {
 fn keys_reach_the_user_interface() {
     let Some(image) = disc() else { return };
     let variants = fw::load_variants(&image).unwrap();
-    let v = &variants[0];
+    // Only the European 192 software gets this far.
+    let Some(v) = variants.iter().find(|v| v.name == "V220") else { return };
     let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
     let mut m = Machine::new();
     m.echo_console = false;

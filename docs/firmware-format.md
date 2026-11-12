@@ -113,3 +113,28 @@ start-up to verify and initialise the other modules:
 
 `fw::module_directory` reproduces it; the test in `tests/disc.rs` compares
 it with what the emulated loader writes.
+
+## Variants seen
+
+| variant | hardware | market | disc | software index |
+|---------|----------|--------|------|----------------|
+| V220 | 192 | Europe | FW_0220_0650 | 0650 |
+| V222 | 192 | North America | NA_FW_0320_0350 | 0350 |
+| V574 | 193 | Europe | FW_0220_0650 | 0220 |
+| V575 | 193 | North America | NA_FW_0320_0350 | 0320 |
+| VB48 | 193 family | not known | FW_0220_0650 | 0700 |
+
+The North America sets have fewer modules (no `APFM` and `VRM` in V222,
+no `VRM` and `DIG` in V575) and V575 is installed by the same loader
+build as V574.
+
+## Module directory
+
+After an update the loader writes a directory of the installed modules
+right below the OS module.  There are two layouts.  V220's loader uses
+the one described in `fw::module_directory`.  Every other loader writes
+the compact one of `fw::module_directory_compact`: 256 bytes on the 192
+(V222), 512 on the 193.  Its fourth field starts with a two-digit code
+that follows the variant ("00" for V220, V574 and VB48, "02" for V222,
+"01" for V575) - presumably the market.
+

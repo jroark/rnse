@@ -108,6 +108,24 @@ and the control word (type, length) at +0x10.  The loader sends the same
 messages as the 192's: 0x661 and 0x604 status frames and network
 management on 0x436.
 
+### Who sets up the mailboxes
+
+The OS programs its transmit mailboxes but no receive mailbox: it only
+unmasks mailbox interrupts and then looks at the identifier of whatever
+arrives, so the boot ROM must have set the receive side up.  The one
+fixed point in the OS's receive path is mailbox 24, treated (as in the
+loader) as the network management range 0x400-0x43f.  The emulator's
+boot ROM stand-in programs that one and a single catch-all mailbox.
+
+The OS's table of expected messages (36 slots of 40 bytes at 0x8eac58a8
+in V5741040) lists 0x200, 0x271, 0x2c3, 0x351, 0x353, 0x359, 0x497,
+0x523, 0x527, 0x543, 0x5c3, 0x602, 0x621, 0x623, 0x625, 0x627, 0x635,
+0x63c, 0x651, 0x65d, 0x65f, 0x662, 0x665, 0x6c1, 0x6c5, 0x6d0, 0x6d1,
+0x6da and 0x6dc; it transmits 0x252, 0x25b, 0x261, 0x263, 0x361, 0x461,
+0x5ab, 0x604, 0x661, 0x67a, 0x6c0, 0x6c4, 0x6c6 and 0x6ca.  With the
+ignition message (0x271) arriving, the power manager goes on as on the
+192.
+
 ## Watchdog
 
 External, strobed through bit 0 of the port at 0xffc44008 from the
@@ -159,11 +177,10 @@ is at 0x80688afe in V5741040.
 ## Not done
 
 * The OS has not put anything on the screen yet: no plane is enabled.
-  How it draws (the chip has a graphics engine besides the display
-  unit) has not been looked at.
-* CAN: the OS never programs a mailbox in the emulator, so it does not
-  see the ignition message.  Boot ROM service 0x0b, which it calls with
-  two tables of buffers, may be part of the answer.
+  Its graphics library is the 192's (it still builds display lists),
+  and the display driver is ready, so it is probably waiting for the
+  same things the 192's did: the radio processor's version and a
+  closed display (`init_dsp_pos = 1` means open).
 * Serial ports (radio processor, faceplate), A/D converter (display
   position), the ports behind 0xffc4xxxx, DMA for the drive.
 * How the OS serves the watchdog.  The emulator only watches the

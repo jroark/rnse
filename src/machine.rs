@@ -90,14 +90,9 @@ impl Machine {
             self.radio.version.copy_from_slice(index.audver.as_bytes());
         }
         if let Some(os) = v.module("OSM") {
-            if self.board.model == crate::board::Model::Rnse193 {
-                let dir = crate::fw::module_directory_193(v, index);
-                self.board.load(os.phys_addr() - 0x200, &dir);
-            } else {
-                // The module directory sits in the 256 bytes below the OS.
-                let dir = crate::fw::module_directory(v, index);
-                self.board.load(os.phys_addr() - 0x100, &dir);
-            }
+            // The module directory sits right below the OS.
+            let dir = crate::fw::module_directory_for(v, index);
+            self.board.load(os.phys_addr() - dir.len() as u32, &dir);
         }
     }
 
@@ -129,6 +124,7 @@ impl Machine {
     pub fn known_printf(os_version: &str) -> Option<u32> {
         match os_version {
             "V2200815" => Some(0x801e_b344),
+            "V2220371" => Some(0x801d_e25c),
             // The 193's loaders format their log the same way and then
             // drop it.
             "V5740002" => Some(0x09e3_937a),
@@ -136,6 +132,7 @@ impl Machine {
             // The 193's OS builds.
             "V5741040" => Some(0x8068_8afe),
             "VB481000" => Some(0x8068_8146),
+            "V57510AA" => Some(0x8067_b886),
             _ => None,
         }
     }
@@ -340,6 +337,17 @@ impl Machine {
             int2.pri[0] |= 0x000e_0000;
             int2.mask &= !(1 << 1);
         }
+        if let Some(navi) = self.cpu.io.navi.as_mut() {
+            // On the 193 the boot ROM also programs the CAN receive
+            // mailboxes; the OS only unmasks their interrupts and looks
+            // at the identifier of whatever arrives.  The one fixed point
+            // is mailbox 24, which the OS (like the loader) treats as the
+            // network management range 0x400-0x43f.  The real assignment
+            // of the others is not known; a single catch-all mailbox
+            // serves the OS just as well.
+            navi.can.configure_mailbox(24, 0x400, 0x03f, 3);
+            navi.can.configure_mailbox(31, 0x000, 0x7ff, 3);
+        }
         // Likewise the CAN controller: the OS sets up mailboxes and
         // handles interrupts but never takes the chip out of reset.
         self.can().start();
@@ -467,13 +475,18 @@ impl Machine {
             (0x3e, 1) => 0x8000_0406,
             // Version block of the installed software: SOFIDX[4],
             // NAVVER[8], AUDVER[8] as stored in the module directory.
-            (0x3e, 0x13) if self.board.model == crate::board::Model::Rnse193 => {
-                // On the 193 the block follows the module entries of the
-                // directory at 0x400000.
-                let count = u32::from_be_bytes(self.board.flash[0x40_0018..0x40_001c].try_into().unwrap()).min(10);
-                0x8040_001c + count * 16
+            (0x3e, 0x13) => {
+                // The block follows the OS entry in V220's directory and
+                // the module entries in the compact one (see fw.rs).
+                let base: u32 = if self.board.model == crate::board::Model::Rnse193 { 0x40_0000 } else { 0xc000 };
+                let b = base as usize;
+                if self.board.flash[b + 0x1c] == b'.' {
+                    let count = u32::from_be_bytes(self.board.flash[b + 0x18..b + 0x1c].try_into().unwrap()).min(10);
+                    0x8000_0000 + base + 0x1c + count * 16
+                } else {
+                    0x8000_0000 + base + 0x1c
+                }
             }
-            (0x3e, 0x13) => 0x8000_c01c,
             // Called from the tick: on the 193 this is what serves the
             // watchdog once the OS runs (the OS never touches the strobe
             // itself).
