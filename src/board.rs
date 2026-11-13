@@ -144,6 +144,8 @@ pub struct Board {
     /// card slots accessible) to 1023 (closed).
     pub display_pos: u16,
     pub log: IoLog,
+    /// Accesses to hardware without a model.
+    pub unmodelled: crate::iolog::Unmodelled,
     /// Some device log is on and wants the return address of each
     /// instruction (see [`Board::refresh_logging`]).
     log_pr: bool,
@@ -185,6 +187,7 @@ impl Board {
             adc: Adc::with_inputs([0, 0, 0, 1023, 0, 0, 0, 0]),
             display_pos: 1023,
             log: IoLog::new(false, 4),
+            unmodelled: Default::default(),
             log_pr: false,
             pc: 0,
             irl: 0,
@@ -429,6 +432,7 @@ impl Board {
             0x0790_0000 => return self.atapi.read(8, size, self.pc),
             _ => {}
         }
+        self.unmodelled.note(addr, false, self.pc);
         let mut v = 0u32;
         for i in 0..size {
             let a = addr + i;
@@ -498,6 +502,7 @@ impl Board {
             self.uart[((addr >> 16) & 0xf) as usize].write(addr & 0xffff, v as u16);
             return;
         }
+        self.unmodelled.note(addr, true, self.pc);
         for i in 0..size {
             let a = addr + i;
             let b = (v >> ((size - 1 - i) * 8)) as u8;
@@ -520,6 +525,7 @@ impl Board {
             }
             return v;
         }
+        self.unmodelled.note(addr, false, self.pc);
         let mut v = 0u32;
         for i in 0..size {
             let a = addr + i;
@@ -543,6 +549,7 @@ impl Board {
             return;
         }
         self.log.log(Self::area_name_193(addr), true, addr, size, v, self.pc);
+        self.unmodelled.note(addr, true, self.pc);
         for i in 0..size {
             let a = addr + i;
             let b = (v >> ((size - 1 - i) * 8)) as u8;

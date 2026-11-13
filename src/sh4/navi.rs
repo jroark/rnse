@@ -110,6 +110,8 @@ pub struct Navi {
     /// The 2D graphics engine.
     pub ge: Q2,
     pub log: IoLog,
+    /// Accesses to on-chip registers without a model.
+    pub unmodelled: crate::iolog::Unmodelled,
 }
 
 impl Default for Navi {
@@ -149,7 +151,7 @@ impl Navi {
         let mut atapi = Atapi::new();
         atapi.packet_irq = true;
         // A/D inputs: the display closed (4) and 25 degrees (5).
-        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4) }
+        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() }
     }
 
     /// Whether this module, rather than the SH-4 model, owns `addr`.
@@ -281,7 +283,10 @@ impl Navi {
             DU..=0xfff9_ffff if size == 4 => self.du32((addr - DU) & !3),
             // Debug console status: transmitter empty, FIFO has room.
             a if a == SCIF_DEBUG + 0x10 => 0x0060,
-            _ => self.raw_read(addr, size),
+            _ => {
+                self.unmodelled.note(addr, false, pc);
+                self.raw_read(addr, size)
+            }
         };
         self.log.log("soc", false, addr, size, v, pc);
         v
@@ -350,7 +355,10 @@ impl Navi {
                 self.du_irq(intc);
             }
             a if a == SCIF_DEBUG + 0x0c => self.console.push(v as u8),
-            _ => self.raw_write(addr, size, v),
+            _ => {
+                self.unmodelled.note(addr, true, pc);
+                self.raw_write(addr, size, v)
+            }
         }
     }
 

@@ -51,6 +51,15 @@ commands; both card slots report empty. Card images, MP3 decoding and
 audio output are still missing, as are the power button, GPS receiver
 and the 3D half of the 192's graphics chip.
 
+`sdk/` has the start of a kit for writing software of your own for the
+unit: start-up code, a hardware layer for each generation and an
+example that draws, keeps time and talks on the debug serial port.
+`rnse custom` puts such a program in the update loader's place on a
+copy of a disc (it then runs from RAM and leaves the flash alone), and
+`--strict` lists what a program used that the emulator has no model of.
+It runs in the emulator on both units; whether a real unit starts it is
+untested.  See [docs/custom-firmware.md](docs/custom-firmware.md).
+
 See [docs/hardware.md](docs/hardware.md) and
 [docs/hardware-193.md](docs/hardware-193.md) for what is known about the
 two machines, [docs/firmware-format.md](docs/firmware-format.md) for the disc
@@ -197,6 +206,8 @@ written from the SH-4 manual instead (`src/sh4/tests.rs`).
     src/machine.rs  start-up sequences, boot ROM services, run loop
     src/fw.rs       ISO 9660, LOADING.KWI container, module headers
     src/bin/rnse.rs command line front end
+    sdk/            start-up code, hardware layers and an example for
+                    software of your own (docs/custom-firmware.md)
     tools/          CPU test tooling
     docs/           notes on the hardware and the firmware
 

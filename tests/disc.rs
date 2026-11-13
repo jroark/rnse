@@ -274,6 +274,57 @@ fn cd_audio_plays() {
     }
 }
 
+/// A program written from scratch (sdk/examples/hello), built with an
+/// SH-4 GCC if there is one, put in the loader's place on the disc and
+/// started the way the boot ROM starts the loader: it brings the board
+/// up, prints on the debug serial port, draws and keeps time, on both
+/// units.
+#[test]
+fn custom_program_runs() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let variants = fw::load_variants(&image).unwrap();
+    for (model, unit) in [(Model::Rnse192, "192"), (Model::Rnse193, "193")] {
+        let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(model)) else { continue };
+        match std::process::Command::new("sh").arg(sdk.join("build.sh")).args([unit, "hello"]).output() {
+            Ok(out) if out.status.success() => {}
+            // No cross compiler here: nothing to test.
+            _ => return,
+        }
+        let program = std::fs::read(sdk.join(format!("out/hello-{}.bin", unit))).unwrap();
+        let (custom, places) = fw::custom_loader(&image, &v.name, &program).unwrap();
+        assert_eq!(places.len(), 2, "{}: the loader is on the disc in the container and as a file: {:?}", v.name, places);
+        let variants = fw::load_variants(&custom).unwrap();
+        let v = variants.iter().find(|x| x.name == v.name).unwrap();
+        let ldm = v.module("LDM").unwrap();
+        assert!(ldm.checksum_ok());
+
+        let mut m = Machine::for_model(model);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.atapi().load(custom.clone());
+        m.start_loader(ldm, [0; 3]);
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(3_500 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        assert!(text.contains("rnse sdk: hello"), "{}: console: {:?}", v.name, text);
+        assert!(text.contains("tick 3") && !text.contains("tick 4"), "{}: three seconds have passed: {:?}", v.name, text);
+        assert!(!text.contains("unexpected"), "{}: {:?}", v.name, text);
+        // The picture: a white frame on the panel's edge, colour bars
+        // in the top third.
+        let (w, h, rgb) = m.render();
+        let at = |x: usize, y: usize| [rgb[(y * w + x) * 3], rgb[(y * w + x) * 3 + 1], rgb[(y * w + x) * 3 + 2]];
+        let near = |p: [u8; 3], q: [u8; 3]| p.iter().zip(q).all(|(a, b)| a.abs_diff(b) <= 4);
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (w / 2, 0), (0, h / 2), (w - 1, h / 2), (w / 2, h - 1)] {
+            assert!(near(at(x, y), [255, 255, 255]), "{}: frame at {},{} is {:?}", v.name, x, y, at(x, y));
+        }
+        assert!(near(at(w * 3 / 16, h / 6), [255, 255, 0]), "{}: second bar is {:?}", v.name, at(w * 3 / 16, h / 6));
+        assert!(near(at(w * 13 / 16, h / 6), [0, 0, 255]), "{}: seventh bar is {:?}", v.name, at(w * 13 / 16, h / 6));
+        assert!(near(at(w / 2, h * 7 / 8), [0, 0, 0]), "{}: background is {:?}", v.name, at(w / 2, h * 7 / 8));
+    }
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]

@@ -426,6 +426,17 @@ impl Machine {
         }
     }
 
+    /// Hardware the software touched that the emulator has no model of:
+    /// (address, reads, writes, PC of the first access).
+    pub fn unmodelled(&self) -> Vec<(u32, u32, u32, u32)> {
+        let mut all: Vec<_> = self.board.unmodelled.seen.iter().map(|(a, (r, w, pc))| (*a, *r, *w, *pc)).collect();
+        if let Some(navi) = self.cpu.io.navi.as_ref() {
+            all.extend(navi.unmodelled.seen.iter().map(|(a, (r, w, pc))| (*a, *r, *w, *pc)));
+        }
+        all.sort();
+        all
+    }
+
     /// Position of the motorised display, 0 (open) to 1023 (closed).
     pub fn display_pos(&self) -> u16 {
         match self.cpu.io.navi.as_ref() {

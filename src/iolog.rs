@@ -55,3 +55,27 @@ impl IoLog {
         v
     }
 }
+
+/// Accesses to addresses no device model answers for.  The emulator
+/// stores what is written there and reads it back, which lets the stock
+/// firmware run; for software of one's own it means that nothing can be
+/// said about what the real hardware would do.
+#[derive(Default)]
+pub struct Unmodelled {
+    /// Address (of the first byte accessed) to reads, writes and the PC
+    /// of the first access.
+    pub seen: std::collections::BTreeMap<u32, (u32, u32, u32)>,
+}
+
+impl Unmodelled {
+    #[cold]
+    pub fn note(&mut self, addr: u32, write: bool, pc: u32) {
+        let e = self.seen.entry(addr).or_insert((0, 0, pc));
+        if write {
+            e.1 += 1;
+        } else {
+            e.0 += 1;
+        }
+    }
+}
+

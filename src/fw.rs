@@ -403,6 +403,62 @@ pub fn repack(image: &[u8], replacement: &dyn Fn(&str, &str) -> Option<Vec<u8>>)
     Ok((out, changed))
 }
 
+/// A copy of an update disc image with a program of one's own in the
+/// place of a variant's update loader.
+///
+/// `payload` is the image from offset 0x80 of the module on: the four
+/// entry points, of which the boot ROM calls the first, then code and
+/// data, linked for the loader's load address.  The loader's 0x80-byte
+/// header is kept as it is but for the checksum, and the image keeps the
+/// loader's length (the rest is zero), so that the file the boot ROM
+/// reads differs from one it is known to accept in content only.  The
+/// loader is on the disc twice, in `LOADING.KWI` and as a file of its
+/// own, which the boot ROM loads; both are replaced.
+///
+/// Returns the new image and where it put the program.
+pub fn custom_loader(image: &[u8], variant: &str, payload: &[u8]) -> Result<(Vec<u8>, Vec<String>), FwError> {
+    let iso = Iso::new(image)?;
+    let kwi = iso.file("LOADING.KWI").ok_or_else(|| FwError::Format("disc image has no LOADING.KWI".into()))?;
+    let base = kwi.as_ptr() as usize - image.as_ptr() as usize;
+    let (offset, size) = kwi_modules(kwi)?
+        .into_iter()
+        .find(|(v, name, _, _)| v == variant && name == "LDM")
+        .map(|(_, _, offset, size)| (offset, size))
+        .ok_or_else(|| FwError::Format(format!("no loader for variant {} on this disc", variant)))?;
+    let old = &kwi[offset..offset + size];
+    let used = be32(old, 0x74) as usize;
+    if payload.len() < 16 || 0x80 + payload.len() > used.min(size) {
+        return bad(format!("the program is {:#x} bytes; the loader's place holds {:#x}", payload.len(), used.min(size).saturating_sub(0x80)));
+    }
+    let load = be32(old, 0x70);
+    let entry = be32(payload, 0);
+    if !(load + 0x90..load + used as u32).contains(&entry) {
+        return bad(format!("the program's first entry point, {:08x}, is not inside the loader's place at {:08x}: was it linked for this unit?", entry, load));
+    }
+    let mut new = old.to_vec();
+    new[0x80..].fill(0);
+    new[0x80..0x80 + payload.len()].copy_from_slice(payload);
+    fix_checksum(&mut new)?;
+
+    let mut out = image.to_vec();
+    let mut places = vec![format!("LOADING.KWI, module LDM of {}", variant)];
+    out[base + offset..base + offset + size].copy_from_slice(&new);
+    // The loader's own files: every file on the disc with the same
+    // contents as the module in the container.
+    for (path, entry) in iso.walk() {
+        let start = entry.lba as usize * 2048;
+        if entry.is_dir {
+            continue;
+        }
+        let Some(file) = image.get(start..start + entry.len as usize) else { continue };
+        if start != base && file.len() >= used && file[..used] == old[..used] {
+            out[start..start + used].copy_from_slice(&new[..used]);
+            places.push(path);
+        }
+    }
+    Ok((out, places))
+}
+
 /// Values from the `INDEX.TXT` file that accompanies a variant on the
 /// disc (`KEY:value$` lines).
 #[derive(Clone, Debug, Default)]
