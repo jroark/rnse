@@ -19,8 +19,14 @@
 //!
 //! The model moves whole frames: a transmit request completes at once
 //! and is handed to the host through [`Hcan::tx`]; the host injects
-//! received frames with [`Hcan::receive`].  Bit timing, error counters
-//! and remote frames are not modelled.
+//! received frames with [`Hcan::receive`].  Error counters and remote
+//! frames are not modelled.  Bit timing is not modelled either, but the
+//! registers' contents at each transmission are kept ([`Hcan::tx_timing`])
+//! so that software which talks at another rate than the stock software
+//! (21 quanta a bit, prescaler 14 on the 192 and 12 on the 193: 100
+//! kbit/s) can be told so.  With [`Hcan::alone`] set there is no other
+//! node on the bus: nothing arrives, and a frame sent is never
+//! acknowledged, so its request stays pending until it is cancelled.
 
 use crate::iolog::IoLog;
 use std::collections::VecDeque;
@@ -83,6 +89,10 @@ pub struct Hcan {
     pub rx_dropped: u64,
     pub log: IoLog,
     pub trace: bool,
+    /// No other node on the bus (a unit on the bench).
+    pub alone: bool,
+    /// The bit timing registers (BCR0, BCR1) when a frame was last sent.
+    pub tx_timing: Option<(u16, u16)>,
     /// Mailbox layout: bit position of the standard identifier in the
     /// first word, offset of the control word, offset of the mask.
     id_shift: u32,
@@ -98,7 +108,7 @@ impl Default for Hcan {
 
 impl Hcan {
     pub fn new() -> Self {
-        let mut h = Hcan { regs: vec![0; 0x500], tx: VecDeque::new(), tx_count: 0, rx_count: 0, rx_dropped: 0, log: IoLog::new(false, 4), trace: false, id_shift: 4, ctl: 4, mask: 0x10 };
+        let mut h = Hcan { regs: vec![0; 0x500], tx: VecDeque::new(), tx_count: 0, rx_count: 0, rx_dropped: 0, log: IoLog::new(false, 4), trace: false, alone: false, tx_timing: None, id_shift: 4, ctl: 4, mask: 0x10 };
         h.reset();
         h
     }
@@ -124,10 +134,19 @@ impl Hcan {
     /// (the update loader, built on the same hardware layer, programs
     /// IMR = 0xfebd).  The OS never starts the controller itself.
     pub fn start(&mut self) {
+        let (bcr0, bcr1) = self.stock_timing();
+        self.w16(0x06, bcr0);
+        self.w16(0x04, bcr1);
         self.w16(MCR, 0);
         self.w16(GSR, 0x0004);
         self.w16(IRR, 0);
         self.w16(IMR, 0xfebd);
+    }
+
+    /// BCR0 and BCR1 as the stock software of the unit with this
+    /// flavour of the controller sets them.
+    pub fn stock_timing(&self) -> (u16, u16) {
+        if self.id_shift == 4 { (0x000d, 0xf300) } else { (0x000b, 0xb730) }
     }
 
     #[inline]
@@ -263,7 +282,14 @@ impl Hcan {
                 self.transmit();
             }
             TXCR1 | 0x2a => {
-                // Nothing is ever pending, so there is nothing to cancel.
+                // Only a frame nobody acknowledges is ever pending.
+                let pending = self.r16(reg - 8);
+                let cancelled = pending & new;
+                if cancelled != 0 {
+                    self.w16(reg - 8, pending & !cancelled);
+                    self.w16(reg + 0x10, self.r16(reg + 0x10) | cancelled);
+                    self.update_irr();
+                }
             }
             TXACK1 | 0x32 | ABACK1 | 0x3a | RXPR1 | 0x42 | RFPR1 | 0x4a | UMSR1 | 0x5a => {
                 self.w16(reg, old & !new);
@@ -276,6 +302,11 @@ impl Hcan {
     fn transmit(&mut self) {
         let pending = self.r32(TXPR1);
         if pending == 0 || !self.running() {
+            return;
+        }
+        self.tx_timing = Some((self.r16(0x06), self.r16(0x04)));
+        if self.alone {
+            // Sent again and again, never acknowledged.
             return;
         }
         let mut ack = self.r32(TXACK1);
@@ -304,7 +335,7 @@ impl Hcan {
 
     /// A frame arrives from the bus.  Returns true if a mailbox took it.
     pub fn receive(&mut self, f: &Frame) -> bool {
-        if !self.running() {
+        if !self.running() || self.alone {
             return false;
         }
         self.rx_count += 1;

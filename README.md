@@ -52,9 +52,10 @@ audio output are still missing, as are the power button, GPS receiver
 and the 3D half of the 192's graphics chip.
 
 `sdk/` has the start of a kit for writing software of your own for the
-unit: start-up code, a hardware layer for each generation and three
+unit: start-up code, a hardware layer for each generation and four
 examples: one draws, keeps time and talks on the debug serial port, one
-reads the faceplate's keys and knobs, one reads a file from the CD.
+reads the faceplate's keys and knobs, one reads a file from the CD, one
+listens and talks on the CAN bus.
 `rnse custom` puts such a program in the update loader's place on a
 copy of a disc (it then runs from RAM and leaves the flash alone), and
 `--strict` lists what a program used that the emulator has no model of.

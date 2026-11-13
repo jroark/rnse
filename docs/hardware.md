@@ -254,6 +254,16 @@ on.  (0x2C3 serves the same purpose for a second car type.)  The
 emulator sends it every 100 ms while its ignition switch is on.  The
 unit's own network management identifier is 0x436.
 
+Bit timing as the loader sets it: BCR0 (+0x06) = 0x000d, BCR1 (+0x04) =
+0xf300, that is a prescaler of 14 and 1 + 16 + 4 = 21 quanta a bit.  A
+quantum of the HCAN2 is two clock periods times the prescaler, so the
+bit rate is the clock divided by 588: 100 kbit/s, the rate of Audi's
+infotainment bus, from 58.8 MHz, the CPU's bus clock (twice the 29.4
+MHz peripheral clock).  The loader does not put the controller in reset
+before it sets it up, and the OS never starts it at all: the boot ROM
+leaves it running, and the loader's BCR writes presumably only repeat
+what is there.
+
 ## A/D converter and the fold-down display
 
 The display folds down on a motor to uncover the CD drive and the SD

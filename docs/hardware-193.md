@@ -220,6 +220,16 @@ and the control word (type, length) at +0x10.  The loader sends the same
 messages as the 192's: 0x661 and 0x604 status frames and network
 management on 0x436.
 
+Bit timing as the loader sets it, after putting the controller in reset
+(MCR = 1): BCR0 (+0x06) = 0x000b, BCR1 (+0x04) = 0xb730, a prescaler of
+12 and 1 + 12 + 8 = 21 quanta a bit.  With the HCAN2's rule (a quantum
+is two clock periods times the prescaler) that is 100 kbit/s from 50.4
+MHz.  The faceplate port's divisor says 50 MHz too (9600 bit/s), while
+the timers count at 6.25 MHz, which is a quarter of 25 MHz as on every
+SH-4: the serial peripherals seem to run from twice the clock the timers
+divide.  (Both timer periods match the 192's: 2 ms for the OS's tick,
+5 ms for the CAN timer.)
+
 ### Who sets up the mailboxes
 
 The OS programs its transmit mailboxes but no receive mailbox: it only
@@ -264,10 +274,10 @@ See [boot-rom.md](boot-rom.md).
   high, FIFO control 0, control 0x30.  0xa1 is 9600 bit/s if the
   peripheral clock is 50 MHz and 4800 if it is 25 MHz; the debug port's
   divisor (0x36 at +0x30, sixteen samples a bit) then gives 57600 or
-  28800.  The 10 ms tick (62438 counts) fits either: a quarter of 25 MHz
-  or an eighth of 50 MHz.  See the 192's notes on why 9600 is the
-  likelier.  As on the 192 the OS resets the controller when it leaves a
-  command unanswered for two seconds.
+  28800.  The CAN controller's bit timing also points at 50 MHz (see
+  CAN), and the 192's notes say why 9600 is the likelier for the
+  faceplate.  As on the 192 the OS resets the controller when it leaves
+  a command unanswered for two seconds.
 
 ## A/D converter and ports
 

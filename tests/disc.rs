@@ -404,6 +404,40 @@ fn custom_program_reads_the_disc() {
     }
 }
 
+/// The SDK's CAN code against the controller's model: frames from the
+/// bus reach the program, its own frame goes out with the stock bit
+/// timing, and on a bus with nobody else it gives up as it should.
+#[test]
+fn custom_program_talks_on_the_can_bus() {
+    use rnse::board::Model;
+    use rnse::dev::hcan::Frame;
+    let Some(image) = disc() else { return };
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some((mut m, name, _)) = sdk_example(&image, model, "can") else { continue };
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(300 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert!(m.can().receive(&Frame::new(0x351, &[0x45, 0, 0, 0, 0, 0, 0, 0])), "{}: a mailbox takes the frame", name);
+        m.run(50 * ms);
+        assert!(m.can().receive(&Frame::new(0x635, &[0x5a, 0])), "{}", name);
+        assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        for line in ["rx 351: 45 00 00 00 00 00 00 00\r\n", "rx 635: 5A 00\r\n", "tx 661: 83 01 12 A0 00 00 00 00\r\n"] {
+            assert!(text.contains(line), "{}: {:?} in {:?}", name, line, text);
+        }
+        let stock = m.can().stock_timing();
+        assert_eq!(m.can().tx_timing, Some(stock), "{}: bit timing", name);
+        assert_eq!(m.can().tx.back(), Some(&Frame::new(0x661, &[0x83, 0x01, 0x12, 0xa0, 0, 0, 0, 0])), "{}", name);
+
+        // The same on a bench, with no other node to acknowledge.
+        let (mut m, name, _) = sdk_example(&image, model, "can").unwrap();
+        m.can().alone = true;
+        assert_eq!(m.run(1_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        assert!(text.contains("tx not acknowledged\r\n") && !text.contains("tx 661"), "{}: {:?}", name, text);
+        assert_eq!(m.can().tx_count, 0, "{}", name);
+    }
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]
