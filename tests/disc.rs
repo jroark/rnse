@@ -120,6 +120,33 @@ fn os_runs_193() {
     }
 }
 
+/// With the ignition on, the 193's OS draws its start-up picture through
+/// the graphics engine and shows it on the display unit's planes.
+#[test]
+fn os_draws_193() {
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    for v in variants.iter().filter(|v| rnse::board::Model::for_variant(&v.name) == Some(rnse::board::Model::Rnse193)) {
+        let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+        let mut m = Machine::for_model(rnse::board::Model::Rnse193);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        m.atapi().load(image.clone());
+        m.set_ignition(true);
+        m.start_os(v).unwrap();
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(40_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        let navi = m.cpu.io.navi.as_ref().unwrap();
+        assert!(navi.ge.lists > 20, "{}: the graphics engine ran {} display lists", v.name, navi.ge.lists);
+        assert!(navi.ge.unknown.is_empty(), "{}: display list commands not understood: {:x?}", v.name, navi.ge.unknown);
+        let (w, h, picture) = m.render();
+        assert_eq!((w, h), (800, 480));
+        let lit = picture.chunks(3).filter(|p| p.iter().any(|&c| c > 0x40)).count();
+        assert!(lit > 10_000, "{}: only {} pixels of the start-up picture are lit", v.name, lit);
+    }
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]

@@ -1,4 +1,4 @@
-# RNS-E hardware notes: the 193 unit (variants V574 and VB48)
+# RNS-E hardware notes: the 193 unit (variants V574, V575 and VB48)
 
 The 2010 unit (8P0 035 193) is a different computer from the 192
 described in [hardware.md](hardware.md).  Almost everything is inside
@@ -10,9 +10,12 @@ chips, which inherited the block almost unchanged.
 
 Variant `V574` (software index 0220) and `VB48` (0700) use the same
 memory map and the same radio processor software; their loaders differ
-by a few bytes.  Which cars `VB48` is for is not known.
+by a few bytes.  Which cars `VB48` is for is not known.  `V575` is the
+North American software (index 0320) for the same hardware.
 
 ![The 193's update loader in the emulator](loader-193.png)
+
+![The 193's main software (V575) in the emulator](os-193.png)
 
 ## Memory map
 
@@ -24,13 +27,19 @@ by a few bytes.  Which cars `VB48` is for is not known.
 | 0xfe008000, 0xfe800100 | not identified (a few writes at start-up; 0xfe800100 takes the key 0xa55a) |
 | 0xff802000            | interrupt pin control (the layout of the SH7780's INTC: sense, mask and mask-clear registers) |
 | 0xff804000            | interrupt controller |
-| 0xff923000, 0xff926000, 0xff927000 | serial ports with FIFO (OS only; not emulated yet) |
-| 0xff93c000 and other 0xff9xxxxx | further on-chip modules used by the OS only |
+| 0xff902000            | a second block of interrupt priority and mask registers, written alongside 0xff804000 (not emulated) |
+| 0xff908000, 0xff909000 | I2C masters (not emulated) |
+| 0xff915000            | serial port to the radio processor |
+| 0xff926000            | serial port with FIFO to the faceplate controller |
+| 0xff923000, 0xff927000 | further serial ports with FIFO (not emulated) |
+| 0xff93c000            | A/D converter |
+| 0xff93e000, 0xff93f000, 0xff940000 | ports; 0xff93f000 has the display motor and the supply monitor |
 | 0xffc40000, 0xffc44000 | ports; 0xffc44008 bit 0 strobes the external watchdog |
 | 0xffc62100            | ATAPI interface |
 | 0xffd80000, 0xffd81000, 0xffd82000 | timer units, three channels each, SH7750 layout |
 | 0xffdf0000            | CAN controller (RCAN-ET) |
 | 0xffe40000            | serial port with FIFO, initialised by the loader but silent |
+| 0xffe80000            | 2D graphics engine |
 | 0xfff80000            | display unit |
 
 Flash layout as the loader leaves it: boot ROM from 0 (not on the disc),
@@ -45,7 +54,10 @@ On-chip sources go through a controller with the layout of the SH7780's
 INTC2: twelve priority registers from 0xff804000 holding four fields
 each (the firmware writes them as bytes; the level is the value divided
 by two), mask-set and mask-clear registers at +0x38/+0x3c and a second
-pair at +0x108/+0x10c.  Everything is masked after reset.
+pair at +0x108/+0x10c.  Everything is masked after reset.  +0x30 and
++0x100 show the requests of the two halves, +0x34 and +0x104 those that
+are not masked; the radio link's handler looks at +0x100 before it
+touches its port.
 
 | source | INTEVT | priority field | mask bit | level used |
 |--------|--------|----------------|----------|------------|
@@ -54,6 +66,10 @@ pair at +0x108/+0x10c.  Everything is masked after reset.
 | timer 2, underflow and capture | 0x440, 0x460 | PRI0 bits 15:8 and 7:0 | 1 | 14, 12 (OS) |
 | ATAPI | 0x5e0 | PRI1 bits 7:0 | 7 | 3 |
 | CAN | 0x880 | PRI5 bits 23:16 | 25 | 5 |
+| graphics engine | 0x780 | PRI3 bits 7:0 | 19 | 7 |
+| serial port, radio processor | 0xd20 | PRI9 bits 15:8 | 9 of the second pair | 2 |
+| serial port, faceplate | 0xdc0 | PRI10 bits 23:16 | 14 of the second pair | 9 |
+| A/D converter | 0xf00 | PRI11 bits 15:8 | none found | 11 |
 
 The levels are the ones the 192 uses for the same jobs.  The timer
 fields are an inference: the loader sets bits 23:16 when it starts timer
@@ -71,24 +87,59 @@ use.
 800 x 480 panel.  Register names below are those of the Linux R-Car
 driver.
 
-* Timing as programmed by the loader: display period 832 x 496 inside
-  1056 x 525, data enable 800 wide starting 34 pixels into the period.
-  The emulator shows the 800 data-enable columns and, as an assumption,
-  the middle 480 lines.
-* Eight planes at +0x100 * n: mode (bits 1:0 = 8 bpp with palette, RGB
-  565 or ARGB 1555; bits 9:8 = which of four palettes; bit 14 = no
-  transparent colour), memory width, size, position, surface address,
-  start position in the surface, transparent colour.  Surfaces are
-  ordinary RAM.
+* Timing: a display period of 832 x 496 inside 1056 x 525, data enable
+  800 wide.  The loader starts the period at column 181 and line 24 and
+  draws its picture 16 columns and 8 lines into its surface; the OS
+  starts it at 197/32 and draws from the surface's corner.  So the panel
+  begins at a fixed place in the frame, 18 columns before the start of
+  data enable (215) and at line 32, and that is what the emulator shows.
+* Eight planes at +0x100 * n: mode at +0x00 (bits 1:0 = 8 bpp with
+  palette, RGB 565 or ARGB 1555; bits 9:8 = which of four palettes;
+  bits 14:12 = how the plane is laid over those behind it: bit 14 = no
+  transparent colour, 1 in the low two = alpha blending), memory width
+  +0x04, alpha +0x08, size +0x10/+0x14, position +0x18/+0x1c, surface
+  address +0x20 (repeated at +0x24 and +0x28), start position in the
+  surface +0x30/+0x34, transparent colour +0x44 (8 bpp) and +0x48 (16
+  bpp), memory length +0x50.  Surfaces are ordinary RAM.
+* Alpha: the low byte of the alpha register is the blending ratio.
+  With bits 9:8 set the ratio comes per pixel from another plane, whose
+  number (from 0) is in the low bits: an 8 bpp plane that is enabled
+  like the others but is not a picture.  The OS's blended planes all
+  work this way, each with its alpha plane's surface directly behind its
+  own in memory.  The A bit of ARGB 1555 pixels is not interpreted by
+  the emulator.
 * Plane priority register (+0x18): eight nibbles, each naming a plane
-  and enabling it with bit 3.  The emulator draws the highest nibble
-  first; with a single plane, as in the loader, this is untested.
+  and enabling it with bit 3; the lowest nibble is the front.  (The OS
+  puts its blended overlays in the low nibbles and the alpha planes in
+  the highest.)
 * Four palettes of 256 entries at +0x1000 * n, 0x00RRGGBB.
 * Status at +0x08 (bit 11 = vertical blanking, bit 14 = frame), cleared
   through +0x0c, enabled as interrupts through +0x10.
 
 The loader draws 8 bpp into a surface at 0x08110000 (the same frame
-buffer offset as on the 192) shown on plane 6 with palette 2.
+buffer offset as on the 192) shown on plane 6 with palette 2.  The OS
+uses plane 6 (16 bpp, transparent colour 0x7c1f) for its main picture
+and planes 1 and 3 as blended overlays (the note in the picture above
+is one), with planes 8 and 7 as their alpha.
+
+## Graphics engine
+
+Everything the OS shows is drawn by a 2D engine at 0xffe80000 that runs
+display lists from RAM; the firmware's messages call it "Q2", and the
+register layout is that of the engine Renesas later named M2DG.  The
+commands are not those of the 192's Coral chip.  [src/dev/q2.rs](../src/dev/q2.rs)
+describes registers and commands as far as they are known: register
+writes, rectangle fills, copies with a transparent colour, and blending
+a colour through an 8-bit coverage map, which is how text is drawn (the
+OS rasterises antialiased glyphs itself).  Surfaces are 16 bits per
+pixel, or 8 for alpha.
+
+The OS starts a list, waits for the interrupt its end raises (status bit
+2, INTEVT 0x780) for up to four seconds and logs `Q2 TIME OUT` if it
+does not come.
+
+Two commands (0xab, 0xaa) bracket drawing into a surface that has alpha
+values; what the engine does with them is partly a guess, see the source.
 
 ## ATAPI interface
 
@@ -97,8 +148,9 @@ device control at +0x38, one register per 32-bit word.  Data words carry
 the first byte of each pair in the low half.  Interface control,
 status, interrupt enable and timing registers follow from +0x80 (the
 layout of the later R-Car ATAPI block); the loader sets them up once and
-then works by programmed I/O.  The OS also uses the block's DMA
-registers, which are not emulated yet.
+then works by programmed I/O.  The OS polls bit 4 of the status register
+(+0x84), the drive's interrupt line, after each command.  It also uses
+the block's DMA registers, which are not emulated yet.
 
 ## CAN
 
@@ -125,6 +177,47 @@ in V5741040) lists 0x200, 0x271, 0x2c3, 0x351, 0x353, 0x359, 0x497,
 0x5ab, 0x604, 0x661, 0x67a, 0x6c0, 0x6c4, 0x6c6 and 0x6ca.  With the
 ignition message (0x271) arriving, the power manager goes on as on the
 192.
+
+The OS does not start from nothing here either: early on it asks the
+boot ROM (service 0x0b) for the state of the boot ROM's own CAN software,
+including the table of received messages and whether the ignition lock's
+message (0x271, or 0x2c3 on another generation of car) has been seen,
+and decides from the first byte of that message (bit 0 = key in the
+lock, bit 1 = ignition) whether to start up or go back to sleep.
+See [boot-rom.md](boot-rom.md).
+
+## Serial links
+
+* 0xff915000, to the radio processor: the 192's companion-chip serial
+  port with its registers four bytes apart (mode +0, baud rate +4,
+  control +8, transmit +0xc, status +0x10, receive +0x14, FIFO control
+  +0x18).  The protocol is the 192's (`01 command length data
+  checksum`), and the OS asks the same things in the same order.
+* 0xff926000, to the faceplate controller: an ordinary SCIF (control
+  +0x08, transmit +0x0c, status +0x10, receive +0x14, FIFO control
+  +0x18, receive count +0x20).  Same frames as on the 192; the OS sends
+  commands 0x02, 0x03, 0x06, 0x07, 0x09 and 0x0a once the controller has
+  announced itself with 0x0f.
+
+## A/D converter and ports
+
+The converter at 0xff93c000 has eight results at +0x00..+0x0e and a
+control register at +0x10 (bit 15 = done, bit 14 = interrupt enable,
+bit 13 = start).  The OS converts all inputs every few milliseconds and
+averages them:
+
+* input 4: position of the motorised display, as on the 192 (low =
+  open; the OS logs `init_dsp_pos = 2` when it reads as closed);
+* input 5: a temperature (the OS computes 25 + (1.45 V - U) / 8.2 mV);
+* another input tells the type of screen fitted; the emulator leaves it
+  at zero, which the OS logs as an error (`Adc_get_scrntype return
+  ZERO`) and survives.
+
+Port 0xff93f000 (direction +4, output +8, input +0xc): output bits 19
+and 18 drive the display motor (assumed: 19 towards closed), input bit
+20 is low only when the display is fully open, and input bit 22 has to
+be high or the OS stops itself after nine seconds, waiting for the
+watchdog: presumably the supply voltage monitor.
 
 ## Watchdog
 
@@ -168,23 +261,29 @@ a priority; the boot ROM has done that (the loader's value is level 7,
 with the timers' mask bit cleared).  The peripheral clock is 25 MHz,
 going by the tick's reload value.
 
-In the emulator the OS now starts all its tasks, checks its flash file
-system and runs its power manager.  Its log reads like the 192's did
-before the car and the other processors were answered: no ignition on
-the CAN bus, `ROMID RETRY`, `init_dsp_pos = 1` (display open).  `printf`
-is at 0x80688afe in V5741040.
+In the emulator the OS starts all its tasks, checks its flash file
+system, sees the ignition, talks to the radio processor and the
+faceplate, shows its start-up picture after about half a minute and
+then its user interface, on all three variants.  What it shows there is
+a note that the CD/DVD drive is not working: its drive task sends one
+ATAPI packet command and gets no further (see below).  `printf` is at
+0x80688afe in V5741040, 0x80688146 in VB481000 and 0x8067b886 in
+V57510AA.
 
 ## Not done
 
-* The OS has not put anything on the screen yet: no plane is enabled.
-  Its graphics library is the 192's (it still builds display lists),
-  and the display driver is ready, so it is probably waiting for the
-  same things the 192's did: the radio processor's version and a
-  closed display (`init_dsp_pos = 1` means open).
-* Serial ports (radio processor, faceplate), A/D converter (display
-  position), the ports behind 0xffc4xxxx, DMA for the drive.
+* The drive: after SET FEATURES (transfer mode) the OS issues a packet
+  command and never writes the packet.  Until that works the OS shows
+  its drive-fault note instead of the radio screen.
+* Keys do not do anything visible yet, though the faceplate link is up;
+  `rnse ui` is still for the 192 only.
+* The graphics engine's alpha commands, the A bit of ARGB pixels, and
+  any drawing command the screens seen so far did not use (lines and
+  polygons surely exist).
+* The second interrupt register block at 0xff902000, the I2C masters,
+  the remaining serial ports, DMA for the drive.
 * How the OS serves the watchdog.  The emulator only watches the
   loader's strobe.
 * Interrupt sources the OS registers handlers for and that have no
-  model: 0x480, 0x760, 0x780, 0x7a0, 0x940-0x980, 0xc00, 0xca0-0xce0,
-  0xd20, 0xdc0, 0xde0, 0xe20, 0xea0, 0xf00, 0xfa0.
+  model: 0x480, 0x760, 0x7a0, 0x940-0x980, 0xc00, 0xca0-0xce0, 0xde0,
+  0xe20, 0xea0, 0xfa0.

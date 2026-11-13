@@ -22,6 +22,28 @@ const ST_TX_READY: u16 = 1 << 8;
 const ST_RX_READY: u16 = 1 << 6;
 const ST_TX_END: u16 = 1 << 2;
 
+/// What a device at the far end of a serial line needs from a port.
+pub trait SerialPort {
+    /// Bytes the firmware has sent since the last call.
+    fn take_tx(&mut self) -> Vec<u8>;
+    /// Queue bytes for the firmware to receive.
+    fn feed(&mut self, data: &[u8]);
+    /// Receiver switched on and nothing waiting to be read.
+    fn rx_idle(&self) -> bool;
+}
+
+impl SerialPort for Uart {
+    fn take_tx(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.tx)
+    }
+    fn feed(&mut self, data: &[u8]) {
+        self.receive(data)
+    }
+    fn rx_idle(&self) -> bool {
+        self.control & 0x10 != 0 && self.rx.is_empty()
+    }
+}
+
 #[derive(Default)]
 pub struct Uart {
     mode: u16,

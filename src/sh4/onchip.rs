@@ -101,7 +101,7 @@ pub struct Int2Source {
 
 /// The sources identified so far, from the firmware's own set-up code.
 /// The index is the bit number in [`Int2::pending`].
-pub const INT2_SOURCES: [Int2Source; 6] = [
+pub const INT2_SOURCES: [Int2Source; 10] = [
     Int2Source { name: "TMU0", code: 0x400, pri: (0, 16), mask_bit: 1 },
     Int2Source { name: "TMU2", code: 0x440, pri: (0, 8), mask_bit: 1 },
     Int2Source { name: "TMU2 capture", code: 0x460, pri: (0, 0), mask_bit: 1 },
@@ -110,7 +110,21 @@ pub const INT2_SOURCES: [Int2Source; 6] = [
     Int2Source { name: "display", code: 0x3e0, pri: (0, 24), mask_bit: 0 },
     Int2Source { name: "CAN", code: 0x880, pri: (5, 16), mask_bit: 25 },
     Int2Source { name: "ATAPI", code: 0x5e0, pri: (1, 0), mask_bit: 7 },
+    // No mask bit found: the handler re-arms something at 0xff80_4260
+    // and 0xff90_2260 instead.
+    Int2Source { name: "A/D converter", code: 0xf00, pri: (11, 8), mask_bit: INT2_UNMASKED },
+    // The firmware writes the settings of these two to a second block at
+    // 0xff90_2000 as well, which is not modelled.
+    Int2Source { name: "radio link", code: 0xd20, pri: (9, 8), mask_bit: 32 + 9 },
+    Int2Source { name: "faceplate link", code: 0xdc0, pri: (10, 16), mask_bit: 32 + 14 },
+    Int2Source { name: "graphics engine", code: 0x780, pri: (3, 0), mask_bit: 19 },
 ];
+pub const INT2_GE: usize = 9;
+pub const INT2_RADIO: usize = 7;
+pub const INT2_PANEL: usize = 8;
+/// `mask_bit` of a source that is not gated by the mask registers.
+pub const INT2_UNMASKED: u32 = 64;
+pub const INT2_ADC: usize = 6;
 pub const INT2_DU: usize = 3;
 pub const INT2_CAN: usize = 4;
 pub const INT2_ATAPI: usize = 5;
@@ -136,10 +150,25 @@ impl Int2 {
         Int2 { pri: [0; 16], mask: u64::MAX, pending: 0 }
     }
 
+    /// Request status registers: +0x30 and +0x100 show every request of
+    /// their half, +0x34 and +0x104 only those not masked.
+    fn status(&self, off: u32) -> u32 {
+        let mut bits = 0u64;
+        for (i, src) in INT2_SOURCES.iter().enumerate() {
+            if self.pending >> i & 1 != 0 && src.mask_bit < 64 {
+                bits |= 1 << src.mask_bit;
+            }
+        }
+        if off & 4 != 0 {
+            bits &= !self.mask;
+        }
+        if off >= 0x100 { (bits >> 32) as u32 } else { bits as u32 }
+    }
+
     fn best(&self) -> (u32, u32) {
         let (mut level, mut code) = (0, 0);
         for (i, src) in INT2_SOURCES.iter().enumerate() {
-            if self.pending >> i & 1 != 0 && self.mask >> src.mask_bit & 1 == 0 {
+            if self.pending >> i & 1 != 0 && (src.mask_bit >= 64 || self.mask >> src.mask_bit & 1 == 0) {
                 let l = (self.pri[src.pri.0] >> src.pri.1 & 0x1f) >> 1;
                 if l > level {
                     level = l;
@@ -715,6 +744,7 @@ impl OnChip {
                     o @ 0x00..=0x2f => int2.pri[(o >> 2) as usize],
                     0x38 => int2.mask as u32,
                     0x3c => !int2.mask as u32,
+                    o @ (0x30 | 0x34 | 0x100 | 0x104) => int2.status(o),
                     0x108 => (int2.mask >> 32) as u32,
                     0x10c => !(int2.mask >> 32) as u32,
                     _ => 0,

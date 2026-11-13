@@ -3,6 +3,7 @@
 use crate::board::Board;
 use crate::bootrom::{self, Hook};
 use crate::dev::hcan::Frame;
+use crate::dev::uart::SerialPort;
 use crate::fw::{IndexInfo, Module, Variant};
 use crate::sh4::cpu::Stop;
 use std::collections::{BTreeMap, VecDeque};
@@ -60,6 +61,14 @@ impl Default for Machine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Stands for the boot ROM's own handler in the CAN tables it hands to
+/// the OS, which only checks that there is one before replacing it.
+const HANDOVER_HANDLER: u32 = 0xa000_0000;
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" ")
 }
 
 impl Machine {
@@ -247,48 +256,71 @@ impl Machine {
                 }
             }
         }
-        let uart = &mut self.board.uart[3];
+        let uart: &mut dyn SerialPort = match self.cpu.io.navi.as_mut() {
+            Some(navi) => &mut navi.panel_scif,
+            None => &mut self.board.uart[3],
+        };
         let mut changed = false;
-        if !uart.tx.is_empty() {
-            let bytes = std::mem::take(&mut uart.tx);
+        let bytes = uart.take_tx();
+        if !bytes.is_empty() {
             if self.trace_serial {
-                eprintln!("[panel] {:>7} ms  unit -> {}", ms, bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+                eprintln!("[panel] {:>7} ms  unit -> {}", ms, hex(&bytes));
             }
             if self.panel_present {
                 let reply = self.panel.receive(&bytes, ms);
                 if !reply.is_empty() {
                     if self.trace_serial {
-                        eprintln!("[panel] {:>7} ms  unit <- {}", ms, reply.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+                        eprintln!("[panel] {:>7} ms  unit <- {}", ms, hex(&reply));
                     }
-                    uart.receive(&reply);
+                    uart.feed(&reply);
                 }
             }
             changed = true;
         }
         // The controller only talks once the unit's receiver is on, and
         // not into the middle of something the unit has yet to read.
-        if self.panel_present && uart.control & 0x10 != 0 && uart.rx.is_empty() {
+        if self.panel_present && uart.rx_idle() {
             if let Some(f) = self.panel.poll(ms) {
                 if self.trace_serial {
-                    eprintln!("[panel] {:>7} ms  unit <- {}", ms, f.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+                    eprintln!("[panel] {:>7} ms  unit <- {}", ms, hex(&f));
                 }
-                uart.receive(&f);
+                uart.feed(&f);
                 changed = true;
             }
         }
         if changed {
-            self.board.update_irl();
+            self.update_irqs();
         }
     }
 
-    /// Bytes arrived from the unit on the radio processor's link.
-    fn radio_link(&mut self, from_unit: &[u8]) {
-        if !self.radio_present {
+    /// Exchange bytes with the radio processor.
+    fn radio_link(&mut self) {
+        let ms = self.cpu.cycles / self.cycles_per_ms();
+        let uart: &mut dyn SerialPort = match self.cpu.io.navi.as_mut() {
+            Some(navi) => &mut navi.radio_uart,
+            None => &mut self.board.uart[1],
+        };
+        let bytes = uart.take_tx();
+        if bytes.is_empty() {
             return;
         }
-        let reply = self.radio.from_unit(from_unit);
-        if !reply.is_empty() {
-            self.board.uart[1].receive(&reply);
+        if self.trace_serial {
+            eprintln!("[radio] {:>7} ms  unit -> {}", ms, hex(&bytes));
+        }
+        if self.radio_present {
+            let reply = self.radio.from_unit(&bytes);
+            if !reply.is_empty() {
+                uart.feed(&reply);
+            }
+        }
+        self.update_irqs();
+    }
+
+    /// Bring the interrupt lines up to date after a device changed state.
+    fn update_irqs(&mut self) {
+        self.board.update_irl();
+        if let Some(navi) = self.cpu.io.navi.as_mut() {
+            navi.update_irqs(&mut self.cpu.io.intc);
         }
     }
 
@@ -499,20 +531,53 @@ impl Machine {
                 }
                 0
             }
+            // Hand-over of the boot ROM's CAN state.  r4 points at two
+            // pointers to lists of blocks, each list ended by 0xffff:
+            // {number, -, buffer, size.w, -} (ten small ones, purpose
+            // unknown) and {number.w, size.w, buffer}.  In the second
+            // list block 2 is the table of received messages (36 entries
+            // of 40 bytes: enabled.w, identifier.w, then three times
+            // {handler, buffer, length.w, -}) and block 8 the state of the
+            // ignition lock message that woke the unit: the identifiers
+            // 0x271 and 0x2c3 (the same message on two generations of
+            // car) and a "received" flag for each.  The OS swaps the
+            // handlers of those two for its own and reads the first byte
+            // of the message from the buffer to decide whether to start.
             (0x3e, 0xb) => {
+                let mut blocks = BTreeMap::new();
+                let mut p = self.peek32(regs[4] + 4).unwrap_or(0);
+                for _ in 0..16 {
+                    match self.peek16(p) {
+                        Some(0xffff) | None => break,
+                        Some(n) => blocks.insert(n, (self.peek32(p + 4).unwrap_or(0), self.peek16(p + 2).unwrap_or(0) as u32)),
+                    };
+                    p += 8;
+                }
                 if self.trace_bios {
-                    // CAN configuration: two tables, each ended by 0xffff.
-                    for (k, (size, what)) in [(12u32, "receive"), (8, "transmit")].iter().enumerate() {
-                        let mut p = self.peek32(regs[4] + 4 * k as u32).unwrap_or(0);
-                        for _ in 0..16 {
-                            let Some(tag) = self.peek16(p) else { break };
-                            if tag == 0xffff {
-                                break;
-                            }
-                            let bytes: Vec<String> = (0..*size).map(|i| format!("{:02x}", self.peek8(p + i).unwrap_or(0))).collect();
-                            eprintln!("[bios]   CAN {} entry: {}", what, bytes.join(" "));
-                            p += size;
+                    for (n, (addr, size)) in &blocks {
+                        eprintln!("[bios]   CAN state block {}: {:#x} bytes at {:08x}", n, size, addr);
+                    }
+                }
+                let lock = self.can_cyclic.iter().map(|(f, _, _)| f.clone()).find(|f| f.id == 0x271 || f.id == 0x2c3);
+                if let (Some(&(table, tsize)), Some(&(state, 8))) = (blocks.get(&2), blocks.get(&8)) {
+                    if tsize >= 2 * 40 {
+                        // The last two entries, out of the way of those
+                        // the OS adds itself.  The message bytes live in
+                        // the spare end of the state block.
+                        for (i, id) in [0x271u32, 0x2c3].into_iter().enumerate() {
+                            let e = table + tsize - 40 * (2 - i as u32);
+                            self.poke32(e, 0x0001_0000 | id);
+                            self.poke32(e + 4, HANDOVER_HANDLER);
+                            self.poke32(e + 8, state + 6 + i as u32);
+                            self.poke32(e + 12, 0x0001_0000);
                         }
+                        let (flags, data) = match lock {
+                            Some(f) if f.id == 0x271 => (0x0100, (f.data[0] as u32) << 8),
+                            Some(f) => (0x0001, f.data[0] as u32),
+                            None => (0, 0),
+                        };
+                        self.poke32(state, 0x0271_02c3);
+                        self.poke32(state + 4, flags << 16 | data);
                     }
                 }
                 0
@@ -565,14 +630,12 @@ impl Machine {
                 self.cpu.fault = Some(format!("the firmware stopped itself at {:08x} with interrupts off (it expects the watchdog to reset the unit)", self.cpu.pc));
                 return Stop::Fault;
             }
-            if !self.board.uart[1].tx.is_empty() {
-                let bytes = std::mem::take(&mut self.board.uart[1].tx);
-                if self.trace_serial {
-                    let ms = self.cpu.cycles / self.cycles_per_ms();
-                    eprintln!("[radio] {:>7} ms  unit -> {}", ms, bytes.iter().map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(" "));
+            self.radio_link();
+            if let Some(navi) = self.cpu.io.navi.as_mut() {
+                if navi.ge.pending {
+                    navi.ge.run(&mut self.board.ram, self.board.ram_base);
+                    navi.update_irqs(&mut self.cpu.io.intc);
                 }
-                self.radio_link(&bytes);
-                self.board.update_irl();
             }
             self.panel_link();
             if self.cpu.cycles >= self.next_frame {

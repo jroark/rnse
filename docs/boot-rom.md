@@ -88,8 +88,8 @@ its caller.
 
 ## The 193's boot ROM
 
-The stand-in serves both models; what differs for the 193 (variants V574
-and VB48):
+The stand-in serves both models; what differs for the 193 (variants V574,
+V575 and VB48):
 
 * Reset is entered as code at address 0: the loader ends an update with
   a jump there (after giving the watchdog time to do it first).
@@ -100,8 +100,20 @@ and VB48):
   [hardware-193.md](hardware-193.md).
 * Service 0x13 returns the address of the version block behind the
   entries of the directory at 0x400000 (0x8040007c with six modules).
-* Service 0x0b is new: one argument, a pointer to two table addresses.
-  The tables hold (number, buffer address, size) records ending in
-  0xffff.  Not understood; the stand-in ignores it.
+* Service 0x0b is new: it hands the state of the boot ROM's CAN software
+  to the OS.  The argument points at two list addresses; each list ends
+  in 0xffff and names blocks of the OS's memory to fill: ten small ones
+  in the first (number, buffer, size; purpose unknown, left alone by the
+  stand-in) and nine in the second (number, size, buffer).  Of the
+  second, block 2 is the table of received messages (36 entries of 40
+  bytes: enabled, identifier, then three times handler, buffer and
+  length) and block 8 holds the identifiers 0x271 and 0x2c3 and a
+  "received" flag for each: the ignition lock's message, which is what
+  wakes the unit.  The OS replaces the handlers of those two entries
+  with its own and reads the first data byte through the entry's buffer
+  pointer to decide whether to start.  The stand-in fills in the two
+  entries and the flags from the ignition frame the emulated car is
+  sending; without that the OS logs `CAN_Pass_mzas() Error` and treats
+  the ignition as off.
 * Services 1, 4, 5 and 6 are used as on the 192.
 

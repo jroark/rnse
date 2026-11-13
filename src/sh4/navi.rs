@@ -16,6 +16,13 @@
 //! |--------------|----------------------------------------------------|
 //! | 0xff80_2000  | bus state controller (area set-up; ignored)        |
 //! | 0xff80_4000  | interrupt controller, SH7780 INTC2 layout          |
+//! | 0xff91_5000  | serial port to the radio processor: the 192's      |
+//! |              | companion-chip UART with its registers 4 apart     |
+//! | 0xff92_6000  | SCIF to the faceplate controller                   |
+//! | 0xff93_c000  | A/D converter, eight inputs (4 = display position)  |
+//! | 0xff93_f000  | port: +4 direction, +8 output, +0xc input.  Bits   |
+//! |              | 19/18 run the display motor (closing/opening), bit |
+//! |              | 20 is low only when the display is fully open      |
 //! | 0xffc4_4008  | port data; bit 0 is the strobe for the external    |
 //! |              | watchdog (the firmware toggles it from its tick)    |
 //! | 0xffc6_2100  | ATAPI interface: task file at +0x00..+0x1c (one   |
@@ -23,10 +30,15 @@
 //! |              | interface control from +0x80                        |
 //! | 0xffd8_0000  | timer unit 0; units 1, 2 at 0xffd8_1000, 0xffd8_2000 |
 //! | 0xffdf_0000  | CAN controller (RCAN-ET)                           |
+//! | 0xffe8_0000  | 2D graphics engine, see [`crate::dev::q2`]         |
 //! | 0xffe4_0000  | serial port with FIFO: the loader's debug console  |
 //! | 0xfff8_0000  | display unit                                       |
 
-use super::onchip::{Intc, INT2_ATAPI, INT2_CAN, INT2_DU};
+use super::onchip::{Intc, INT2_ADC, INT2_ATAPI, INT2_CAN, INT2_DU, INT2_GE, INT2_PANEL, INT2_RADIO};
+use crate::dev::q2::Q2;
+use crate::dev::scif::Scif;
+use crate::dev::uart::Uart;
+use crate::dev::adc::Adc;
 use crate::dev::atapi::Atapi;
 use crate::dev::hcan::Hcan;
 use crate::iolog::IoLog;
@@ -36,11 +48,23 @@ const DU: u32 = 0xfff8_0000;
 const DU_END: u32 = 0xfffa_0000;
 const SCIF_DEBUG: u32 = 0xffe4_0000;
 const ATAPI: u32 = 0xffc6_2100;
+const ATAPI_STATUS: u32 = 0xffc6_2184;
 const CAN: u32 = 0xffdf_0000;
 const WATCHDOG_PORT: u32 = 0xffc4_4008;
+const GE: u32 = 0xffe8_0000;
+const ADC: u32 = 0xff93_c000;
+const MOTOR_PORT: u32 = 0xff93_f000;
+const RADIO_UART: u32 = 0xff91_5000;
+const PANEL_SCIF: u32 = 0xff92_6000;
 
 // Display unit registers (offsets from 0xfff8_0000).  The same block
 // lives on in Renesas' R-Car chips, whose Linux driver names these.
+/// Columns between the start of data enable (DESR) and the panel's
+/// first pixel, and the frame line of the panel's first line: chosen so
+/// that both the loader's and the OS's pictures fill the panel.
+const DE_DELAY: u32 = 18;
+const PANEL_FIRST_LINE: u32 = 32;
+
 const DSYSR: u32 = 0x000;
 const DSSR: u32 = 0x008;
 const DSRCR: u32 = 0x00c;
@@ -69,6 +93,15 @@ pub struct Navi {
     pub can: Hcan,
     /// Cycle of the last watchdog strobe edge, once there has been one.
     pub watchdog_strobe: Option<u64>,
+    pub adc: Adc,
+    /// Link to the radio/audio processor.
+    pub radio_uart: Uart,
+    /// Link to the faceplate controller.
+    pub panel_scif: Scif,
+    /// Position of the motorised display, 0 (open) to 1023 (closed).
+    pub display_pos: u16,
+    /// The 2D graphics engine.
+    pub ge: Q2,
     pub log: IoLog,
 }
 
@@ -93,12 +126,17 @@ pub struct Plane {
     pub addr: u32,
     pub src_x: u32,
     pub src_y: u32,
+    /// Colour not drawn (PnTC1R for 8-bit planes, PnTC2R otherwise).
     pub transparent: u32,
+    /// PnALPHAR, used in the alpha blending mode: the blending ratio in
+    /// the low byte or, with bits 9..8 set, the number (from 0) of the
+    /// 8-bit plane whose pixels are the ratios.
+    pub alpha: u32,
 }
 
 impl Navi {
     pub fn new() -> Navi {
-        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi: Atapi::new(), can: Hcan::rcan_et(), watchdog_strobe: None, log: IoLog::new(false, 4) }
+        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi: Atapi::new(), can: Hcan::rcan_et(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 0, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4) }
     }
 
     /// Whether this module, rather than the SH-4 model, owns `addr`.
@@ -134,6 +172,30 @@ impl Navi {
 
     pub fn read(&mut self, addr: u32, size: u32, _now: u64, pc: u32, intc: &mut Intc) -> u32 {
         let v = match addr {
+            GE..=0xffe8_00ff if size == 4 => self.ge.read(addr - GE),
+            RADIO_UART..=0xff91_503f => {
+                let v = self.radio_uart.read((addr - RADIO_UART) >> 1) as u32;
+                intc.set_int2(INT2_RADIO, self.radio_uart.irq());
+                self.log.log("radio", false, addr, size, v, pc);
+                return v;
+            }
+            PANEL_SCIF..=0xff92_603f => {
+                let v = self.panel_scif.read(addr - PANEL_SCIF) as u32;
+                intc.set_int2(INT2_PANEL, self.panel_scif.irq());
+                self.log.log("panel", false, addr, size, v, pc);
+                return v;
+            }
+            ADC..=0xff93_c01f => {
+                let v = self.adc.read_wide(addr - ADC) as u32;
+                self.log.log("adc", false, addr, size, v, pc);
+                return v;
+            }
+            a if a == MOTOR_PORT + 0xc && size == 4 => {
+                // Input levels.  Bit 20 is the display's position switch.
+                // Bit 22 has to be high or the OS stops itself after nine
+                // seconds: presumably the supply voltage monitor.
+                (self.raw_read(addr, size) & !(1 << 20)) | ((self.display_pos > 94) as u32) << 20 | 1 << 22
+            }
             CAN..=0xffdf_0fff => {
                 let v = self.can.read(addr - CAN, size, pc);
                 intc.set_int2(INT2_CAN, self.can.irq());
@@ -150,6 +212,8 @@ impl Navi {
                 intc.set_int2(INT2_ATAPI, self.atapi.irq());
                 v
             }
+            // Interface status: bit 4 is the drive's interrupt line.
+            ATAPI_STATUS => (self.raw_read(addr, size) & !0x10) | (self.atapi.irq() as u32) << 4,
             DU..=0xfff9_ffff if size == 4 => self.du32((addr - DU) & !3),
             // Debug console status: transmitter empty, FIFO has room.
             a if a == SCIF_DEBUG + 0x10 => 0x0060,
@@ -162,6 +226,22 @@ impl Navi {
     pub fn write(&mut self, addr: u32, size: u32, v: u32, now: u64, pc: u32, intc: &mut Intc) {
         self.log.log("soc", true, addr, size, v, pc);
         match addr {
+            RADIO_UART..=0xff91_503f => {
+                self.radio_uart.write((addr - RADIO_UART) >> 1, v as u16);
+                intc.set_int2(INT2_RADIO, self.radio_uart.irq());
+            }
+            PANEL_SCIF..=0xff92_603f => {
+                self.panel_scif.write(addr - PANEL_SCIF, v as u16);
+                intc.set_int2(INT2_PANEL, self.panel_scif.irq());
+            }
+            ADC..=0xff93_c01f => {
+                self.adc.write_wide(addr - ADC, v as u16);
+                intc.set_int2(INT2_ADC, self.adc.irq());
+            }
+            GE..=0xffe8_00ff if size == 4 => {
+                self.ge.write(addr - GE, v);
+                intc.set_int2(INT2_GE, self.ge.irq());
+            }
             WATCHDOG_PORT => {
                 // Only the loader is known to strobe this way (a 32-bit
                 // read-modify-write); how the OS serves the watchdog is
@@ -210,6 +290,22 @@ impl Navi {
         self.du_irq(intc);
         intc.set_int2(INT2_ATAPI, self.atapi.irq());
         intc.set_int2(INT2_CAN, self.can.irq());
+        self.step_display(16);
+    }
+
+    /// Move the fold-down display by `ms` milliseconds of motor time (a
+    /// full sweep takes about 1.5 s) and update its sensors.
+    pub fn step_display(&mut self, ms: u32) {
+        let drive = self.raw_read(MOTOR_PORT + 8, 4) & self.raw_read(MOTOR_PORT + 4, 4);
+        let step = (ms * 1023 / 1500).max(1) as i32;
+        let mut pos = self.display_pos as i32;
+        match (drive >> 18) & 3 {
+            2 => pos += step,
+            1 => pos -= step,
+            _ => {}
+        }
+        self.display_pos = pos.clamp(0, 1023) as u16;
+        self.adc.input[4] = self.display_pos;
     }
 
     /// Recompute the request lines of the devices the host can poke
@@ -217,6 +313,9 @@ impl Navi {
     pub fn update_irqs(&mut self, intc: &mut Intc) {
         intc.set_int2(INT2_ATAPI, self.atapi.irq());
         intc.set_int2(INT2_CAN, self.can.irq());
+        intc.set_int2(INT2_RADIO, self.radio_uart.irq());
+        intc.set_int2(INT2_PANEL, self.panel_scif.irq());
+        intc.set_int2(INT2_GE, self.ge.irq());
     }
 
     // ---- display ---------------------------------------------------------
@@ -234,7 +333,8 @@ impl Navi {
             addr: self.du32(b + 0x20),
             src_x: self.du32(b + 0x30) & 0xfff,
             src_y: self.du32(b + 0x34) & 0xfff,
-            transparent: self.du32(b + 0x44),
+            transparent: self.du32(if self.du32(b) & 3 == 0 { b + 0x44 } else { b + 0x48 }),
+            alpha: self.du32(b + 0x08) & 0x3ff,
         }
     }
 
@@ -259,10 +359,11 @@ impl Navi {
         (if w == 0 { 800 } else { w as usize }, if h == 0 { 480 } else { (h as usize).min(480) })
     }
 
-    /// Display lines above the panel's first line.
+    /// Display lines above the panel's first line.  The panel starts
+    /// at a fixed line of the frame: the loader begins its display
+    /// period 8 lines earlier than the OS and draws 8 lines lower.
     fn y_offset(&self) -> usize {
-        let h = (self.du32(VDER).wrapping_sub(self.du32(VDSR)) & 0xfff) as usize;
-        h.saturating_sub(480) / 2
+        (PANEL_FIRST_LINE.saturating_sub(self.du32(VDSR) & 0xfff)) as usize
     }
 
     /// Compose the planes into RGB888.  `mem` reads a byte of physical
@@ -270,19 +371,30 @@ impl Navi {
     pub fn render(&self, mem: &dyn Fn(u32) -> u8) -> (usize, usize, Vec<u8>) {
         let (w, h) = self.resolution();
         let mut out = vec![0u8; w * h * 3];
-        // The display period starts a little before data enable; planes
-        // are positioned relative to the former.
-        let x_off = (self.du32(DESR) & 0xfff).saturating_sub(self.du32(HDSR) & 0xfff).saturating_sub(2) as i64;
+        // Planes are positioned relative to the display period, the
+        // panel's first column follows data enable by a fixed delay.
+        let x_off = (self.du32(DESR) & 0xfff).saturating_sub(self.du32(HDSR) & 0xfff).saturating_sub(DE_DELAY) as i64;
         let y_off = self.y_offset();
-        for n in self.plane_order() {
+        let order = self.plane_order();
+        // Planes that only supply alpha values are not pictures.
+        let alpha_plane = |p: &Plane| (p.mode >> 12 & 3 == 1 && p.alpha >> 8 == 3).then_some((p.alpha & 7) + 1);
+        let alpha_planes: Vec<u32> = order.iter().filter_map(|&n| alpha_plane(&self.plane(n))).collect();
+        for n in order {
             let p = self.plane(n);
-            if p.stride == 0 {
+            if p.stride == 0 || alpha_planes.contains(&n) {
                 continue;
             }
-            let sixteen = p.mode & 3 == 1;
-            let argb = p.mode & 3 == 2;
+            let ratios = alpha_plane(&p).map(|n| self.plane(n));
+            // Pixel format: 0 = 8 bits through a palette, 1 = RGB565,
+            // 2 = ARGB1555 (the A bit is not interpreted here).
+            let format = p.mode & 3;
             let palette = 0x1000 * (1 + (p.mode >> 8 & 3));
-            let keyed = p.mode & (1 << 14) == 0 && p.mode >> 12 & 3 == 0;
+            // Superimposing mode (bits 14..12): bit 2 switches the
+            // transparent colour off, 1 in the low bits blends the plane
+            // with what is behind it.
+            let spim = p.mode >> 12 & 7;
+            let keyed = spim & 4 == 0;
+            let blend = (spim & 3 == 1).then_some(p.alpha & 0xff);
             for py in 0..p.height {
                 let sy = (p.y + py) as usize;
                 if sy < y_off {
@@ -298,16 +410,13 @@ impl Navi {
                         continue;
                     }
                     let (mx, my) = (p.src_x + px, p.src_y + py);
-                    let rgb = if sixteen || argb {
+                    let rgb = if format != 0 {
                         let a = (p.addr & 0x1fff_ffff) + (my * p.stride + mx) * 2;
                         let v = (mem(a) as u32) << 8 | mem(a + 1) as u32;
                         if keyed && v == p.transparent & 0xffff {
                             continue;
                         }
-                        if argb {
-                            if v & 0x8000 == 0 {
-                                continue;
-                            }
+                        if format == 2 {
                             let (r, g, b) = (v >> 10 & 0x1f, v >> 5 & 0x1f, v & 0x1f);
                             [(r << 3 | r >> 2) as u8, (g << 3 | g >> 2) as u8, (b << 3 | b >> 2) as u8]
                         } else {
@@ -323,7 +432,18 @@ impl Navi {
                         [(c >> 16) as u8, (c >> 8) as u8, c as u8]
                     };
                     let o = (sy * w + sx as usize) * 3;
-                    out[o..o + 3].copy_from_slice(&rgb);
+                    let blend = match (&ratios, blend) {
+                        (Some(r), _) => Some(mem((r.addr & 0x1fff_ffff) + (r.src_y + py) * r.stride + r.src_x + px) as u32),
+                        (None, b) => b,
+                    };
+                    match blend {
+                        Some(alpha) => {
+                            for (d, s) in out[o..o + 3].iter_mut().zip(rgb) {
+                                *d = ((s as u32 * alpha + *d as u32 * (255 - alpha)) / 255) as u8;
+                            }
+                        }
+                        None => out[o..o + 3].copy_from_slice(&rgb),
+                    }
                 }
             }
         }
@@ -370,6 +490,8 @@ impl Navi {
                 );
             }
         }
+        s.push_str(&self.ge.describe());
+        s.push('\n');
         s
     }
 }

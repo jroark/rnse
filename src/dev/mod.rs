@@ -6,5 +6,7 @@ pub mod coral;
 pub mod flash;
 pub mod hcan;
 pub mod panel;
+pub mod q2;
 pub mod radio;
+pub mod scif;
 pub mod uart;
