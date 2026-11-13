@@ -36,14 +36,18 @@ The North American 192 software (`V222`) runs like `V220`, in English:
 With a navigation DVD in the 193's drive (`--nav-disc`: an ISO image, or
 the image of an SD card prepared for the unit) the navigation software
 reads it, shows its destination menus and draws the map, which can be
-zoomed and scrolled.  There is no GPS, so the position does not move.
-`rnse ui disc.iso --variant V575 --nav-disc card.img`
+zoomed and scrolled.  `--gps LAT,LON,COURSE` gives the unit a GPS fix,
+and the map shows that place; `--drive KMH` sets the car moving (speed
+pulses, gyroscope, and the fix along its course), and the map follows.
+`rnse ui disc.iso --variant V575 --nav-disc card.img --gps 41.8781,-87.6298,270 --drive 50@60000`
 
 ![The 193's navigation map in the emulator](docs/nav-193.png)
 
-Audio CDs play on both units, silently (`--audio-cd 12x200`).  Not done
-yet: the power button, any sound, the GPS receiver and the SD card
-processors, the 3D half of the 192's graphics chip.
+Audio CDs play on both units, silently (`--audio-cd 12x200`). The 192's
+SD/MP3 processor stand-ins now complete their boot handshake and startup
+commands; both card slots report empty. Card images, MP3 decoding and
+audio output are still missing, as are the power button, GPS receiver
+and the 3D half of the 192's graphics chip.
 
 See [docs/hardware.md](docs/hardware.md) and
 [docs/hardware-193.md](docs/hardware-193.md) for what is known about the
@@ -121,6 +125,10 @@ full list):
     --trace-calls A:B  list the subroutines called in a time window
     --trace-coral      display lists sent to the graphics chip
     --surface ...      save an off-screen drawing surface as a PNG
+    --gps LAT,LON[,COURSE]  a GPS fix at that place, in degrees (193)
+    --drive KMH[,TURN][@MS]  the car moves, turning TURN degrees a
+                       second, from MS milliseconds on (193)
+    --car-type N       code the unit for car type N, 1-7 (193)
     --nav-disc FILE    a navigation DVD in the drive instead (an ISO image,
                        or an SD card image with the DVD in a partition
                        of type 0x96); read as needed, not loaded

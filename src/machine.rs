@@ -9,6 +9,54 @@ use crate::sh4::cpu::Stop;
 use std::collections::{BTreeMap, VecDeque};
 use crate::sh4::{Cpu, SR_BL, SR_MD};
 
+/// The car in motion, for the navigation's dead reckoning (193): speed
+/// pulses arrive on timer 2's capture pin and the gyroscope's voltage on
+/// input 1 of the A/D converter; the GPS fix, if there is one, travels
+/// along.  See docs/hardware-193.md.
+#[derive(Clone, Debug, Default)]
+pub struct Drive {
+    /// Kilometres per hour.
+    pub speed: f64,
+    /// Degrees per second, clockwise positive.
+    pub turn: f64,
+    /// Milliseconds after the start at which the car sets off.
+    pub from: u64,
+    /// Fractions of a speed pulse not yet sent, and the cycle up to which
+    /// the motion has been accounted for.
+    pulses: f64,
+    last: u64,
+}
+
+impl Drive {
+    pub fn new(speed: f64, turn: f64, from: u64) -> Drive {
+        Drive { speed, turn, from, pulses: 0.0, last: 0 }
+    }
+
+    /// `"KMH[,TURN][@MS]"`: speed, degrees per second to the right, and
+    /// when to set off.
+    pub fn parse(s: &str) -> Result<Drive, String> {
+        let (what, from) = match s.split_once('@') {
+            Some((what, ms)) => (what, ms.parse().map_err(|_| format!("{} is not a time in milliseconds", ms))?),
+            None => (s, 0),
+        };
+        let (speed, turn) = what.split_once(',').unwrap_or((what, "0"));
+        let number = |t: &str| t.trim().parse::<f64>().map_err(|_| format!("{} is not a number", t));
+        Ok(Drive::new(number(speed)?, number(turn)?, from))
+    }
+}
+
+/// Speed pulses per metre: 2500 to the kilometre, which is the distance
+/// per pulse the navigation software starts out with (0.4 m).
+const PULSES_PER_METRE: f64 = 2.5;
+/// A/D reading of the gyroscope at rest (the software's samples are
+/// 3720 - 4 * reading, of twelve bits: this is the middle), and the
+/// change for one degree per second, for a gyroscope of 25 mV per degree
+/// and second on a converter of 5 V and ten bits.  The software works
+/// out both for itself in time; which way round the voltage goes is a
+/// guess.
+const GYRO_REST: f64 = 418.0;
+const GYRO_PER_DPS: f64 = 5.12;
+
 pub struct Machine {
     pub cpu: Cpu,
     pub board: Board,
@@ -34,6 +82,15 @@ pub struct Machine {
     /// Further routines of the same kind: the navigation application
     /// has its own copy of `printf` for its debug messages.
     pub printf_hooks: Vec<u32>,
+    /// A GPS fix handed to the navigation application: the fix, the
+    /// address of the OS routine it asks, and that of the pointer to the
+    /// OS's GPS interface data (flags first, the record for the
+    /// application at +0x8ec).  See `dev/gps.rs`.
+    pub gps: Option<(crate::dev::gps::Gps, u32, u32)>,
+    /// The car's motion, if it moves.
+    pub drive: Option<Drive>,
+    /// How many of the library's results have been replaced by the fix.
+    pub gps_fixes: u64,
     /// Frames sent to the unit periodically, standing in for the rest
     /// of the car: (frame, period in cycles, next due).
     can_cyclic: Vec<(Frame, u64, u64)>,
@@ -86,7 +143,7 @@ impl Machine {
             cpu.io.navi = Some(Box::default());
             cpu.io.intc.int2 = Some(Default::default());
         }
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -172,6 +229,94 @@ impl Machine {
         match apm_version {
             "V57510AA" => Some(0x021a_2b16),
             _ => None,
+        }
+    }
+
+    /// Print the debug messages of a variant's software: of its update
+    /// loader, or of the OS and every other module that has a `printf`
+    /// of its own (the navigation application and, on the 193, the
+    /// others too).  The addresses are found in the code where they can
+    /// be and come from the tables by version otherwise.
+    pub fn hook_debug_output(&mut self, v: &Variant, loader: bool) {
+        let main = v.module(if loader { "LDM" } else { "OSM" });
+        if let Some(a) = main.and_then(|m| Self::known_printf(&m.version).or_else(|| Self::find_printf(m))) {
+            self.hook_printf(a);
+        }
+        if loader {
+            return;
+        }
+        for m in v.modules.iter().filter(|m| m.kind == "APL") {
+            let found = if m.name == "APM" { Self::known_app_printf(&m.version) } else { None };
+            if let Some(a) = found.or_else(|| Self::find_printf(m)) {
+                self.hook_printf_also(a);
+            }
+        }
+    }
+
+    /// The debug `printf` of a module of the 193's software, found by
+    /// its code: the C library there has three routines of the same
+    /// beginning in a row (0x24 bytes apart), of which `printf` is the
+    /// last.  Every module with debug messages has its own copy.
+    pub fn find_printf(module: &Module) -> Option<u32> {
+        const START: [(u16, u16); 10] = [(0x4f22, !0), (0x66f3, !0), (0x7604, !0), (0x6563, !0), (0x7504, !0), (0x6053, !0), (0xc903, !0), (0x6203, !0), (0x2228, !0), (0x8901, !0)];
+        let found = module.find_code(&START);
+        found.windows(3).rev().find(|w| w[1] == w[0] + 0x24 && w[2] == w[1] + 0x24).map(|w| w[2])
+    }
+
+    /// The routine through which the 193's navigation application gets
+    /// the GPS library's latest fix (service 0x10a of trap 33), found by
+    /// its code, and the address of the pointer it reads the interface
+    /// task's data through.
+    pub fn find_gps_getter(os: &Module) -> Option<(u32, u32)> {
+        const CODE: [(u16, u16); 14] = [
+            (0x4f22, !0), (0xd100, 0xff00), (0x6612, !0), (0x6062, !0), (0xc801, !0), (0x890f, !0), (0x2668, !0),
+            (0x890d, !0), (0x9100, 0xff00), (0xd700, 0xff00), (0x361c, !0), (0x6563, !0), (0x470b, !0), (0xe62f, !0),
+        ];
+        let found = os.find_code(&CODE);
+        let [getter] = found[..] else { return None };
+        // The second instruction loads the pointer's address from the
+        // literal pool.
+        let load = getter + 2;
+        let disp = (os.long_at(load & !3)? >> if load & 2 != 0 { 0 } else { 16 }) & 0xff;
+        let context = os.long_at((load & !3) + 4 + disp * 4)?;
+        Some((getter, context))
+    }
+
+    /// Code the unit for a kind of car, as a workshop does (193).  The
+    /// coding is kept in battery-backed memory in a block of 64 bytes at
+    /// 0xb8002c4c: a mark, a version, a sum of the bytes that count, six
+    /// bytes, four bytes, six bytes of which the first is the car type
+    /// (1 to 7), and the mark inverted at the end.  The OS takes the
+    /// block as it finds it if mark and sum are right, and otherwise
+    /// clears it: a unit that has never been coded has car type 0.
+    ///
+    /// The type decides, among other things, where the navigation takes
+    /// the distance driven from: only type 5 counts the speed pulses on
+    /// timer 2's capture pin.
+    pub fn set_car_type(&mut self, car_type: u8) -> Result<(), String> {
+        if self.board.model != crate::board::Model::Rnse193 {
+            return Err("where the 192 keeps its coding is not known".into());
+        }
+        if !(1..=7).contains(&car_type) {
+            return Err("car types are 1 to 7".into());
+        }
+        let mut block = [0u8; 64];
+        block[0..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        block[4..8].copy_from_slice(&0x0222_0001u32.to_be_bytes());
+        block[0x16] = car_type;
+        let sum: u32 = block[0x0c..0x1c].iter().map(|&b| b as u32).sum();
+        block[8..12].copy_from_slice(&sum.to_be_bytes());
+        block[60..64].copy_from_slice(&0xedcb_a987u32.to_be_bytes());
+        self.board.nvram[0x2c4c..0x2c8c].copy_from_slice(&block);
+        Ok(())
+    }
+
+    /// Have the unit receive a GPS fix: `getter` and `context` are what
+    /// [`find_gps_getter`](Self::find_gps_getter) finds.
+    pub fn set_gps(&mut self, fix: crate::dev::gps::Gps, getter: u32, context: u32) {
+        self.gps = Some((fix, getter, context));
+        if !self.cpu.breakpoints.contains(&getter) {
+            self.cpu.breakpoints.push(getter);
         }
     }
 
@@ -370,6 +515,38 @@ impl Machine {
         }
     }
 
+    /// Let the car move for the time that has passed.
+    fn drive_tick(&mut self) {
+        let now = self.cpu.cycles;
+        let per_ms = self.cycles_per_ms() as f64;
+        let Some(drive) = self.drive.as_mut() else { return };
+        let seconds = (now - drive.last.min(now)) as f64 / per_ms / 1000.0;
+        if drive.last == 0 || seconds > 1.0 {
+            drive.last = now;
+            return;
+        }
+        drive.last = now;
+        let started = now as f64 / per_ms >= drive.from as f64;
+        let metres = if started { drive.speed / 3.6 * seconds } else { 0.0 };
+        drive.pulses += metres * PULSES_PER_METRE;
+        let edges = drive.pulses as u32;
+        drive.pulses -= edges as f64;
+        let (turn, moving) = (drive.turn, started && drive.speed != 0.0);
+        for _ in 0..edges {
+            self.cpu.io.tmu2_capture(now);
+        }
+        if let Some(navi) = self.cpu.io.navi.as_mut() {
+            navi.adc.input[1] = (GYRO_REST + if moving { turn * GYRO_PER_DPS } else { 0.0 }).clamp(0.0, 1023.0) as u16;
+        }
+        if let Some((fix, _, _)) = self.gps.as_mut() {
+            fix.speed = if moving { metres / seconds * 3.6 } else { 0.0 };
+            if moving {
+                fix.heading += turn * seconds;
+                fix.advance(metres);
+            }
+        }
+    }
+
     fn can_tick(&mut self) {
         let now = self.cpu.cycles;
         let mut any = false;
@@ -425,6 +602,20 @@ impl Machine {
             // serves the OS just as well.
             navi.can.configure_mailbox(24, 0x400, 0x03f, 3);
             navi.can.configure_mailbox(31, 0x000, 0x7ff, 3);
+        } else {
+            // The media driver preserves DMAOR.DME while selecting its
+            // transfer mode; it never sets master enable itself. The
+            // boot ROM must leave the 192's DMAC enabled.
+            self.cpu.io.dmaor = 1;
+            // The HCAN driver leaves these three shared receive boxes'
+            // modes alone (unlike its dedicated receive boxes). It uses
+            // box 3 for 0x600..0x67f, box 2 for network management, and
+            // box 0 for other identifiers dispatched through software
+            // filters. Their masks must survive identifier writes when
+            // further software consumers register.
+            self.board.can.configure_mailbox(0, 0, 0x7ff, 3);
+            self.board.can.configure_mailbox(2, 0x400, 0x03f, 3);
+            self.board.can.configure_mailbox(3, 0x600, 0x07f, 3);
         }
         // Likewise the CAN controller: the OS sets up mailboxes and
         // handles interrupts but never takes the chip out of reset.
@@ -580,9 +771,10 @@ impl Machine {
             }
             // Hand-over of the boot ROM's CAN state.  r4 points at two
             // pointers to lists of blocks, each list ended by 0xffff:
-            // {number, -, buffer, size.w, -} (ten small ones, purpose
-            // unknown) and {number.w, size.w, buffer}.  In the second
-            // list block 2 is the table of received messages (36 entries
+            // {number, -, buffer, size.w, -} (ten network-state blocks)
+            // and {number.w, size.w, buffer}. Service 9 on the 192 uses
+            // the first layout for BOTH lists. In the second
+            // list block 2 is the table of received messages (32/36 entries
             // of 40 bytes: enabled.w, identifier.w, then three times
             // {handler, buffer, length.w, -}) and block 8 the state of the
             // ignition lock message that woke the unit: the identifiers
@@ -590,21 +782,63 @@ impl Machine {
             // car) and a "received" flag for each.  The OS swaps the
             // handlers of those two for its own and reads the first byte
             // of the message from the buffer to decide whether to start.
-            (0x3e, 0xb) => {
+            (0x3e, 9) | (0x3e, 0xb) if code == 0xb || regs[7] == 2 => {
+                let mut network = BTreeMap::new();
+                let mut p = self.peek32(regs[4]).unwrap_or(0);
+                for _ in 0..16 {
+                    match self.peek16(p) {
+                        Some(0xffff) | None => break,
+                        Some(n) => network.insert(n, (self.peek32(p + 4).unwrap_or(0), self.peek16(p + 8).unwrap_or(0) as u32)),
+                    };
+                    p += 12;
+                }
                 let mut blocks = BTreeMap::new();
                 let mut p = self.peek32(regs[4] + 4).unwrap_or(0);
                 for _ in 0..16 {
                     match self.peek16(p) {
                         Some(0xffff) | None => break,
-                        Some(n) => blocks.insert(n, (self.peek32(p + 4).unwrap_or(0), self.peek16(p + 2).unwrap_or(0) as u32)),
+                        Some(n) => blocks.insert(n, (self.peek32(p + 4).unwrap_or(0), self.peek16(p + if code == 9 { 8 } else { 2 }).unwrap_or(0) as u32)),
                     };
-                    p += 8;
+                    p += if code == 9 { 12 } else { 8 };
                 }
                 if self.trace_bios {
+                    for (n, (addr, size)) in &network {
+                        eprintln!("[bios]   CAN network block {}: {:#x} bytes at {:08x}", n, size, addr);
+                    }
                     for (n, (addr, size)) in &blocks {
                         eprintln!("[bios]   CAN state block {}: {:#x} bytes at {:08x}", n, size, addr);
                     }
                 }
+                // An awake boot ROM has enabled CAN transmission and
+                // entered the network's start state. These values mirror
+                // the OS's cold initialization (NM start state 1, flag
+                // 0x04, transmit enable 1), through its handover buffers.
+                if let Some(&(addr, 2)) = blocks.get(&5) {
+                    self.board.load(addr & 0x1fff_ffff, &1u16.to_be_bytes());
+                }
+                if let Some(&(addr, 2)) = network.get(&1) {
+                    self.board.load(addr & 0x1fff_ffff, &[4, 0]);
+                }
+                if let Some(&(addr, 4)) = network.get(&5) {
+                    self.poke32(addr, 1);
+                }
+                // The CAN timer handler clears its underflow flag,
+                // but the OS never programs its reload or starts it.
+                // Use a 5 ms timer, giving the CAN service a 10 ms tick
+                // (both firmware handlers divide this interrupt by two).
+                let reload = (self.cycles_per_ms() / self.cpu.io.pclk_div * 5 / 4 - 1) as u32;
+                let now = self.cpu.cycles;
+                let pc = self.cpu.pc;
+                let (timer, start, bit) = if self.cpu.io.navi.is_some() {
+                    (0xffd8_1008, 0xffd8_1004, 1)
+                } else {
+                    (0xffd8_0020, 0xffd8_0004, 4)
+                };
+                self.cpu.io.write(&mut self.board, timer, 4, reload, now, pc);
+                self.cpu.io.write(&mut self.board, timer + 4, 4, reload, now, pc);
+                self.cpu.io.write(&mut self.board, timer + 8, 2, 0x20, now, pc);
+                let started = self.cpu.io.read(&mut self.board, start, 1, now, pc);
+                self.cpu.io.write(&mut self.board, start, 1, started | bit, now, pc);
                 let lock = self.can_cyclic.iter().map(|(f, _, _)| f.clone()).find(|f| f.id == 0x271 || f.id == 0x2c3);
                 if let (Some(&(table, tsize)), Some(&(state, 8))) = (blocks.get(&2), blocks.get(&8)) {
                     if tsize >= 2 * 40 {
@@ -668,8 +902,26 @@ impl Machine {
                 self.cpu.io.dma_transfer(&mut self.board, 1, u32::MAX, now);
                 self.board.update_irl();
             }
+            if self.board.model == crate::board::Model::Rnse192 && self.cpu.io.dmaor & 0xc000 == 0xc000 {
+                // DSP0 uses DMA channel 7, DSP1 channel 3. Unlike auto-request DMA,
+                // a receive transfer can move only the words available
+                // in the host FIFO. Both directions use 16-bit units.
+                for ch in [3, 7] {
+                    let dma = self.cpu.io.dma[ch];
+                    if dma.chcr & 0xf73 != 0x21 { continue; }
+                    let units = self.board.media.dma_request(dma.dar, true)
+                        .max(self.board.media.dma_request(dma.sar, false));
+                    if units != 0 {
+                        self.cpu.io.dma_transfer(&mut self.board, ch, units, self.cpu.cycles);
+                        self.board.update_irl();
+                    }
+                }
+            }
             if !self.can_cyclic.is_empty() {
                 self.can_tick();
+            }
+            if self.drive.is_some() {
+                self.drive_tick();
             }
             // `bra .` with every interrupt masked: the firmware has given
             // up and is waiting for the watchdog.
@@ -715,6 +967,30 @@ impl Machine {
                 if !self.hypercall() {
                     return Stop::Fault;
                 }
+            } else if stop == Stop::Breakpoint && self.gps.as_ref().is_some_and(|g| g.1 == self.cpu.pc) {
+                // The application asks for the GPS library's latest result.
+                // When the OS has one for it (bit 0 of the interface
+                // task's flags; without satellites it says "no fix" once a
+                // second), the fix is written over it first.
+                let now = self.cpu.cycles / self.cycles_per_ms();
+                let (fix, _, pointer) = self.gps.clone().unwrap();
+                let context = self.peek32(pointer).unwrap_or(0);
+                if context != 0 && self.peek32(context).unwrap_or(0) & 1 != 0 {
+                    let o = ((context + 0x8ec) & 0x1fff_ffff).wrapping_sub(self.board.ram_base) as usize;
+                    if o + 47 <= self.board.ram.len() {
+                        fix.patch(&mut self.board.ram[o..o + 47], now);
+                        self.gps_fixes += 1;
+                        // The date and time are also kept apart, for
+                        // another service: a flag and six bytes.
+                        let time: [u8; 6] = self.board.ram[o + 22..o + 28].try_into().unwrap();
+                        let t = ((pointer + 4) & 0x1fff_ffff).wrapping_sub(self.board.ram_base) as usize;
+                        self.board.ram[t..t + 2].copy_from_slice(&1u16.to_be_bytes());
+                        self.board.ram[t + 2..t + 8].copy_from_slice(&time);
+                    }
+                }
+                let saved = std::mem::take(&mut self.cpu.breakpoints);
+                self.cpu.run(&mut self.board, 1);
+                self.cpu.breakpoints = saved;
             } else if stop == Stop::Breakpoint && (Some(self.cpu.pc) == self.printf_hook || self.printf_hooks.contains(&self.cpu.pc)) {
                 if let Some(text) = self.format_printf(self.cpu.r[15]) {
                     let line = format!("[fw] {}\n", text.trim_end_matches(['\n', '\r']));

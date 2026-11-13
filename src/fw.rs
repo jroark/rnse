@@ -233,6 +233,36 @@ impl Module {
     pub fn phys_addr(&self) -> u32 {
         self.load_addr & 0x1fff_ffff
     }
+
+    /// The address the module's code runs at for a place in its image:
+    /// the load address in the address region of its entry points.
+    pub fn code_addr(&self, offset: usize) -> u32 {
+        (self.entries[0] & 0xe000_0000) | (self.phys_addr() + offset as u32)
+    }
+
+    /// Big-endian long word at a code address, if it is in the image.
+    pub fn long_at(&self, addr: u32) -> Option<u32> {
+        let o = (addr & 0x1fff_ffff).checked_sub(self.phys_addr())? as usize;
+        let b = self.data.get(o..o + 4)?;
+        Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Where a sequence of instruction words occurs in the image, as
+    /// code addresses.  Each word is given with a mask of the bits that
+    /// must match.
+    pub fn find_code(&self, pattern: &[(u16, u16)]) -> Vec<u32> {
+        let end = (self.size as usize).min(self.data.len());
+        let mut found = Vec::new();
+        let mut o = 0;
+        while o + 2 * pattern.len() <= end {
+            let hit = pattern.iter().enumerate().all(|(i, &(word, mask))| u16::from_be_bytes([self.data[o + 2 * i], self.data[o + 2 * i + 1]]) & mask == word);
+            if hit {
+                found.push(self.code_addr(o));
+            }
+            o += 2;
+        }
+        found
+    }
 }
 
 /// The software for one hardware variant.

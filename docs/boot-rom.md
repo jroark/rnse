@@ -46,8 +46,25 @@ State the OS inherits:
 * TMU0 interrupt priority.  The OS programs and starts TMU0 for its 2 ms
   tick but only ever sets the *TMU2* field of IPRA.  The loader, which
   shares its hardware layer with the boot ROM, uses IPRA = 0x7000.
+* On the 192, DMA master enable (`DMAOR.DME = 1`). The SD/MP3 driver
+  selects its transfer mode by ORing `0xc300` into DMAOR but never sets
+  DME. Starting with the CPU reset value prevents its first block command
+  from transferring. Supplying DME at OS handover is inferred from this
+  behavior. The register bits, including DBL for eight DDT channels, are
+  described in section 14.7.5 of the
+  [SH7750R hardware manual](https://www.renesas.com/en/document/mah/sh7750-sh7750s-sh7750r-group-users-manual-hardware).
 * A running CAN controller.  The OS sets up its mailboxes but never
   takes the controller out of its reset/halt state itself.
+* A running CAN timer: TMU2 on the 192, unit 1 channel 0 on the 193.
+  The OS installs its handler and clears underflows but does not start
+  the timer. The stand-in supplies a 5 ms interval; the handlers divide
+  this by two to service CAN every 10 ms. The exact boot-ROM reload is
+  unavailable, so this interval is an emulation assumption.
+* On the 192, shared receive mailboxes 0 (general), 2 (network management,
+  mask `0x03f`) and 3 (`0x600..0x67f`, mask `0x07f`). The driver changes
+  their identifiers as clients register but skips programming their mode.
+  A general acceptance mask on mailbox 0 and receive mode on all three
+  allow the software filters to dispatch multiple registered identifiers.
 
 ## Vector tables
 
@@ -80,6 +97,7 @@ Understood so far (all trap 0x3e):
 | 4 | pool | get the pool's memory break | Modules do `base = fn4(0); ...; fn5(0, base + size)` to claim their static RAM, |
 | 5 | pool, address | set the pool's memory break | and the OS starts by setting it to the end of its own data (0x8c19c84c). |
 | 6 | three out-pointers | start-up status | The OS clears all RAM when this returns 9. |
+| 9 | pointer to two block lists, two further arguments, 2 | 192 CAN state handover | V2220371 calls it from `801c75c0`; the two lists are built with `801c8568` and `801c4dcc`. |
 | 0x13 | - | pointer to the software index block (SOFIDX, NAVVER, AUDVER) | The OS compares the radio processor's reported version with the AUDVER text found through it; the block sits in the module directory at flash 0xC01C. |
 
 Seen but not understood:
@@ -88,7 +106,6 @@ Seen but not understood:
 |---------|--------------------|-------|
 | 3e/3 | 0 | Called after the module directory fails verification, right after 3d/0901(0xc000, 0x100).  Probably "restart". |
 | 3e/7 | 0, 1, 10, -2 | Called periodically from the tick. |
-| 3e/9 | three out-pointers, 2 | Once during OS init 2. |
 | 3d/0901 | address, size | See 3e/3: probably erases flash. |
 
 Unknown services return 0.  `rnse boot --trace-bios` logs every call with
@@ -108,11 +125,12 @@ V575 and VB48):
   [hardware-193.md](hardware-193.md).
 * Service 0x13 returns the address of the version block behind the
   entries of the directory at 0x400000 (0x8040007c with six modules).
-* Service 0x0b is new: it hands the state of the boot ROM's CAN software
+* Service 0x0b replaces the 192's service 9: it hands the state of the boot ROM's CAN software
   to the OS.  The argument points at two list addresses; each list ends
   in 0xffff and names blocks of the OS's memory to fill: ten small ones
-  in the first (number, buffer, size; purpose unknown, left alone by the
-  stand-in) and nine in the second (number, size, buffer).  Of the
+  in the first (number, padding, buffer, size, padding; 12 bytes per
+  record) and nine in the second (number, size, buffer; 8 bytes). The
+  192 uses 12-byte records for both lists. Of the
   second, block 2 is the table of received messages (36 entries of 40
   bytes: enabled, identifier, then three times handler, buffer and
   length) and block 8 holds the identifiers 0x271 and 0x2c3 and a
@@ -123,5 +141,11 @@ V575 and VB48):
   entries and the flags from the ignition frame the emulated car is
   sending; without that the OS logs `CAN_Pass_mzas() Error` and treats
   the ignition as off.
+* The first list's block 1 is the network flags (two bytes), block 5 is
+  its state (four bytes). The second list's block 5 is transmit enable
+  (two bytes). The stand-in supplies flags `04 00`, network start state
+  1 and transmit enable 1, following the OS's own cold initialization.
+  Without transmit enable or the CAN timer, transport opens and periodic
+  status messages remain queued even though the UI and CAN reception work.
 * Services 1, 4, 5 and 6 are used as on the 192.
 

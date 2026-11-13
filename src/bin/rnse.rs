@@ -4,8 +4,8 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n  rnse ui <disc.iso> [ui options]      run it with the faceplate in a browser\n\nui options:\n  --port N           port to serve on (default 8080)\n  --bind ADDR        address to listen on (default 127.0.0.1)\n  --loader           run the update loader instead of the installed firmware\n  --no-ignition      start with the ignition off\n  --no-disc          start with an empty CD drive\n  --variant NAME     hardware variant (default V220, or the disc's first)\n  --nav-disc FILE    put a navigation disc in the drive (see below)\n  --serial AUZ...    the unit's serial number (see below)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-serial     log the serial links (radio processor, faceplate)
-  --trace-ge         log what the 193's graphics engine draws\n  --no-radio         leave the radio processor's link unanswered\n  --no-panel         leave the faceplate controller's link unanswered\n  --key KEY@MS[+HOLD]  press a faceplate key at MS milliseconds for HOLD ms\n                     (default 200).  KEY is RADIO, MEDIA, NAME, TEL, NAV,\n                     INFO, CAR, SETUP, RETURN, PREV, NEXT, SELECT, EJECT,\n                     SOFT_TL, SOFT_TR, SOFT_BL, SOFT_BR, CD_EJECT, or a\n                     key state bit number (0-47)\n  --knob K:N@MS      turn knob K (0 volume, 1 select) by N detents at MS\n                     milliseconds, positive = clockwise\n  --shot MS:FILE     also write a screenshot at MS milliseconds\n  --peek ADDR[,LEN]  hex dump of LEN bytes of memory (default 16) at the end\n  --trace-calls A:B  list the subroutines called between A and B ms\n  --trace-coral      dump the display lists sent to the graphics chip\n  --only-layer N     screenshot shows display layer N (0-5) alone\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --nav-disc FILE    start with a navigation disc in the drive: an ISO image,\n                     or the image of an SD card that has the disc's volume\n                     in a partition of type 0x96\n  --serial AUZ...    the unit's serial number (14 characters; 193 only).  A\n                     navigation disc can be tied to one unit's number\n  --audio-cd NxS     start with an audio CD of N tracks of S seconds each\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n  rnse ui <disc.iso> [ui options]      run it with the faceplate in a browser\n\nui options:\n  --port N           port to serve on (default 8080)\n  --bind ADDR        address to listen on (default 127.0.0.1)\n  --loader           run the update loader instead of the installed firmware\n  --no-ignition      start with the ignition off\n  --no-disc          start with an empty CD drive\n  --variant NAME     hardware variant (default V220, or the disc's first)\n  --nav-disc FILE    put a navigation disc in the drive (see below)\n  --gps LAT,LON      a GPS fix at that place (see below)\n  --sd-card FILE     mount a read-only SDHC image in slot 1 (193 only)\n  --serial AUZ...    the unit's serial number (see below)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-serial     log the serial links (radio processor, faceplate)
+  --trace-ge         log what the 193's graphics engine draws\n  --no-radio         leave the radio processor's link unanswered\n  --no-panel         leave the faceplate controller's link unanswered\n  --key KEY@MS[+HOLD]  press a faceplate key at MS milliseconds for HOLD ms\n                     (default 200).  KEY is RADIO, MEDIA, NAME, TEL, NAV,\n                     INFO, CAR, SETUP, RETURN, PREV, NEXT, SELECT, EJECT,\n                     SOFT_TL, SOFT_TR, SOFT_BL, SOFT_BR, CD_EJECT, or a\n                     key state bit number (0-47)\n  --knob K:N@MS      turn knob K (0 volume, 1 select) by N detents at MS\n                     milliseconds, positive = clockwise\n  --shot MS:FILE     also write a screenshot at MS milliseconds\n  --peek ADDR[,LEN]  hex dump of LEN bytes of memory (default 16) at the end\n  --trace-calls A:B  list the subroutines called between A and B ms\n  --trace-coral      dump the display lists sent to the graphics chip\n  --only-layer N     screenshot shows display layer N (0-5) alone\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --nav-disc FILE    start with a navigation disc in the drive: an ISO image,\n                     or the image of an SD card that has the disc's volume\n                     in a partition of type 0x96\n  --sd-card FILE     mount a read-only SDHC image in slot 1 (193 only)\n  --gps LAT,LON[,COURSE]  a GPS fix at that place, in degrees (193, V575\n                     software 0320 only), e.g. --gps 41.8781,-87.6298,90\n  --drive KMH[,TURN][@MS]  the car moves (193): speed pulses, the gyroscope\n                     (TURN in degrees per second to the right) and the\n                     GPS fix along its course, from MS milliseconds on\n  --car-type N       code the unit for car type N, 1-7 (193).  Only type 5\n                     counts speed pulses; --drive codes it so unless told\n  --serial AUZ...    the unit's serial number (14 characters; 193 only).  A\n                     navigation disc can be tied to one unit's number\n  --audio-cd NxS     start with an audio CD of N tracks of S seconds each\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
     );
     std::process::exit(2);
 }
@@ -84,6 +84,10 @@ struct Opts {
     no_disc: bool,
     audio_cd: Option<(u32, u32)>,
     nav_disc: Option<String>,
+    gps: Option<rnse::dev::gps::Gps>,
+    drive: Option<rnse::machine::Drive>,
+    car_type: Option<u8>,
+    sd_card: Option<String>,
     serial: Option<String>,
     tracepoints: Vec<u32>,
     save_flash: Option<String>,
@@ -110,7 +114,7 @@ struct Opts {
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
-    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, audio_cd: None, nav_disc: None, serial: None, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false, trace_serial: false, trace_ge: false, no_radio: false, only_layer: None, no_panel: false, panel_script: vec![], shots: vec![], call_windows: vec![], peeks: vec![] };
+    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, audio_cd: None, nav_disc: None, gps: None, drive: None, car_type: None, sd_card: None, serial: None, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false, trace_serial: false, trace_ge: false, no_radio: false, only_layer: None, no_panel: false, panel_script: vec![], shots: vec![], call_windows: vec![], peeks: vec![] };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| -> Result<&String, Box<dyn std::error::Error>> {
@@ -137,6 +141,10 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
             "--trace-atapi" => o.trace_atapi = true,
             "--no-disc" => o.no_disc = true,
             "--nav-disc" => o.nav_disc = Some(next(&mut i)?.clone()),
+            "--gps" => o.gps = Some(rnse::dev::gps::Gps::parse(next(&mut i)?)?),
+            "--drive" => o.drive = Some(rnse::machine::Drive::parse(next(&mut i)?)?),
+            "--car-type" => o.car_type = Some(next(&mut i)?.parse()?),
+            "--sd-card" => o.sd_card = Some(next(&mut i)?.clone()),
             "--serial" => o.serial = Some(next(&mut i)?.to_uppercase()),
             "--audio-cd" => {
                 let spec = next(&mut i)?;
@@ -267,20 +275,11 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     m.cpu.trace_exceptions = o.trace_exc;
     m.cpu.breakpoints = o.breaks.clone();
     m.cpu.breakpoints.extend(o.tracepoints.iter().copied());
-    let printf = o.printf_hook.or_else(|| {
-        if o.no_printf {
-            None
-        } else {
-            v.module(if loader { "LDM" } else { "OSM" }).and_then(|m| Machine::known_printf(&m.version))
-        }
-    });
-    if let Some(a) = printf {
-        m.hook_printf(a);
+    if !o.no_printf {
+        m.hook_debug_output(v, loader);
     }
-    if !loader && !o.no_printf {
-        if let Some(a) = v.module("APM").and_then(|m| Machine::known_app_printf(&m.version)) {
-            m.hook_printf_also(a);
-        }
+    if let Some(a) = o.printf_hook {
+        m.hook_printf(a);
     }
     m.atapi().trace = o.trace_atapi;
     m.can().trace = o.trace_can;
@@ -292,6 +291,10 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     }
     m.radio.trace = o.trace_serial;
     m.radio_present = !o.no_radio;
+    if let Some(path) = &o.sd_card {
+        let navi = m.cpu.io.navi.as_mut().ok_or("--sd-card requires a 193 variant")?;
+        navi.sdhi.cards[0] = Some(rnse::dev::sdhi::Card::open(path)?);
+    }
     m.panel.trace = o.trace_serial;
     m.panel_present = !o.no_panel;
     m.panel_script = o.panel_script.clone();
@@ -318,6 +321,14 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         }
         if let Some(serial) = &o.serial {
             m.set_serial(serial)?;
+        }
+        if let Some(fix) = &o.gps {
+            let (getter, context) = v.module("OSM").and_then(Machine::find_gps_getter).ok_or("--gps: where this software takes its GPS fix from is not known")?;
+            m.set_gps(fix.clone(), getter, context);
+        }
+        m.drive = o.drive.clone();
+        if let Some(t) = o.car_type.or(o.drive.as_ref().map(|_| 5)) {
+            m.set_car_type(t)?;
         }
         m.start_os(v)?;
     }
@@ -490,6 +501,10 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut port, mut bind, mut loader, mut ignition, mut disc, mut variant) = (8080u16, "127.0.0.1".to_string(), false, true, true, None::<String>);
     let (mut nav_disc, mut serial) = (None::<String>, None::<String>);
+    let mut gps = None::<rnse::dev::gps::Gps>;
+    let mut drive = None::<rnse::machine::Drive>;
+    let mut car_type = None::<u8>;
+    let mut sd_card = None::<String>;
     let mut i = 0;
     while i < rest.len() {
         let opt = rest[i].as_str();
@@ -505,6 +520,10 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "--no-ignition" => ignition = false,
             "--no-disc" => disc = false,
             "--nav-disc" => nav_disc = Some(value()?),
+            "--gps" => gps = Some(rnse::dev::gps::Gps::parse(&value()?)?),
+            "--drive" => drive = Some(rnse::machine::Drive::parse(&value()?)?),
+            "--car-type" => car_type = Some(value()?.parse()?),
+            "--sd-card" => sd_card = Some(value()?),
             "--serial" => serial = Some(value()?.to_uppercase()),
             other => return Err(format!("unknown option {}", other).into()),
         }
@@ -529,6 +548,10 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     };
     let build = |ignition: bool, disc: bool| -> Result<Machine, Box<dyn std::error::Error>> {
         let mut m = Machine::for_model(model);
+        if let Some(path) = &sd_card {
+            let navi = m.cpu.io.navi.as_mut().ok_or("--sd-card requires a 193 variant")?;
+            navi.sdhi.cards[0] = Some(rnse::dev::sdhi::Card::open(path)?);
+        }
         m.echo_console = false;
         m.install_boot_stub(&v.name);
         if disc {
@@ -539,21 +562,22 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             m.start_loader(ldm, [0; 3]);
             // The 193's loaders log through a printf that discards.
             if model == rnse::board::Model::Rnse193 {
-                if let Some(a) = Machine::known_printf(&ldm.version) {
-                    m.hook_printf(a);
-                }
+                m.hook_debug_output(v, true);
             }
         } else {
             let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap_or_default();
             m.install(v, &index);
-            if let Some(a) = v.module("OSM").and_then(|os| Machine::known_printf(&os.version)) {
-                m.hook_printf(a);
-            }
-            if let Some(a) = v.module("APM").and_then(|m| Machine::known_app_printf(&m.version)) {
-                m.hook_printf_also(a);
-            }
+            m.hook_debug_output(v, false);
             if let Some(serial) = &serial {
                 m.set_serial(serial)?;
+            }
+            if let Some(fix) = &gps {
+                let (getter, context) = v.module("OSM").and_then(Machine::find_gps_getter).ok_or("--gps: where this software takes its GPS fix from is not known")?;
+                m.set_gps(fix.clone(), getter, context);
+            }
+            m.drive = drive.clone();
+            if let Some(t) = car_type.or(drive.as_ref().map(|_| 5)) {
+                m.set_car_type(t)?;
             }
             m.start_os(v)?;
             m.set_ignition(ignition);

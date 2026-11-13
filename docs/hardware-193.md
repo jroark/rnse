@@ -28,6 +28,7 @@ North American software (index 0320) for the same hardware.
 | 0xff802000            | interrupt pin control (the layout of the SH7780's INTC: sense, mask and mask-clear registers) |
 | 0xff804000            | interrupt controller |
 | 0xff902000            | a second block of interrupt priority and mask registers, written alongside 0xff804000 (not emulated) |
+| 0xff907000            | a clock that keeps running, used by the GPS library only: six 16-bit values to set at +0x06..+0x10 (the last one shifted left by five), taken over by writing 0xffff to +0x02; the running values at +0x12..+0x1c, read once bit 1 of +0x04 is clear.  Which value is which (date and time, by their number) is not established; not emulated, the registers read back what was written |
 | 0xff908000, 0xff909000 | I2C masters (not emulated) |
 | 0xff915000            | serial port to the radio processor |
 | 0xff926000            | serial port with FIFO to the faceplate controller |
@@ -64,6 +65,7 @@ touches its port.
 | display (vertical blanking) | 0x3e0 | PRI0 bits 31:24 | 0 | 14 (loader), 8 (OS) |
 | timer 0 (tick) | 0x400 | PRI0 bits 23:16 | 1 | 7 |
 | timer 2, underflow and capture | 0x440, 0x460 | PRI0 bits 15:8 and 7:0 | 1 | 14, 12 (OS) |
+| timer unit 1, channel 0 (CAN) | 0x480 | PRI1 bits 31:24 | 2 | 8 |
 | ATAPI | 0x5e0 | PRI1 bits 7:0 | 7 | 3 |
 | CAN | 0x880 | PRI5 bits 23:16 | 25 | 5 |
 | graphics engine | 0x780 | PRI3 bits 7:0 | 19 | 7 |
@@ -81,6 +83,13 @@ unit's vertical-blanking flag either way.  The loader's
 table of handlers also has entries for 0x220-0x3c0 (external interrupt
 levels), 0x4c0, 0x660, 0x680, 0xaa0, 0xac0 and 0xe80, which it does not
 use.
+
+The CAN timer is a separate channel at `0xffd81008` (reload),
+`0xffd8100c` (counter), `0xffd81010` (control), started by bit 0 of
+`0xffd81004`. V57510AA's interrupt table installs wrapper `804cc58c`
+at exception `480`; it calls `806305a0`, which clears this timer's
+underflow and wakes the CAN task every second interrupt. The boot ROM
+stand-in starts it at 5 ms (see [boot-rom.md](boot-rom.md)).
 
 ## Display unit
 
@@ -200,6 +209,9 @@ position it shows.  The emulated drive keeps time for that; no sound
 comes out of it yet.
 
 ## CAN
+
+Telephone-module investigation and the remaining protocol prerequisites
+are recorded in [telephone.md](telephone.md).
 
 RCAN-ET at 0xffdf0000: the control registers of the 192's HCAN2, but a
 mailbox has the identifier at `STDID << 2`, the acceptance mask at +4
@@ -387,9 +399,98 @@ With a map disc accepted, NAV shows the destination menu with the
 disc's regions, the entry screens with their letter wheel come up, and
 the map is drawn at every scale, with street names, the scroll mode
 with its cross hairs and coordinates, and the panel at the right.
-The position is wherever the unit thinks it was last: there is no GPS
-(see hardware.md for what the receiver is) and no speed signal, so the
-map stays at the place the software starts with.
+Without a GPS fix the position is wherever the unit thinks it was last,
+the place the software starts with; with one (`--gps`, below) the map is
+where the fix says.  There is no gyroscope and no speed signal, so the
+position does not move by itself.
+
+### GPS
+
+The receiver is not a module with a serial port.  A block of the
+system-on-chip at 0xff938000 passes messages to and from a GPS library
+in the OS (`GPSLIB-R03.00.07`, the code from 0x80400c00 to about
+0x80436000, with tasks of its own for events, subframes, position and
+so on), which works the position out itself.  The block has control and
+status bits in six registers from 0xff938000, a buffer the library
+writes a message to at 0xff938400 (a long word, a length, a checksum,
+data from +8; bit 16 of the first register sends it) and one it reads
+from at 0xff938800 (bit 16 of the register at +0x0c says there is one).
+The 192 has the same thing on chip select 5 (see hardware.md).  None of
+that is emulated: the library finds no satellites and reports no fix.
+
+What it reports goes this way.  The library keeps its results in nine
+blocks that `0x80423630(number, buffer)` hands out.  An interface task
+of the OS (`GPSIF_TSK`) fetches them when the library signals new ones,
+once a second, and makes records for the navigation application, which
+asks for them through trap 33 (the sensor service: r4 = group << 8 |
+function, r5 = argument): 0x10a for a record of 47 bytes with the
+position, 0x10b for 48 bytes about the satellites, 0x10c for 7 bytes,
+0x10e for date and time.
+
+`--gps LAT,LON` gives the unit a fix without any of the radio side:
+when the application asks for the position record and the OS has one
+for it, the emulator first writes the fix over the library's "no fix"
+(`src/dev/gps.rs`, which also lists what is known of the record:
+status, latitude and longitude in 1/256 of an arc second, date and time
+in BCD and Japanese time).  The map then shows that place and the clock
+runs.  The routine and the pointer it reads the record through are
+found by their code (`Machine::find_gps_getter`), in the three builds
+of the V575 software seen so far.
+
+![The map with a fix in Chicago](gps-193.png)
+
+### Speed and gyroscope
+
+Between fixes the navigation reckons the position from distance and
+turning, which the OS samples in the A/D converter's interrupt (the
+routine at 0x805462f8) into a ring of 512 long words that the
+application empties through service 0x304 of trap 33.  A sample has the
+gyroscope in bits 31:20, flags in bits 15:14 and the number of speed
+pulses since the last sample (15 at most) in bits 19:16.
+
+* The gyroscope is input 1 of the A/D converter: the sample is
+  (930 - reading) * 4, of the ten-bit reading.  The software finds the
+  voltage at rest and the scale for itself.
+* The speed signal is on the TCLK pin: timer 2 runs with input capture
+  (TCR2 bits 7:6; the count goes to TCPR2 at 0xffd8002c and bit 9 of
+  TCR2 is set), and the capture interrupt (INTEVT 0x460) counts a pulse
+  and measures the time since the last.  The software starts out with
+  0.4 m to the pulse.
+* The pulses only count in a unit coded for one kind of car, see
+  "Coding" below.
+
+`--drive KMH[,TURN][@MS]` moves the car: pulses on TCLK at 2.5 to the
+metre, the gyroscope's reading away from 418 by 5.12 for a degree per
+second (a gyroscope of 25 mV per degree and second; which way round is
+a guess), and the GPS fix along its course (`--gps LAT,LON,COURSE`)
+with speed and course in the record.  It codes the unit for car type 5
+unless `--car-type` says otherwise.  With that the map follows the
+car, turned to the direction of travel, and stays on the fix.
+
+![Driving west on the Eisenhower Expressway](drive-193.png)
+
+### Coding
+
+What a workshop codes into the unit is kept in battery-backed memory,
+in a block of 64 bytes at 0xb8002c4c: the mark 0x12345678, a version
+(0x02220001), the sum of the sixteen bytes that follow, then six, four
+and six bytes of coding, 32 further bytes, and the mark inverted at
++0x3c.  The OS uses the block if mark and sum are right.  Otherwise it
+looks for a copy in a record of 224 bytes with the same mark and a sum
+of its own (checked at 0x80666bda), which it reads out of the flash
+parameter block, and failing that clears the block: an uncoded unit.
+
+The first of the last six bytes is the car type, 1 to 7 (the routine at
+0x806677e8 hands the six out).  The software sorts the types into four
+classes (1; 2, 6, 7; 3, 4; 5).  Only for type 5 does the capture
+interrupt count speed pulses; for every other the OS notes at start-up
+that the handler is to ignore them.  Where those cars' distance comes
+from has not been followed up: the CAN bus carries 0x351 and 0x359,
+whose handlers are at 0x8066f6dc and 0x8066f7a8.  With a type coded the
+instrument cluster's task logs `car_model = 4` instead of `ffffffff`.
+
+`--car-type N` codes an emulated unit (`Machine::set_car_type`) by
+writing that block before the start.
 
 ## Not done
 
@@ -406,9 +507,9 @@ map stays at the place the software starts with.
 * The last blocks of the voice data are asked for beyond the end of
   the disc's table of compressed blocks (`exp_read ERR`) on the 2010
   disc.
-* GPS, the gyroscope and the speed signal, and with them a position
-  that moves; the SD card processors; route guidance has not been
-  tried.
+* The GPS block itself and the satellite record; the rest of the
+  coding, and where a car without the pulse wire gets its distance
+  from; the SD card processors; route guidance has not been tried.
 * The second interrupt register block at 0xff902000, the I2C masters,
   the remaining serial ports, DMA for the drive.
 * How the OS serves the watchdog.  The emulator only watches the

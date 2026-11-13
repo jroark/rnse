@@ -101,7 +101,7 @@ pub struct Int2Source {
 
 /// The sources identified so far, from the firmware's own set-up code.
 /// The index is the bit number in [`Int2::pending`].
-pub const INT2_SOURCES: [Int2Source; 10] = [
+pub const INT2_SOURCES: [Int2Source; 12] = [
     Int2Source { name: "TMU0", code: 0x400, pri: (0, 16), mask_bit: 1 },
     Int2Source { name: "TMU2", code: 0x440, pri: (0, 8), mask_bit: 1 },
     Int2Source { name: "TMU2 capture", code: 0x460, pri: (0, 0), mask_bit: 1 },
@@ -118,8 +118,12 @@ pub const INT2_SOURCES: [Int2Source; 10] = [
     Int2Source { name: "radio link", code: 0xd20, pri: (9, 8), mask_bit: 32 + 9 },
     Int2Source { name: "faceplate link", code: 0xdc0, pri: (10, 16), mask_bit: 32 + 14 },
     Int2Source { name: "graphics engine", code: 0x780, pri: (3, 0), mask_bit: 19 },
+    Int2Source { name: "CAN timer", code: 0x480, pri: (1, 24), mask_bit: 2 },
+    Int2Source { name: "SD host", code: 0xea0, pri: (11, 24), mask_bit: 32 + 21 },
 ];
+pub const INT2_SDHI: usize = 11;
 pub const INT2_GE: usize = 9;
+pub const INT2_CAN_TIMER: usize = 10;
 pub const INT2_RADIO: usize = 7;
 pub const INT2_PANEL: usize = 8;
 /// `mask_bit` of a source that is not gated by the mask registers.
@@ -270,6 +274,11 @@ impl Intc {
                     int2.pending &= !(1 << i);
                 }
             }
+            if self.pending & (1 << Irq::Tuni3 as u32) != 0 {
+                int2.pending |= 1 << INT2_CAN_TIMER;
+            } else {
+                int2.pending &= !(1 << INT2_CAN_TIMER);
+            }
             let (l, c) = int2.best();
             if l > level {
                 level = l;
@@ -337,7 +346,8 @@ pub struct OnChip {
     pub sq: [[u32; 8]; 2],
     pub intc: Intc,
 
-    pub tmu: [TmuCh; 3],
+    /// Unit 0's three channels, then the 193's unit 1 channel 0.
+    pub tmu: [TmuCh; 4],
     pub tocr: u8,
     /// CPU cycles per peripheral clock (P-phi) cycle.
     pub pclk_div: u64,
@@ -386,6 +396,8 @@ pub struct OnChip {
     rtc_last: u64,
 
     pub next_event: u64,
+    /// Timer 2's input capture register.
+    pub tcpr2: u32,
     pub log: IoLog,
     /// Present when the CPU is the SH7770-family system-on-chip of the
     /// 193 unit: its own peripherals replace the SH7750's.
@@ -402,7 +414,7 @@ const TMU_BASE: u32 = 0xffd8_0000;
 
 impl OnChip {
     pub fn new() -> Self {
-        let mut tmu = [TmuCh::default(); 3];
+        let mut tmu = [TmuCh::default(); 4];
         for t in tmu.iter_mut() {
             t.tcor = 0xffff_ffff;
             t.tcnt = 0xffff_ffff;
@@ -448,6 +460,7 @@ impl OnChip {
             rtc: [0; 16],
             rtc_last: 0,
             next_event: u64::MAX,
+            tcpr2: 0,
             log: IoLog::new(false, 4),
             navi: None,
         }
@@ -489,17 +502,31 @@ impl OnChip {
         }
     }
 
+    /// An edge on the TCLK pin: with input capture enabled (TCR2 bits
+    /// 7:6), timer 2's counter is copied to TCPR2 and the capture flag
+    /// set, with an interrupt if both bits are set.  The RNS-E has the
+    /// car's speed pulses on this pin.
+    pub fn tmu2_capture(&mut self, now: u64) {
+        self.tmu_sync(2, now);
+        if self.tmu[2].tcr & 0xc0 != 0 {
+            self.tcpr2 = self.tmu[2].tcnt;
+            self.tmu[2].tcr |= 0x200;
+            self.tmu_irq();
+        }
+    }
+
     fn tmu_irq(&mut self) {
-        const IRQS: [Irq; 3] = [Irq::Tuni0, Irq::Tuni1, Irq::Tuni2];
-        for ch in 0..3 {
+        const IRQS: [Irq; 4] = [Irq::Tuni0, Irq::Tuni1, Irq::Tuni2, Irq::Tuni3];
+        for ch in 0..4 {
             let on = self.tmu[ch].tcr & 0x120 == 0x120;
             self.intc.set(IRQS[ch], on);
         }
+        self.intc.set(Irq::Ticpi2, self.tmu[2].tcr & 0x2c0 == 0x2c0);
     }
 
     fn reschedule(&mut self, now: u64) {
         let mut next = u64::MAX;
-        for ch in 0..3 {
+        for ch in 0..4 {
             let t = &self.tmu[ch];
             if t.running {
                 let at = t.last + (t.tcnt as u64 + 1) * self.tmu_cpt(ch);
@@ -525,7 +552,7 @@ impl OnChip {
 
     /// Called by the CPU when `cycles >= next_event`.
     pub fn run_events<B: Bus>(&mut self, _bus: &mut B, now: u64) {
-        for ch in 0..3 {
+        for ch in 0..4 {
             self.tmu_sync(ch, now);
         }
         self.tmu_irq();
@@ -640,7 +667,7 @@ impl OnChip {
     /// devices that model a DREQ line.
     pub fn dma_transfer<B: Bus>(&mut self, bus: &mut B, ch: usize, max_units: u32, now: u64) -> u32 {
         let c = self.dma[ch].chcr;
-        if c & 1 == 0 || c & 2 != 0 || self.dmaor & 1 == 0 || self.dma[ch].busy {
+        if c & 1 == 0 || c & 2 != 0 || self.dmaor & 7 != 1 || self.dma[ch].busy {
             return 0;
         }
         let ts = (c >> 4) & 7;
@@ -738,6 +765,21 @@ impl OnChip {
     // ---- register access --------------------------------------------------
 
     pub fn read<B: Bus>(&mut self, _bus: &mut B, addr: u32, size: u32, now: u64, pc: u32) -> u32 {
+        if self.navi.is_some() {
+            match addr {
+                0xffd8_1004 => return self.tmu[3].running as u32,
+                0xffd8_1008 | 0xffd8_100c | 0xffd8_1010 => {
+                    self.tmu_sync(3, now);
+                    self.tmu_irq();
+                    return match addr {
+                        0xffd8_1008 => self.tmu[3].tcor,
+                        0xffd8_100c => self.tmu[3].tcnt,
+                        _ => self.tmu[3].tcr as u32,
+                    };
+                }
+                _ => {}
+            }
+        }
         if let Some(n) = self.navi.as_mut() {
             if let (Some(int2), 0xff80_4000..=0xff80_41ff) = (self.intc.int2.as_ref(), addr) {
                 let v = match addr & 0x1ff {
@@ -852,7 +894,7 @@ impl OnChip {
                     _ => self.tmu[ch].tcr as u32,
                 }
             }
-            0xffd8_002c => 0,
+            0xffd8_002c => self.tcpr2,
 
             // SCI
             0xffe0_0000 => self.sci_smr as u32,
@@ -889,6 +931,34 @@ impl OnChip {
     }
 
     pub fn write<B: Bus>(&mut self, bus: &mut B, addr: u32, size: u32, v: u32, now: u64, pc: u32) {
+        if self.navi.is_some() {
+            match addr {
+                0xffd8_1004 => {
+                    self.tmu_sync(3, now);
+                    let run = v & 1 != 0;
+                    if run && !self.tmu[3].running { self.tmu[3].last = now; }
+                    self.tmu[3].running = run;
+                    self.tmu_irq();
+                    self.reschedule(now);
+                    return;
+                }
+                0xffd8_1008 | 0xffd8_100c | 0xffd8_1010 => {
+                    self.tmu_sync(3, now);
+                    match addr {
+                        0xffd8_1008 => self.tmu[3].tcor = v,
+                        0xffd8_100c => self.tmu[3].tcnt = v,
+                        _ => {
+                            let unf = self.tmu[3].tcr & v as u16 & 0x100;
+                            self.tmu[3].tcr = (v as u16 & 0x2ff & !0x100) | unf;
+                        }
+                    }
+                    self.tmu_irq();
+                    self.reschedule(now);
+                    return;
+                }
+                _ => {}
+            }
+        }
         if let Some(n) = self.navi.as_mut() {
             if let (Some(int2), 0xff80_4000..=0xff80_41ff) = (self.intc.int2.as_mut(), addr) {
                 n.log.log("intc", true, addr, size, v, pc);
@@ -926,7 +996,10 @@ impl OnChip {
             0xffa0_0040 => {
                 // AE and NMIF can only be cleared.
                 let keep = self.dmaor & v & 0x6;
-                self.dmaor = (v & 0x8201) | keep;
+                // SH7750R: DDT, DBL (eight DDT channels), priority and
+                // master enable. The 193 uses its existing register mask.
+                let mask = if self.navi.is_some() { 0x8201 } else { 0xc301 };
+                self.dmaor = (v & mask) | keep;
                 self.dma_kick(bus, now);
             }
             0xffa0_0000..=0xffa0_008f => {
@@ -1014,9 +1087,10 @@ impl OnChip {
                     0 => self.tmu[ch].tcor = v,
                     4 => self.tmu[ch].tcnt = v,
                     _ => {
-                        // UNF (bit 8) can only be cleared by writing 0.
-                        let unf = self.tmu[ch].tcr & (v as u16) & 0x100;
-                        self.tmu[ch].tcr = (v as u16 & 0x2ff & !0x100) | unf;
+                        // UNF (bit 8) and the capture flag (bit 9) can
+                        // only be cleared by writing 0.
+                        let flags = self.tmu[ch].tcr & (v as u16) & 0x300;
+                        self.tmu[ch].tcr = (v as u16 & 0x0ff) | flags;
                     }
                 }
                 self.tmu_irq();

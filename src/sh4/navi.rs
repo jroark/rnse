@@ -28,7 +28,7 @@
 //! | 0xffc6_2100  | ATAPI interface: task file at +0x00..+0x1c (one   |
 //! |              | register per 32-bit word), alternate status at +0x38, |
 //! |              | interface control from +0x80                        |
-//! | 0xffd8_0000  | timer unit 0; units 1, 2 at 0xffd8_1000, 0xffd8_2000 |
+//! | 0xffd8_0000  | timer unit 0; unit 1 channel 0 (CAN timer) at 0xffd8_1000; unit 2 at 0xffd8_2000 |
 //! | 0xffdf_0000  | CAN controller (RCAN-ET)                           |
 //! | 0xffe8_0000  | 2D graphics engine, see [`crate::dev::q2`]         |
 //! | 0xffe4_0000  | serial port with FIFO: the loader's debug console  |
@@ -41,6 +41,7 @@ use crate::dev::uart::Uart;
 use crate::dev::adc::Adc;
 use crate::dev::atapi::Atapi;
 use crate::dev::hcan::Hcan;
+use crate::dev::sdhi::Sdhi;
 use crate::iolog::IoLog;
 use std::collections::HashMap;
 
@@ -60,6 +61,7 @@ const ADC: u32 = 0xff93_c000;
 const MOTOR_PORT: u32 = 0xff93_f000;
 const RADIO_UART: u32 = 0xff91_5000;
 const PANEL_SCIF: u32 = 0xff92_6000;
+const SDHI: u32 = 0xff90_a000;
 
 // Display unit registers (offsets from 0xfff8_0000).  The same block
 // lives on in Renesas' R-Car chips, whose Linux driver names these.
@@ -95,6 +97,7 @@ pub struct Navi {
     pub atapi: Atapi,
     /// The on-chip CAN controller (infotainment bus).
     pub can: Hcan,
+    pub sdhi: Sdhi,
     /// Cycle of the last watchdog strobe edge, once there has been one.
     pub watchdog_strobe: Option<u64>,
     pub adc: Adc,
@@ -146,7 +149,7 @@ impl Navi {
         let mut atapi = Atapi::new();
         atapi.packet_irq = true;
         // A/D inputs: the display closed (4) and 25 degrees (5).
-        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4) }
+        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4) }
     }
 
     /// Whether this module, rather than the SH-4 model, owns `addr`.
@@ -219,6 +222,16 @@ impl Navi {
 
     pub fn read(&mut self, addr: u32, size: u32, _now: u64, pc: u32, intc: &mut Intc) -> u32 {
         let v = match addr {
+            SDHI..=0xff90_a0ff if size == 2 => {
+                let value = u32::from(self.sdhi.read(addr - SDHI));
+                intc.set_int2(super::onchip::INT2_SDHI, self.sdhi.irq());
+                self.log.log("sdhi", false, addr, size, value, pc);
+                return value;
+            }
+            0xff93_e00c if size == 4 => {
+                (self.raw_read(addr, size) & !0xc00)
+                    | (self.sdhi.present(0) as u32) << 10 | (self.sdhi.present(1) as u32) << 11
+            }
             GE..=0xffe8_00ff if size == 4 => self.ge.read(addr - GE),
             RADIO_UART..=0xff91_503f => {
                 let v = self.radio_uart.read((addr - RADIO_UART) >> 1) as u32;
@@ -277,6 +290,10 @@ impl Navi {
     pub fn write(&mut self, addr: u32, size: u32, v: u32, now: u64, pc: u32, intc: &mut Intc) {
         self.log.log("soc", true, addr, size, v, pc);
         match addr {
+            SDHI..=0xff90_a0ff if size == 2 => {
+                self.sdhi.write(addr - SDHI, v as u16);
+                intc.set_int2(super::onchip::INT2_SDHI, self.sdhi.irq());
+            }
             RADIO_UART..=0xff91_503f => {
                 self.radio_uart.write((addr - RADIO_UART) >> 1, v as u16);
                 intc.set_int2(INT2_RADIO, self.radio_uart.irq());
@@ -366,6 +383,7 @@ impl Navi {
     /// Recompute the request lines of the devices the host can poke
     /// between instructions (frames arriving on the CAN bus).
     pub fn update_irqs(&mut self, intc: &mut Intc) {
+        intc.set_int2(super::onchip::INT2_SDHI, self.sdhi.irq());
         intc.set_int2(INT2_ATAPI, self.atapi_request());
         intc.set_int2(INT2_CAN, self.can.irq());
         intc.set_int2(INT2_RADIO, self.radio_uart.irq());
