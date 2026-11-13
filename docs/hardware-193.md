@@ -29,7 +29,8 @@ North American software (index 0320) for the same hardware.
 | 0xff804000            | interrupt controller |
 | 0xff902000            | a second block of interrupt priority and mask registers, written alongside 0xff804000 (not emulated) |
 | 0xff907000            | a clock that keeps running, used by the GPS library only: six 16-bit values to set at +0x06..+0x10 (the last one shifted left by five), taken over by writing 0xffff to +0x02; the running values at +0x12..+0x1c, read once bit 1 of +0x04 is clear.  Which value is which (date and time, by their number) is not established; not emulated, the registers read back what was written |
-| 0xff908000, 0xff909000 | I2C masters (not emulated) |
+| 0xff908000            | ten registers written in groups at start-up, purpose not established (not emulated) |
+| 0xff909000            | a port: +0 written 0, 0xc0000000 and later 0xc0100000 (direction or pin function, not understood), data at +4.  Data bit 1 is the faceplate controller's reset line, low = reset; bits 0 and 3 are set at start-up and unidentified |
 | 0xff915000            | serial port to the radio processor |
 | 0xff926000            | serial port with FIFO to the faceplate controller |
 | 0xff923000, 0xff927000 | further serial ports with FIFO (not emulated) |
@@ -257,6 +258,16 @@ See [boot-rom.md](boot-rom.md).
   +0x18, receive count +0x20).  Same frames as on the 192; the OS sends
   commands 0x02, 0x03, 0x06, 0x07, 0x09 and 0x0a once the controller has
   announced itself with 0x0f.
+  Set-up by the OS: control 0, FIFO control 6 (both FIFOs held empty),
+  status flags cleared, mode 0x0020 (8 bits, even parity), bit rate
+  0xa1; then the controller's reset line (bit 1 of 0xff909004) goes
+  high, FIFO control 0, control 0x30.  0xa1 is 9600 bit/s if the
+  peripheral clock is 50 MHz and 4800 if it is 25 MHz; the debug port's
+  divisor (0x36 at +0x30, sixteen samples a bit) then gives 57600 or
+  28800.  The 10 ms tick (62438 counts) fits either: a quarter of 25 MHz
+  or an eighth of 50 MHz.  See the 192's notes on why 9600 is the
+  likelier.  As on the 192 the OS resets the controller when it leaves a
+  command unanswered for two seconds.
 
 ## A/D converter and ports
 

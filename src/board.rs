@@ -230,7 +230,18 @@ impl Board {
     /// are wired to is mostly unknown, but not how the registers behave
     /// for outputs.
     fn stored_192(addr: u32) -> bool {
-        matches!(addr, 0x07b0_0000..=0x07b0_001f | 0x1230_0000..=0x12a0_0001 | 0x12d0_0000..=0x12d0_0006) && (addr & 0xffff < 0x20)
+        matches!(addr, 0x07b0_0000..=0x07b0_001f | 0x1230_0000..=0x12a0_0001 | 0x12d0_0000..=0x12d0_0007 | 0x1600_0004..=0x1600_0007) && (addr & 0xffff < 0x20)
+    }
+
+    /// The latch at 0x1600_0004 (32 bits).  Bit 0 is the reset line of
+    /// the faceplate controller, low = reset; the other bits the OS
+    /// sets (0x04, 0x08, 0x10, 0x20, 0x40) are unidentified.
+    pub fn latch16(&self) -> u32 {
+        let a = 0x1600_0004u32;
+        match self.unmapped.get(&(a >> 12)) {
+            Some(p) => u32::from_be_bytes([p[4], p[5], p[6], p[7]]),
+            None => 0,
+        }
     }
 
     fn ipr(&self, reg: u32) -> u32 {

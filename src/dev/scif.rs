@@ -15,6 +15,10 @@
 //! | +0x1c, +0x20 | data counts of the TX and RX FIFOs                    |
 //!
 //! Transmission is instantaneous; received bytes are queued by the host.
+//! A byte written while the transmitter is off waits in the FIFO until
+//! it is switched on; what arrives while the receiver is off, or while
+//! the receive FIFO is held in reset, is lost; a FIFO held in reset
+//! takes nothing.
 
 use std::collections::VecDeque;
 
@@ -23,9 +27,13 @@ pub struct Scif {
     regs: [u16; 16],
     pub control: u16,
     pub tx: Vec<u8>,
+    /// Written with the transmitter off: not on the line yet.
+    held: Vec<u8>,
     pub rx: VecDeque<u8>,
     pub tx_total: u64,
     pub rx_total: u64,
+    /// Bytes that arrived while the receiver was off.
+    pub rx_lost: u64,
 }
 
 impl Scif {
@@ -41,6 +49,10 @@ impl Scif {
 
     /// Queue bytes for the firmware to receive.
     pub fn receive(&mut self, data: &[u8]) {
+        if self.control & 0x10 == 0 || self.regs[6] & 2 != 0 {
+            self.rx_lost += data.len() as u64;
+            return;
+        }
         self.rx.extend(data.iter().copied());
         self.rx_total += data.len() as u64;
     }
@@ -58,15 +70,30 @@ impl Scif {
 
     pub fn write(&mut self, off: u32, v: u16) {
         match off & 0x3c {
-            0x08 => self.control = v,
+            0x08 => {
+                self.control = v;
+                if v & 0x20 != 0 && !self.held.is_empty() {
+                    self.tx_total += self.held.len() as u64;
+                    self.tx.append(&mut self.held);
+                }
+            }
             0x0c => {
-                self.tx.push(v as u8);
-                self.tx_total += 1;
+                if self.regs[6] & 4 != 0 {
+                    // The transmit FIFO is held in reset.
+                } else if self.control & 0x20 != 0 {
+                    self.tx.push(v as u8);
+                    self.tx_total += 1;
+                } else if self.held.len() < 16 {
+                    self.held.push(v as u8);
+                }
             }
             0x10 => {} // flags follow the FIFOs
             0x18 => {
                 if v & 2 != 0 {
                     self.rx.clear();
+                }
+                if v & 4 != 0 {
+                    self.held.clear();
                 }
                 self.regs[6] = v;
             }
@@ -95,10 +122,14 @@ mod tests {
     fn transmit_and_receive() {
         let mut s = Scif::default();
         s.write(0x18, 6);
+        s.write(0x0c, 0x11);
         s.write(0x18, 0);
-        s.write(0x08, 0x30);
+        s.receive(&[9]);
+        assert_eq!((s.rx.len(), s.rx_lost), (0, 1), "receiver off");
         s.write(0x0c, 0x55);
-        assert_eq!(s.tx, [0x55]);
+        assert!(s.tx.is_empty(), "transmitter off");
+        s.write(0x08, 0x30);
+        assert_eq!(s.tx, [0x55], "and the byte written into the reset FIFO is gone");
         assert!(!s.irq());
         s.write(0x08, 0x70);
         s.receive(&[1, 2]);

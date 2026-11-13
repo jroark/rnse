@@ -107,6 +107,8 @@ pub struct Machine {
     /// Stand-in for the faceplate controller on serial channel 3.
     pub panel: crate::dev::panel::Panel,
     pub panel_present: bool,
+    /// What the faceplate controller has answered and when it arrives.
+    panel_replies: VecDeque<(u64, Vec<u8>)>,
     /// Scripted faceplate input: (time in ms, action), any order.
     pub panel_script: Vec<(u64, PanelAction)>,
 }
@@ -157,7 +159,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog_192: (0, None), next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog_192: (0, None), next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Fill RAM with arbitrary data, as it is after power-up on real
@@ -487,6 +489,23 @@ impl Machine {
                 }
             }
         }
+        let reset = match self.cpu.io.navi.as_ref() {
+            Some(navi) => navi.panel_reset(),
+            None => self.board.latch16() & 1 == 0,
+        };
+        if reset != self.panel.in_reset {
+            if self.trace_serial {
+                eprintln!("[panel] {:>7} ms  reset line {}", ms, if reset { "low" } else { "high" });
+            }
+            self.panel.set_reset(reset, ms);
+            if reset {
+                self.panel_replies.clear();
+            }
+        }
+        let now = self.cpu.cycles;
+        // One character on the line: ten bits at 9600 baud (assumed
+        // from the 192's divisor of 95 and a 14.7456 MHz clock).
+        let char_time = self.cycles_per_ms() * 10 / 96 * 10;
         let uart: &mut dyn SerialPort = match self.cpu.io.navi.as_mut() {
             Some(navi) => &mut navi.panel_scif,
             None => &mut self.board.uart[3],
@@ -500,17 +519,24 @@ impl Machine {
             if self.panel_present {
                 let reply = self.panel.receive(&bytes, ms);
                 if !reply.is_empty() {
-                    if self.trace_serial {
-                        eprintln!("[panel] {:>7} ms  unit <- {}", ms, hex(&reply));
-                    }
-                    uart.feed(&reply);
+                    // The answer cannot arrive before the unit's bytes
+                    // have gone out and one of the controller's come in.
+                    self.panel_replies.push_back((now + (bytes.len() as u64 + 1) * char_time, reply));
                 }
             }
             changed = true;
         }
+        while self.panel_replies.front().is_some_and(|r| r.0 <= now) {
+            let reply = self.panel_replies.pop_front().unwrap().1;
+            if self.trace_serial {
+                eprintln!("[panel] {:>7} ms  unit <- {}", ms, hex(&reply));
+            }
+            uart.feed(&reply);
+            changed = true;
+        }
         // The controller only talks once the unit's receiver is on, and
         // not into the middle of something the unit has yet to read.
-        if self.panel_present && uart.rx_idle() {
+        if self.panel_present && self.panel_replies.is_empty() && uart.rx_idle() {
             if let Some(f) = self.panel.poll(ms) {
                 if self.trace_serial {
                     eprintln!("[panel] {:>7} ms  unit <- {}", ms, hex(&f));
@@ -1241,5 +1267,50 @@ impl Machine {
             let _ = std::io::stdout().flush();
         }
         self.console.extend_from_slice(&out);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A program for the 192 that puts `edges` edges on the watchdog
+    /// strobe and then does nothing.
+    fn strobe_then_hang(edges: usize) -> Machine {
+        let mut code: Vec<u16> = vec![0xd100 | ((edges as u16 * 4 + 6) / 4 + 1)]; // mov.l port,r1
+        for i in 0..edges {
+            code.push(0xe000 | (i as u16 + 1) & 1); // mov #0 or #1,r0
+            code.push(0x2100); // mov.b r0,@r1
+        }
+        code.extend([0xaffe, 0x0009]); // bra . ; nop
+        while code.len() % 2 != 0 || code.len() * 2 < ((edges * 4 + 6) / 4 + 2) * 4 {
+            code.push(0x0009);
+        }
+        let mut bytes: Vec<u8> = code.iter().flat_map(|w| w.to_be_bytes()).collect();
+        bytes.extend(0xb230_0001u32.to_be_bytes());
+        let mut m = Machine::new();
+        m.echo_console = false;
+        m.board.load(0x0c00_1000, &bytes);
+        m.cpu.reset();
+        m.cpu.set_sr(SR_MD);
+        m.cpu.pc = 0x8c00_1000;
+        m
+    }
+
+    #[test]
+    fn watchdog_192() {
+        // Never strobed: the watchdog is taken not to be armed (a guess
+        // that keeps software alive which does not know about it; real
+        // hardware may well differ).
+        let mut m = strobe_then_hang(0);
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(3_000 * ms), Stop::Budget);
+        // Strobed and then abandoned: reset after 1.5 s.
+        let mut m = strobe_then_hang(3);
+        assert_eq!(m.board.watchdog_edges, 0);
+        assert_eq!(m.run(1_400 * ms), Stop::Budget);
+        assert_eq!(m.board.watchdog_edges, 3);
+        assert_eq!(m.run(300 * ms), Stop::Fault);
+        assert!(m.reset_requested);
     }
 }

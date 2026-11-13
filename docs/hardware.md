@@ -203,6 +203,31 @@ bytes, one bit per key) and encoder (0x0D) frames.
 The power button is not among the keys: it has to work while the main
 processor is off, so it presumably goes to the radio processor.
 
+The controller's reset line is bit 0 of the 32-bit latch at 0x16000004,
+low = reset (the other bits the OS sets there, 0x04, 0x08, 0x10, 0x20
+and 0x40, are unidentified).  The OS starts with the line low, sets the
+port up with its transmitter and receiver off, raises the line and
+switches the port on; the controller's 0x0F follows.  Whenever the OS
+has sent a command frame it starts a two-second timer that any byte
+from the controller cancels; when it runs out the OS prints `fpdrv hard
+reset`, pulses the line low for one tick and expects the start-up
+again.  (The emulated controller used to answer in no time at all, that
+is before the timer was started, which left the timer running after the
+last frame and produced such a reset 4.6 s after every start.  It now
+answers after the time the bytes take on the line.)
+
+Bit rates.  All four serial channels in use have divisor 0x5f (channels
+1 and 3 and the loader's use of 5) or 0x1f (the application's use of
+channel 5), a ratio of three as between 9600 and 28800, or 38400 and
+115200 bit/s.  The 193 gives its faceplate port 0xa1, which is 9600
+bit/s from a 50 MHz peripheral clock or 4800 from 25 MHz, so 9600 it is
+if both faceplates talk at the same rate; that makes the companion
+chip's serial clock 14.7 MHz, half the 29.4 MHz peripheral clock.
+Format on the 193: 8 bits, even parity (the 192's mode value 0x0011
+presumably says the same).  The emulator does not model bit rates or
+parity beyond delaying the faceplate's answers by ten bit times a byte
+at 9600.
+
 ## CAN
 
 Telephone-module investigation and the remaining protocol prerequisites

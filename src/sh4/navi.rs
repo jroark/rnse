@@ -47,6 +47,9 @@ use std::collections::HashMap;
 
 const DU: u32 = 0xfff8_0000;
 const DU_END: u32 = 0xfffa_0000;
+/// A port (direction +0, data +4); bit 1 of the data register resets
+/// the faceplate controller when low.
+const PORT_FP: u32 = 0xff90_9000;
 const SCIF_DEBUG: u32 = 0xffe4_0000;
 const ATAPI: u32 = 0xffc6_2100;
 const ATAPI_CONTROL: u32 = 0xffc6_2180;
@@ -200,6 +203,11 @@ impl Navi {
         self.atapi_status() & self.raw_read(ATAPI_STATUS + 4, 4) != 0
     }
 
+    /// The faceplate controller's reset line is low.
+    pub fn panel_reset(&self) -> bool {
+        self.raw_read(PORT_FP + 4, 4) & 2 == 0
+    }
+
     fn raw_read(&self, addr: u32, size: u32) -> u32 {
         (0..size).fold(0, |v, i| (v << 8) | *self.regs.get(&(addr + i)).unwrap_or(&0) as u32)
     }
@@ -286,7 +294,7 @@ impl Navi {
             SCIF_DEBUG..=0xffe4_003f => self.debug_scif.read(addr - SCIF_DEBUG) as u32,
             // Port blocks: direction, output and the rest hold what is
             // written (the input register is handled above where known).
-            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.raw_read(addr, size),
+            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f | PORT_FP..=0xff90_9007 => self.raw_read(addr, size),
             _ => {
                 self.unmodelled.note(addr, false, pc);
                 self.raw_read(addr, size)
@@ -362,12 +370,10 @@ impl Navi {
                 // The debug console.  Nothing leaves the port unless the
                 // transmitter has been switched on (SCSCR bit 5).
                 self.debug_scif.write(addr - SCIF_DEBUG, v as u16);
-                let sent = std::mem::take(&mut self.debug_scif.tx);
-                if self.debug_scif.control & 0x20 != 0 {
-                    self.console.extend_from_slice(&sent);
-                }
+                let mut sent = std::mem::take(&mut self.debug_scif.tx);
+                self.console.append(&mut sent);
             }
-            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.raw_write(addr, size, v),
+            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f | PORT_FP..=0xff90_9007 => self.raw_write(addr, size, v),
             _ => {
                 self.unmodelled.note(addr, true, pc);
                 self.raw_write(addr, size, v)

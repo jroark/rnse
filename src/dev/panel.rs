@@ -34,6 +34,18 @@
 //! the unit sends 0x02, 0x03, 0x0A and 0x09 once, then 0x06 several
 //! times while it fades the lighting in, and 0x07.)
 //!
+//! # Reset
+//!
+//! The unit holds the controller's reset line: bit 0 of the latch at
+//! 0x1600_0004 on the 192, bit 1 of the port at 0xff90_9004 on the 193,
+//! low = reset.  Both stock systems start with the line low, switch
+//! their serial port off, raise the line and then turn the receiver on;
+//! the controller's first frame is 0x0F.  When the controller leaves a
+//! command frame unanswered for two seconds the unit pulses the line low
+//! ("fpdrv hard reset") and expects the whole start-up again.  How long
+//! the real controller takes to start is not known; this one takes
+//! [`START_MS`].
+//!
 //! # Keys
 //!
 //! Key state bits, numbered from bit 0 of the first byte (the firmware's
@@ -152,6 +164,8 @@ impl Parser {
 /// How long to wait for the unit to acknowledge a frame.
 const ACK_TIMEOUT_MS: u64 = 300;
 const RETRIES: u32 = 3;
+/// From the release of the reset line to the start-up frame (assumed).
+pub const START_MS: u64 = 20;
 
 pub struct Panel {
     parser: Parser,
@@ -165,6 +179,12 @@ pub struct Panel {
     last_rx_ms: u64,
     /// The unit has acknowledged the start-up frame.
     pub online: bool,
+    /// The reset line is low: the controller does nothing.
+    pub in_reset: bool,
+    /// Nothing is sent before this time (start-up after a reset).
+    quiet_until: u64,
+    /// Times the unit has reset the controller after its first start.
+    pub resets: u32,
     /// Last data of each command the unit has sent.
     pub from_unit: [Option<Vec<u8>>; 32],
     pub trace: bool,
@@ -178,9 +198,36 @@ impl Default for Panel {
 
 impl Panel {
     pub fn new() -> Panel {
-        let mut p = Panel { parser: Parser::default(), queue: VecDeque::new(), pending: None, keys: [0; 6], last_rx_ms: 0, online: false, from_unit: Default::default(), trace: false };
+        let mut p = Panel { parser: Parser::default(), queue: VecDeque::new(), pending: None, keys: [0; 6], last_rx_ms: 0, online: false, in_reset: false, quiet_until: 0, resets: 0, from_unit: Default::default(), trace: false };
         p.queue.push_back(frame(CMD_STARTED, &[]));
         p
+    }
+
+    /// The state of the reset line, `low` = held in reset.  The
+    /// controller forgets everything while it is low and starts afresh,
+    /// with its start-up frame, when it rises.
+    pub fn set_reset(&mut self, low: bool, now_ms: u64) {
+        if low == self.in_reset {
+            return;
+        }
+        self.in_reset = low;
+        if low {
+            if self.online {
+                self.resets += 1;
+            }
+            self.parser.reset();
+            self.queue.clear();
+            self.pending = None;
+            self.online = false;
+        } else {
+            self.queue.clear();
+            self.queue.push_back(frame(CMD_STARTED, &[]));
+            // Keys held down through the restart are reported again.
+            if self.keys != [0; 6] {
+                self.queue.push_back(frame(CMD_KEYS, &self.keys));
+            }
+            self.quiet_until = now_ms + START_MS;
+        }
     }
 
     /// A key went down or up.  `bit` counts from bit 0 of byte 0.
@@ -195,7 +242,7 @@ impl Panel {
         } else {
             self.keys[byte] &= !mask;
         }
-        if self.keys[byte] != old {
+        if self.keys[byte] != old && !self.in_reset {
             self.queue.push_back(frame(CMD_KEYS, &self.keys));
         }
     }
@@ -205,7 +252,7 @@ impl Panel {
     /// direction that moves the selection down a list; for the volume
     /// knob the same sense is assumed.)
     pub fn knob(&mut self, knob: usize, delta: i32) {
-        if delta == 0 {
+        if delta == 0 || self.in_reset {
             return;
         }
         let v = (delta.unsigned_abs().min(0x7f) as u8) | if delta > 0 { 0x80 } else { 0 };
@@ -217,6 +264,9 @@ impl Panel {
     /// Bytes arrived from the unit.  Returns what to send back at once.
     pub fn receive(&mut self, bytes: &[u8], now_ms: u64) -> Vec<u8> {
         let mut out = Vec::new();
+        if self.in_reset {
+            return out;
+        }
         if now_ms.saturating_sub(self.last_rx_ms) > 100 {
             self.parser.reset();
         }
@@ -261,6 +311,9 @@ impl Panel {
     /// Called regularly: returns the next frame to transmit, if it is
     /// time for one.
     pub fn poll(&mut self, now_ms: u64) -> Option<Vec<u8>> {
+        if self.in_reset || now_ms < self.quiet_until {
+            return None;
+        }
         if let Some((f, sent, tries)) = &mut self.pending {
             if now_ms.saturating_sub(*sent) < ACK_TIMEOUT_MS {
                 return None;
@@ -303,6 +356,30 @@ mod tests {
             got.extend(p.push(b));
         }
         assert_eq!(got, [FromUnit::Ack, FromUnit::Ack, FromUnit::Frame { cmd: 0, data: vec![0x2e] }, FromUnit::Bad(vec![7, 3, 1, 0xff])]);
+    }
+
+    #[test]
+    fn reset_line() {
+        let mut p = Panel::new();
+        p.set_reset(true, 0);
+        assert_eq!(p.poll(100), None, "silent while held in reset");
+        p.key(9, true);
+        assert!(p.receive(&frame(0x07, &[0, 0, 0, 3]), 110).is_empty());
+        p.set_reset(false, 200);
+        assert_eq!(p.poll(200 + START_MS - 1), None, "still starting");
+        assert_eq!(p.poll(200 + START_MS), Some(vec![0x0f, 0x02, 0x11]));
+        assert!(p.receive(&[ACK], 230).is_empty());
+        assert!(p.online);
+        assert_eq!(p.resets, 0);
+        // The key held since before the start is reported.
+        assert_eq!(p.poll(240).unwrap(), frame(CMD_KEYS, &[0, 2, 0, 0, 0, 0]));
+        p.receive(&[ACK], 250);
+        // A pulse on the line starts it all over.
+        p.set_reset(true, 300);
+        p.set_reset(false, 302);
+        assert!(!p.online);
+        assert_eq!(p.resets, 1);
+        assert_eq!(p.poll(302 + START_MS), Some(vec![0x0f, 0x02, 0x11]));
     }
 
     #[test]

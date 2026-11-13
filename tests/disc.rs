@@ -279,49 +279,99 @@ fn cd_audio_plays() {
 /// started the way the boot ROM starts the loader: it brings the board
 /// up, prints on the debug serial port, draws and keeps time, on both
 /// units.
+/// Build an SDK example for a unit, put it in the loader's place and
+/// start it.  None when there is no cross compiler or the disc has no
+/// software for that unit.
+fn sdk_example(image: &[u8], model: rnse::board::Model, example: &str) -> Option<(Machine, String)> {
+    use rnse::board::Model;
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let unit = if model == Model::Rnse192 { "192" } else { "193" };
+    let variants = fw::load_variants(image).unwrap();
+    let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(model))?;
+    // Builds of the same example for the two tests that use it must
+    // not run into each other.
+    static BUILD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let built = {
+        let _lock = BUILD.lock().unwrap();
+        std::process::Command::new("sh").arg(sdk.join("build.sh")).args([unit, example]).output()
+    };
+    match built {
+        Ok(out) if out.status.success() => {}
+        // No cross compiler here: nothing to test.
+        _ => return None,
+    }
+    let program = std::fs::read(sdk.join(format!("out/{}-{}.bin", example, unit))).unwrap();
+    let (custom, places) = fw::custom_loader(image, &v.name, &program).unwrap();
+    assert_eq!(places.len(), 2, "{}: the loader is on the disc in the container and as a file: {:?}", v.name, places);
+    let variants = fw::load_variants(&custom).unwrap();
+    let v = variants.iter().find(|x| x.name == v.name).unwrap();
+    let ldm = v.module("LDM").unwrap();
+    assert!(ldm.checksum_ok());
+
+    let mut m = Machine::for_model(model);
+    m.echo_console = false;
+    // Whatever was in memory before: not zeroes.
+    m.scramble_ram();
+    m.install_boot_stub(&v.name);
+    m.atapi().load(custom.clone());
+    m.start_loader(ldm, [0; 3]);
+    Some((m, v.name.clone()))
+}
+
 #[test]
 fn custom_program_runs() {
     use rnse::board::Model;
     let Some(image) = disc() else { return };
-    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
-    let variants = fw::load_variants(&image).unwrap();
-    for (model, unit) in [(Model::Rnse192, "192"), (Model::Rnse193, "193")] {
-        let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(model)) else { continue };
-        match std::process::Command::new("sh").arg(sdk.join("build.sh")).args([unit, "hello"]).output() {
-            Ok(out) if out.status.success() => {}
-            // No cross compiler here: nothing to test.
-            _ => return,
-        }
-        let program = std::fs::read(sdk.join(format!("out/hello-{}.bin", unit))).unwrap();
-        let (custom, places) = fw::custom_loader(&image, &v.name, &program).unwrap();
-        assert_eq!(places.len(), 2, "{}: the loader is on the disc in the container and as a file: {:?}", v.name, places);
-        let variants = fw::load_variants(&custom).unwrap();
-        let v = variants.iter().find(|x| x.name == v.name).unwrap();
-        let ldm = v.module("LDM").unwrap();
-        assert!(ldm.checksum_ok());
-
-        let mut m = Machine::for_model(model);
-        m.echo_console = false;
-        m.install_boot_stub(&v.name);
-        m.atapi().load(custom.clone());
-        m.start_loader(ldm, [0; 3]);
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some((mut m, name)) = sdk_example(&image, model, "hello") else { continue };
         let ms = m.cycles_per_ms();
-        assert_eq!(m.run(3_500 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        assert_eq!(m.run(3_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
-        assert!(text.contains("rnse sdk: hello"), "{}: console: {:?}", v.name, text);
-        assert!(text.contains("tick 3") && !text.contains("tick 4"), "{}: three seconds have passed: {:?}", v.name, text);
-        assert!(!text.contains("unexpected"), "{}: {:?}", v.name, text);
+        assert!(text.contains("rnse sdk: hello"), "{}: console: {:?}", name, text);
+        assert!(text.contains("tick 3") && !text.contains("tick 4"), "{}: three seconds have passed: {:?}", name, text);
+        assert!(!text.contains("unexpected"), "{}: {:?}", name, text);
         // The picture: a white frame on the panel's edge, colour bars
         // in the top third.
         let (w, h, rgb) = m.render();
         let at = |x: usize, y: usize| [rgb[(y * w + x) * 3], rgb[(y * w + x) * 3 + 1], rgb[(y * w + x) * 3 + 2]];
         let near = |p: [u8; 3], q: [u8; 3]| p.iter().zip(q).all(|(a, b)| a.abs_diff(b) <= 4);
         for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (w / 2, 0), (0, h / 2), (w - 1, h / 2), (w / 2, h - 1)] {
-            assert!(near(at(x, y), [255, 255, 255]), "{}: frame at {},{} is {:?}", v.name, x, y, at(x, y));
+            assert!(near(at(x, y), [255, 255, 255]), "{}: frame at {},{} is {:?}", name, x, y, at(x, y));
         }
-        assert!(near(at(w * 3 / 16, h / 6), [255, 255, 0]), "{}: second bar is {:?}", v.name, at(w * 3 / 16, h / 6));
-        assert!(near(at(w * 13 / 16, h / 6), [0, 0, 255]), "{}: seventh bar is {:?}", v.name, at(w * 13 / 16, h / 6));
-        assert!(near(at(w / 2, h * 7 / 8), [0, 0, 0]), "{}: background is {:?}", v.name, at(w / 2, h * 7 / 8));
+        assert!(near(at(w * 3 / 16, h / 6), [255, 255, 0]), "{}: second bar is {:?}", name, at(w * 3 / 16, h / 6));
+        assert!(near(at(w * 13 / 16, h / 6), [0, 0, 255]), "{}: seventh bar is {:?}", name, at(w * 13 / 16, h / 6));
+        assert!(near(at(w / 2, h * 7 / 8), [0, 0, 0]), "{}: background is {:?}", name, at(w / 2, h * 7 / 8));
+    }
+}
+
+/// The SDK's faceplate code against the faceplate controller's model:
+/// the program releases the controller from reset, takes its start-up
+/// frame, sends the stock settings and then follows keys and knobs.
+#[test]
+fn custom_program_reads_the_faceplate() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some((mut m, name)) = sdk_example(&image, model, "keys") else { continue };
+        let ms = m.cycles_per_ms();
+        assert!(m.panel.in_reset || !m.panel.online, "{}: the controller starts in reset", name);
+        assert_eq!(m.run(500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert!(m.panel.online, "{}: start-up frame acknowledged", name);
+        for cmd in [2, 3, 6, 7, 9, 10] {
+            assert!(m.panel.from_unit[cmd].is_some(), "{}: setting {:#x} was sent", name, cmd);
+        }
+        assert!(m.panel_key("SETUP", true));
+        m.run(100 * ms);
+        assert!(m.panel_key("SETUP", false));
+        assert!(m.panel_knob("main", 3));
+        assert!(m.panel_knob("volume", -2));
+        assert_eq!(m.run(300 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        for line in ["faceplate online\r\n", "SETUP down\r\n", "SETUP up\r\n", "select 3 right\r\n", "volume 2 left\r\n"] {
+            assert!(text.contains(line), "{}: {:?} in {:?}", name, line, text);
+        }
+        assert!(!text.contains("unexpected") && !text.contains("lost"), "{}: {:?}", name, text);
+        assert_eq!(m.panel.resets, 0, "{}", name);
     }
 }
 

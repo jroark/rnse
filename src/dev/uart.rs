@@ -15,6 +15,9 @@
 //! | +0x0c  | FIFO control: 15 = reset RX FIFO, 7 = reset TX FIFO         |
 //!
 //! Transmission is instantaneous; received bytes are queued by the host.
+//! A byte written while the transmitter is off waits in the FIFO until
+//! it is switched on, and what arrives while the receiver is off is
+//! lost, as on any UART.
 
 use std::collections::VecDeque;
 
@@ -53,9 +56,13 @@ pub struct Uart {
     other: [u16; 8],
     /// Bytes the firmware sent, not yet collected by the host.
     pub tx: Vec<u8>,
+    /// Written with the transmitter off: not on the line yet.
+    held: Vec<u8>,
     pub rx: VecDeque<u8>,
     pub tx_total: u64,
     pub rx_total: u64,
+    /// Bytes that arrived while the receiver was off.
+    pub rx_lost: u64,
 }
 
 impl Uart {
@@ -71,6 +78,10 @@ impl Uart {
 
     /// Queue bytes for the firmware to receive.
     pub fn receive(&mut self, data: &[u8]) {
+        if self.control & 0x10 == 0 {
+            self.rx_lost += data.len() as u64;
+            return;
+        }
         self.rx.extend(data.iter().copied());
         self.rx_total += data.len() as u64;
     }
@@ -91,15 +102,28 @@ impl Uart {
         match off & 0x1e {
             0x00 => self.mode = v,
             0x02 => self.baud = v,
-            0x04 => self.control = v,
+            0x04 => {
+                self.control = v;
+                if v & 0x20 != 0 && !self.held.is_empty() {
+                    self.tx_total += self.held.len() as u64;
+                    self.tx.append(&mut self.held);
+                }
+            }
             0x06 => {
-                self.tx.push(v as u8);
-                self.tx_total += 1;
+                if self.control & 0x20 != 0 {
+                    self.tx.push(v as u8);
+                    self.tx_total += 1;
+                } else if self.held.len() < 16 {
+                    self.held.push(v as u8);
+                }
             }
             0x08 => {} // error flags: nothing to clear
             0x0c => {
                 if v & 0x8000 != 0 {
                     self.rx.clear();
+                }
+                if v & 0x0080 != 0 {
+                    self.held.clear();
                 }
                 self.fifo_control = v & !0x8080;
             }
@@ -117,6 +141,10 @@ mod tests {
         let mut u = Uart::default();
         assert_eq!(u.read(8) & 0x0300, 0x0100, "ready, not full");
         u.write(6, 0x41);
+        assert!(u.tx.is_empty(), "transmitter off");
+        u.receive(&[9]);
+        assert_eq!((u.rx.len(), u.rx_lost), (0, 1), "receiver off");
+        u.write(4, 0x0030);
         assert_eq!(u.tx, b"A");
         assert!(!u.irq());
         u.write(4, 0x00f8);
