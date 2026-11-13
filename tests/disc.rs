@@ -416,9 +416,11 @@ fn custom_program_talks_on_the_can_bus() {
         let Some((mut m, name, _)) = sdk_example(&image, model, "can") else { continue };
         let ms = m.cycles_per_ms();
         assert_eq!(m.run(300 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
-        assert!(m.can().receive(&Frame::new(0x351, &[0x45, 0, 0, 0, 0, 0, 0, 0])), "{}: a mailbox takes the frame", name);
-        m.run(50 * ms);
-        assert!(m.can().receive(&Frame::new(0x635, &[0x5a, 0])), "{}", name);
+        // Two frames at once: on the wire one follows the other, and
+        // the program has to take the first out of the controller
+        // before the second is there.
+        m.can_frame(Frame::new(0x351, &[0x45, 0, 0, 0, 0, 0, 0, 0]));
+        m.can_frame(Frame::new(0x635, &[0x5a, 0]));
         assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
         for line in ["rx 351: 45 00 00 00 00 00 00 00\r\n", "rx 635: 5A 00\r\n", "tx 661: 83 01 12 A0 00 00 00 00\r\n"] {
@@ -438,14 +440,54 @@ fn custom_program_talks_on_the_can_bus() {
     }
 }
 
-/// How a real unit would come to run a program of one's own: its
-/// installed software finds a program disc in the drive whose software
-/// index is higher than its own, checks the disc (project, module
-/// checksums), copies the loader into RAM and calls it.  Here the stock
-/// software of each unit does all that with a disc from `rnse custom`,
-/// and what it starts is the SDK's first example, which then has to
-/// cope with the machine as a running operating system leaves it.
-/// Nothing may be written to flash on the way.
+/// An SDK example on a disc with a higher software index than the
+/// installed one, and the installed (stock) software run until its
+/// application has checked the disc, copied the program to RAM and is
+/// about to call its first entry point.  That is how a real unit would
+/// come to run it.  None when there is no cross compiler or the disc
+/// has no software for the unit.
+fn started_by_stock_software(image: &[u8], model: rnse::board::Model, example: &str) -> Option<(Machine, String, Vec<u8>)> {
+    use rnse::board::Model;
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let variants = fw::load_variants(image).unwrap();
+    let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(model))?;
+    sdk_example(image, model, example)?;
+    let unit = if model == Model::Rnse192 { "192" } else { "193" };
+    let program = std::fs::read(sdk.join(format!("out/{}-{}.bin", example, unit))).unwrap();
+    let (mut custom, _) = fw::custom_loader(image, &v.name, &program).unwrap();
+    // The disc's index, its two middle digits one up: those are what
+    // the application compares.
+    let index = fw::IndexInfo::from_disc(image, &v.name).unwrap();
+    let middle: u32 = index.sofidx[1..3].parse().unwrap();
+    let higher = format!("{}{:02}{}", &index.sofidx[..1], middle + 1, &index.sofidx[3..]);
+    assert_eq!(fw::set_disc_index(&mut custom, &v.name, &higher).unwrap(), index.sofidx);
+
+    let mut m = Machine::for_model(model);
+    m.echo_console = false;
+    m.install_boot_stub(&v.name);
+    m.install(v, &index);
+    m.atapi().load(custom.clone());
+    m.start_os(v).unwrap();
+    m.set_ignition(true);
+    let ms = m.cycles_per_ms();
+    let entry = fw::load_variants(&custom).unwrap().iter().find(|x| x.name == v.name).unwrap().module("LDM").unwrap().entries[0];
+    m.cpu.breakpoints.push(entry);
+    let mut stop = Stop::Budget;
+    for _ in 0..40 {
+        stop = m.run(1_000 * ms);
+        if stop != Stop::Budget {
+            break;
+        }
+    }
+    assert_eq!(stop, Stop::Breakpoint, "{}: the installed software did not start the program: {:?}", v.name, m.cpu.fault);
+    m.cpu.breakpoints.clear();
+    Some((m, v.name.clone(), custom))
+}
+
+/// The stock software of each unit takes a disc from `rnse custom` for
+/// an update and starts the SDK's first example, which then has to cope
+/// with the machine as a running operating system leaves it.  Nothing
+/// may be written to flash on the way.
 #[test]
 fn stock_software_starts_a_custom_program() {
     use rnse::board::Model;
@@ -453,71 +495,92 @@ fn stock_software_starts_a_custom_program() {
     let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
     let variants = fw::load_variants(&image).unwrap();
     for model in [Model::Rnse192, Model::Rnse193] {
-        let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(model)) else { continue };
-        if sdk_example(&image, model, "hello").is_none() {
-            return; // no cross compiler
-        }
-        let unit = if model == Model::Rnse192 { "192" } else { "193" };
-        let program = std::fs::read(sdk.join(format!("out/hello-{}.bin", unit))).unwrap();
-        let (mut custom, _) = fw::custom_loader(&image, &v.name, &program).unwrap();
-        // The disc's index, its two middle digits one up: those are what
-        // the application compares.
-        let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
-        let middle: u32 = index.sofidx[1..3].parse().unwrap();
-        let higher = format!("{}{:02}{}", &index.sofidx[..1], middle + 1, &index.sofidx[3..]);
-        assert_eq!(fw::set_disc_index(&mut custom, &v.name, &higher).unwrap(), index.sofidx);
-
-        let mut m = Machine::for_model(model);
-        m.echo_console = false;
-        m.install_boot_stub(&v.name);
-        m.install(v, &index);
-        m.atapi().load(custom.clone());
-        m.start_os(v).unwrap();
-        m.set_ignition(true);
+        let Some((mut m, name, _)) = started_by_stock_software(&image, model, "hello") else { continue };
         let ms = m.cycles_per_ms();
-        // Up to the moment the application calls the loader's first
-        // entry point.
-        let entry = fw::load_variants(&custom).unwrap().iter().find(|x| x.name == v.name).unwrap().module("LDM").unwrap().entries[0];
-        m.cpu.breakpoints.push(entry);
-        let mut stop = Stop::Budget;
-        for _ in 0..40 {
-            stop = m.run(1_000 * ms);
-            if stop != Stop::Budget {
-                break;
-            }
-        }
-        assert_eq!(stop, Stop::Breakpoint, "{}: the installed software did not start the program: {:?}", v.name, m.cpu.fault);
         // What a loader finds: privileged mode with interrupts open and
         // the operating system's handlers in place, a return address in
         // the application, the language in r4.
-        assert_eq!(m.cpu.sr & (rnse::sh4::SR_MD | rnse::sh4::SR_BL | 0xf0), rnse::sh4::SR_MD, "{}: SR {:08x}", v.name, m.cpu.sr);
-        assert_ne!(m.cpu.pr, 0, "{}", v.name);
-        assert!(m.cpu.r[4] < 9, "{}: language {}", v.name, m.cpu.r[4]);
+        assert_eq!(m.cpu.sr & (rnse::sh4::SR_MD | rnse::sh4::SR_BL | 0xf0), rnse::sh4::SR_MD, "{}: SR {:08x}", name, m.cpu.sr);
+        assert_ne!(m.cpu.pr, 0, "{}", name);
+        assert!(m.cpu.r[4] < 9, "{}: language {}", name, m.cpu.r[4]);
         let flash = m.board.flash.clone();
-        m.cpu.breakpoints.clear();
-        assert_eq!(m.run(3_500 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        assert_eq!(m.run(3_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
-        assert!(text.contains("rnse sdk: hello") && text.contains("tick 2\r\n") && !text.contains("unexpected"), "{}: {:?}", v.name, &text[text.len().saturating_sub(300)..]);
-        assert!(m.board.flash == flash, "{}: the program wrote to flash", v.name);
+        assert!(text.contains("rnse sdk: hello") && text.contains("tick 2\r\n") && !text.contains("unexpected"), "{}: {:?}", name, &text[text.len().saturating_sub(300)..]);
+        assert!(m.board.flash == flash, "{}: the program wrote to flash", name);
         // The program's picture, not the installed software's.
         let (w, h, rgb) = m.render();
         let at = |x: usize, y: usize| [rgb[(y * w + x) * 3], rgb[(y * w + x) * 3 + 1], rgb[(y * w + x) * 3 + 2]];
         let near = |p: [u8; 3], q: [u8; 3]| p.iter().zip(q).all(|(a, b)| a.abs_diff(b) <= 4);
-        assert!(near(at(w * 3 / 16, h / 6), [255, 255, 0]), "{}: second colour bar is {:?}", v.name, at(w * 3 / 16, h / 6));
-        assert!(near(at(w / 2, h * 7 / 8), [0, 0, 0]), "{}: background is {:?}", v.name, at(w / 2, h * 7 / 8));
+        assert!(near(at(w * 3 / 16, h / 6), [255, 255, 0]), "{}: second colour bar is {:?}", name, at(w * 3 / 16, h / 6));
+        assert!(near(at(w / 2, h * 7 / 8), [0, 0, 0]), "{}: background is {:?}", name, at(w / 2, h * 7 / 8));
 
         // The same disc with the index it had is no update: the
         // installed software goes on as usual.
-        let (same, _) = fw::custom_loader(&image, &v.name, &program).unwrap();
+        let v = variants.iter().find(|v| v.name == name).unwrap();
+        let index = fw::IndexInfo::from_disc(&image, &name).unwrap();
+        let unit = if model == Model::Rnse192 { "192" } else { "193" };
+        let program = std::fs::read(sdk.join(format!("out/hello-{}.bin", unit))).unwrap();
+        let (same, _) = fw::custom_loader(&image, &name, &program).unwrap();
         let mut m = Machine::for_model(model);
         m.echo_console = false;
-        m.install_boot_stub(&v.name);
+        m.install_boot_stub(&name);
         m.install(v, &index);
         m.atapi().load(same);
         m.start_os(v).unwrap();
         m.set_ignition(true);
-        assert_eq!(m.run(15_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
-        assert!(!String::from_utf8_lossy(&m.console).contains("rnse sdk"), "{}: started without a higher index", v.name);
+        assert_eq!(m.run(15_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert!(!String::from_utf8_lossy(&m.console).contains("rnse sdk"), "{}: started without a higher index", name);
+    }
+}
+
+/// The other examples started the same way: the faceplate, the drive
+/// and the CAN controller are then in use by the installed software up
+/// to the moment the program takes over.
+#[test]
+fn stock_software_starts_programs_that_use_its_devices() {
+    use rnse::board::Model;
+    use rnse::dev::hcan::Frame;
+    let Some(image) = disc() else { return };
+    for model in [Model::Rnse192, Model::Rnse193] {
+        // Keys and knobs.
+        let Some((mut m, name, _)) = started_by_stock_software(&image, model, "keys") else { continue };
+        let ms = m.cycles_per_ms();
+        let resets = m.panel.resets;
+        assert_eq!(m.run(600 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert_eq!(m.panel.resets, resets + 1, "{}: the program restarts the faceplate controller", name);
+        assert!(m.panel_key("SETUP", true));
+        m.run(100 * ms);
+        assert!(m.panel_key("SETUP", false));
+        assert!(m.panel_knob("main", -1));
+        assert_eq!(m.run(300 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        for line in ["faceplate online\r\n", "SETUP down\r\n", "SETUP up\r\n", "select 1 left\r\n"] {
+            assert!(text.contains(line), "{}: {:?} in {:?}", name, line, &text[text.len().saturating_sub(300)..]);
+        }
+
+        // The disc.
+        let (mut m, name, custom) = started_by_stock_software(&image, model, "cd").unwrap();
+        assert_eq!(m.run(4_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        let entry = fw::Iso::new(&custom).unwrap().find("LOADING.KWI").unwrap();
+        let start = entry.lba as usize * 2048;
+        let sum = custom[start..start + (entry.len as usize).min(0x100000)].iter().fold(0u32, |a, b| a.wrapping_add(*b as u32));
+        assert!(text.contains(&format!("sum {:08x}\r\n", sum)), "{}: sum {:08x} in {:?}", name, sum, &text[text.len().saturating_sub(300)..]);
+
+        // CAN.
+        let (mut m, name, _) = started_by_stock_software(&image, model, "can").unwrap();
+        m.set_ignition(false); // no more frames but the one below
+        assert_eq!(m.run(1_300 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        m.can_frame(Frame::new(0x635, &[0x5a, 0]));
+        assert_eq!(m.run(300 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        for line in ["rx 635: 5A 00\r\n", "tx 661: 83 01 12 A0 00 00 00 00\r\n"] {
+            assert!(text.contains(line), "{}: {:?} in {:?}", name, line, &text[text.len().saturating_sub(300)..]);
+        }
+        let stock = m.can().stock_timing();
+        assert_eq!(m.can().tx_timing, Some(stock), "{}: bit timing", name);
+        assert!(!text.contains("unexpected"), "{}: {:?}", name, text);
     }
 }
 

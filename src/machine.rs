@@ -110,6 +110,9 @@ pub struct Machine {
     /// Frames sent to the unit periodically, standing in for the rest
     /// of the car: (frame, period in cycles, next due).
     can_cyclic: Vec<(Frame, u64, u64)>,
+    /// Frames due and waiting for the bus, and when it is free again.
+    can_waiting: VecDeque<Frame>,
+    can_bus_free: u64,
     pub ignition: bool,
     /// Print traffic on the radio processor's serial link.
     pub trace_serial: bool,
@@ -173,7 +176,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -673,26 +676,41 @@ impl Machine {
         }
     }
 
+    /// A frame from another node: it goes onto the bus when the bus is
+    /// free and reaches the controller with its interrupt.
+    pub fn can_frame(&mut self, frame: Frame) {
+        self.can_waiting.push_back(frame);
+    }
+
     fn can_tick(&mut self) {
         let now = self.cpu.cycles;
-        let mut any = false;
         for (frame, period, due) in self.can_cyclic.iter_mut() {
             if now >= *due {
                 *due += *period;
                 if *due <= now {
                     *due = now + *period;
                 }
-                match self.cpu.io.navi.as_mut() {
-                    Some(navi) => navi.can.receive(frame),
-                    None => self.board.can.receive(frame),
-                };
-                any = true;
+                // Onto the bus, behind whatever is waiting for it.
+                if self.can_waiting.len() < 64 {
+                    self.can_waiting.push_back(frame.clone());
+                }
             }
         }
-        if any {
-            self.board.update_irl();
-            if let Some(navi) = self.cpu.io.navi.as_mut() {
-                navi.update_irqs(&mut self.cpu.io.intc);
+        // One frame at a time: at 100 kbit/s a frame of n data bytes
+        // takes 47 + 8n bits, a fifth more at worst for stuff bits, and
+        // three bits of pause, 10 microseconds each.
+        if now >= self.can_bus_free {
+            if let Some(frame) = self.can_waiting.pop_front() {
+                let bits = 50 + 8 * frame.len as u64 + (34 + 8 * frame.len as u64) / 5;
+                self.can_bus_free = now + bits * self.cycles_per_ms() / 100;
+                match self.cpu.io.navi.as_mut() {
+                    Some(navi) => navi.can.receive(&frame),
+                    None => self.board.can.receive(&frame),
+                };
+                self.board.update_irl();
+                if let Some(navi) = self.cpu.io.navi.as_mut() {
+                    navi.update_irqs(&mut self.cpu.io.intc);
+                }
             }
         }
     }
@@ -1080,7 +1098,7 @@ impl Machine {
                     }
                 }
             }
-            if !self.can_cyclic.is_empty() {
+            if !self.can_cyclic.is_empty() || !self.can_waiting.is_empty() {
                 self.can_tick();
             }
             if self.drive.is_some() {

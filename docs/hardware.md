@@ -270,6 +270,11 @@ before it sets it up, and the OS never starts it at all: the boot ROM
 leaves it running, and the loader's BCR writes presumably only repeat
 what is there.
 
+The emulated bus carries one frame at a time, each for as long as its
+bits take at 100 kbit/s (some 1.3 ms for eight data bytes), so that
+frames sent "at the same time" by `--can` arrive one after the other as
+on a wire.
+
 ## A/D converter and the fold-down display
 
 The display folds down on a motor to uncover the CD drive and the SD
