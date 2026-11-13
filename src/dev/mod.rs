@@ -14,3 +14,4 @@ pub mod scif;
 pub mod sdhi;
 pub mod uart;
 pub mod telephone;
+pub mod tp20;

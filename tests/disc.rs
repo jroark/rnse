@@ -668,6 +668,40 @@ fn custom_program_hands_back_to_the_stock_loader() {
     }
 }
 
+/// The transport channels to the instrument cluster and to the
+/// telephone module: with somebody at the other end the stock software
+/// of both units gets them open, keeps them alive, and sends the
+/// cluster its first block.
+#[test]
+fn transport_channels_open() {
+    use rnse::board::Model;
+    use rnse::dev::tp20::Peer;
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(model)) else { continue };
+        let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+        let mut m = Machine::for_model(model);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        m.atapi().load(image.clone());
+        m.set_ignition(true);
+        m.can_peers = vec![Peer::new(0x6c0, 0x6c1), Peer::new(0x6c4, 0x6c5)];
+        // The telephone's status message, as the earlier investigation
+        // had it: without it the 192 does not ask for that channel.
+        m.can_send_cyclic(rnse::dev::hcan::Frame::new(0x665, &[0; 7]), 200);
+        m.start_os(v).unwrap();
+        assert_eq!(m.run(30_000 * m.cycles_per_ms()), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        assert!(m.can_peers[0].open, "{}: channel to the cluster", v.name);
+        assert!(m.can_peers[1].open, "{}: channel to the telephone", v.name);
+        assert_eq!(m.can_peers[0].received.first().map(|b| &b[..]), Some(&[0x15, 0x01, 0x01, 0x02, 0x00, 0x00][..]), "{}: first block to the cluster", v.name);
+        // No more requests for a channel once it is there.
+        let asked = m.can().tx.iter().filter(|f| f.id == 0x6c4 && f.data[0] == 0xa0).count();
+        assert!(asked <= 3, "{}: {} channel requests to the telephone", v.name, asked);
+    }
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]

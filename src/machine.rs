@@ -120,6 +120,11 @@ pub struct Machine {
     /// Frames sent to the unit periodically, standing in for the rest
     /// of the car: (frame, period in cycles, next due).
     can_cyclic: Vec<(Frame, u64, u64)>,
+    /// The far ends of transport channels on the bus (the instrument
+    /// cluster, the telephone module), and how many of the unit's frames
+    /// they have seen.
+    pub can_peers: Vec<crate::dev::tp20::Peer>,
+    can_seen: u64,
     /// Frames due and waiting for the bus, and when it is free again.
     can_waiting: VecDeque<Frame>,
     can_bus_free: u64,
@@ -186,7 +191,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -695,6 +700,26 @@ impl Machine {
         }
     }
 
+    /// Show the transport peers what the unit has sent since they last
+    /// looked, and put their answers on the bus.
+    fn can_peers_tick(&mut self) {
+        let seen = self.can_seen;
+        let (count, new): (u64, Vec<Frame>) = {
+            let can = self.can();
+            if can.tx_count == seen {
+                return;
+            }
+            let n = ((can.tx_count - seen) as usize).min(can.tx.len());
+            (can.tx_count, can.tx.iter().skip(can.tx.len() - n).cloned().collect())
+        };
+        self.can_seen = count;
+        for f in &new {
+            for peer in self.can_peers.iter_mut() {
+                self.can_waiting.extend(peer.from_unit(f));
+            }
+        }
+    }
+
     /// A frame from another node: it goes onto the bus when the bus is
     /// free and reaches the controller with its interrupt.
     pub fn can_frame(&mut self, frame: Frame) {
@@ -1115,6 +1140,9 @@ impl Machine {
                         self.board.update_irl();
                     }
                 }
+            }
+            if !self.can_peers.is_empty() {
+                self.can_peers_tick();
             }
             if !self.can_cyclic.is_empty() || !self.can_waiting.is_empty() {
                 self.can_tick();

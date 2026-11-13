@@ -78,6 +78,26 @@ working telephone application handshake. With the tested payloads,
 both TEL screens still report that the telephone is not installed.
 The V575 telephone path has not yet been made to open `6c4`.
 
+## The transport, answered
+
+`src/dev/tp20.rs` is the far end of one such transport channel: it
+agrees to the channel (`a0 ..` answered with `a1 ..`), answers the
+keep-alive `a3`, acknowledges data frames and collects blocks.  `rnse
+boot ... --can-peers` puts one on the cluster's identifiers (6c0/6c1)
+and one on the telephone's (6c4/6c5) and prints what the unit sends.
+With them the software of both units (V220, V222, V574, V575)
+
+* opens the channel to the cluster and sends it one block, the single
+  frame `10 15 01 01 02 00 00`, then keeps the channel alive with `a3`
+  about once a second;
+* opens the channel to the telephone and sends nothing on it but the
+  keep-alive.  Whatever starts the conversation there, it is not the
+  unit: the telephone module speaks first, or something in its status
+  message (665) has to say so.
+
+Data blocks carry no length: a block is the data of consecutive frames
+up to the one marked as the last.
+
 ## Remaining protocol prerequisite
 
 Before exposing `--phone` or browser controls, establish how the real
