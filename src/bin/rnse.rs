@@ -5,7 +5,7 @@ use rnse::sh4::cpu::Stop;
 fn usage() -> ! {
     eprintln!(
         "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse repack <disc.iso | LOADING.KWI> <dir> <out>   a copy of the disc with the\n                                       modules in <dir> (as extract writes\n                                       them) put in, checksums put right\n  rnse custom <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n                                       a copy of the disc with a program of\n                                       your own as that variant's loader,\n                                       and optionally another software index\n                                       (see docs/custom-firmware.md)\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n  rnse ui <disc.iso> [ui options]      run it with the faceplate in a browser\n\nui options:\n  --port N           port to serve on (default 8080)\n  --bind ADDR        address to listen on (default 127.0.0.1)\n  --loader           run the update loader instead of the installed firmware\n  --no-ignition      start with the ignition off\n  --no-disc          start with an empty CD drive\n  --variant NAME     hardware variant (default V220, or the disc's first)\n  --nav-disc FILE    put a navigation disc in the drive (see below)\n  --gps LAT,LON      a GPS fix at that place (see below).  Without it the\n                     193 is in San Francisco; --no-gps for no fix at all\n  --sd-card FILE     mount a read-only SDHC image in slot 1 (193 only)\n  --serial AUZ...    the unit's serial number (see below)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-serial     log the serial links (radio processor, faceplate)
-  --trace-ge         log what the 193's graphics engine draws\n  --no-radio         leave the radio processor's link unanswered\n  --no-panel         leave the faceplate controller's link unanswered\n  --key KEY@MS[+HOLD]  press a faceplate key at MS milliseconds for HOLD ms\n                     (default 200).  KEY is RADIO, MEDIA, NAME, TEL, NAV,\n                     INFO, CAR, SETUP, RETURN, PREV, NEXT, SELECT, EJECT,\n                     SOFT_TL, SOFT_TR, SOFT_BL, SOFT_BR, CD_EJECT, or a\n                     key state bit number (0-47)\n  --knob K:N@MS      turn knob K (0 volume, 1 select) by N detents at MS\n                     milliseconds, positive = clockwise\n  --shot MS:FILE     also write a screenshot at MS milliseconds\n  --peek ADDR[,LEN]  hex dump of LEN bytes of memory (default 16) at the end\n  --trace-calls A:B  list the subroutines called between A and B ms\n  --trace-coral      dump the display lists sent to the graphics chip\n  --only-layer N     screenshot shows display layer N (0-5) alone\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --nav-disc FILE    start with a navigation disc in the drive: an ISO image,\n                     or the image of an SD card that has the disc's volume\n                     in a partition of type 0x96\n  --sd-card FILE     mount a read-only SDHC image in slot 1 (193 only)\n  --gps LAT,LON[,COURSE]  a GPS fix at that place, in degrees (193, V575\n                     software 0320 only), e.g. --gps 41.8781,-87.6298,90\n  --drive KMH[,TURN][@MS]  the car moves (193): speed pulses, the gyroscope\n                     (TURN in degrees per second to the right) and the\n                     GPS fix along its course, from MS milliseconds on\n  --car-type N       code the unit for car type N, 1-7 (193).  Only type 5\n                     counts speed pulses; --drive codes it so unless told\n  --serial AUZ...    the unit's serial number (14 characters; 193 only).  A\n                     navigation disc can be tied to one unit's number\n  --audio-cd NxS     start with an audio CD of N tracks of S seconds each\n  --strict           start with arbitrary data in RAM instead of zeroes, let\n                     the watchdog bite from the start, model the CPU's\n                     instruction and data caches, start a loader with the\n                     timers running and their interrupts open, and at the\n                     end list the hardware the software used that the\n                     emulator has no model of\n  --installed-index IDX  the installed software reports software index IDX\n                     (four digits) instead of the disc's, so that the disc\n                     in the drive counts as an update (boot only)\n  --can-alone        no other node on the CAN bus, as on a bench: nothing\n                     arrives and nothing sent is acknowledged\n  --gdb PORT         wait for GDB on 127.0.0.1:PORT (`target remote :PORT`)\n                     and run under its control until its `kill`; --cycles\n                     does not apply\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
+  --trace-ge         log what the 193's graphics engine draws\n  --no-radio         leave the radio processor's link unanswered\n  --no-panel         leave the faceplate controller's link unanswered\n  --key KEY@MS[+HOLD]  press a faceplate key at MS milliseconds for HOLD ms\n                     (default 200).  KEY is RADIO, MEDIA, NAME, TEL, NAV,\n                     INFO, CAR, SETUP, RETURN, PREV, NEXT, SELECT, EJECT,\n                     SOFT_TL, SOFT_TR, SOFT_BL, SOFT_BR, CD_EJECT, or a\n                     key state bit number (0-47)\n  --knob K:N@MS      turn knob K (0 volume, 1 select) by N detents at MS\n                     milliseconds, positive = clockwise\n  --shot MS:FILE     also write a screenshot at MS milliseconds\n  --peek ADDR[,LEN]  hex dump of LEN bytes of memory (default 16) at the end\n  --trace-calls A:B  list the subroutines called between A and B ms\n  --trace-coral      dump the display lists sent to the graphics chip\n  --only-layer N     screenshot shows display layer N (0-5) alone\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --nav-disc FILE    start with a navigation disc in the drive: an ISO image,\n                     or the image of an SD card that has the disc's volume\n                     in a partition of type 0x96\n  --sd-card FILE     mount a read-only SDHC image in slot 1 (193 only)\n  --gps LAT,LON[,COURSE]  a GPS fix at that place, in degrees (193, V575\n                     software 0320 only), e.g. --gps 41.8781,-87.6298,90\n  --drive KMH[,TURN][@MS]  the car moves (193): speed pulses, the gyroscope\n                     (TURN in degrees per second to the right) and the\n                     GPS fix along its course, from MS milliseconds on\n  --car-type N       code the unit for car type N, 1-7 (193).  Only type 5\n                     counts speed pulses; --drive codes it so unless told\n  --serial AUZ...    the unit's serial number (14 characters; 193 only).  A\n                     navigation disc can be tied to one unit's number\n  --audio-cd NxS     start with an audio CD of N tracks of S seconds each,\n                     every track a tone of its own pitch; or\n  --audio-cd A.wav,B.wav  with an audio CD of these recordings (16-bit,\n                     44.1 kHz, stereo), one track each\n  --wav FILE         write what the drive's audio output plays during the\n                     run to FILE (44.1 kHz stereo; the signal before the\n                     unit's volume control)\n  --strict           start with arbitrary data in RAM instead of zeroes, let\n                     the watchdog bite from the start, model the CPU's\n                     instruction and data caches, start a loader with the\n                     timers running and their interrupts open, and at the\n                     end list the hardware the software used that the\n                     emulator has no model of\n  --installed-index IDX  the installed software reports software index IDX\n                     (four digits) instead of the disc's, so that the disc\n                     in the drive counts as an update (boot only)\n  --can-alone        no other node on the CAN bus, as on a bench: nothing\n                     arrives and nothing sent is acknowledged\n  --gdb PORT         wait for GDB on 127.0.0.1:PORT (`target remote :PORT`)\n                     and run under its control until its `kill`; --cycles\n                     does not apply\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
     );
     std::process::exit(2);
 }
@@ -107,6 +107,24 @@ fn custom(path: &str, variant: &str, program: &str, out: &str, index: Option<&St
     Ok(())
 }
 
+/// An audio CD from `--audio-cd`: `NxS` for N tracks of S seconds, each
+/// a tone of its own pitch, or WAV files (16-bit, 44.1 kHz, stereo)
+/// separated by commas, one per track.
+fn audio_disc(spec: &str) -> Result<rnse::dev::atapi::AudioDisc, Box<dyn std::error::Error>> {
+    use rnse::dev::atapi::AudioDisc;
+    if let Some((tracks, seconds)) = spec.split_once('x') {
+        if let (Ok(tracks), Ok(seconds)) = (tracks.parse(), seconds.parse()) {
+            return Ok(AudioDisc::uniform(tracks, seconds));
+        }
+    }
+    let mut recordings = Vec::new();
+    for path in spec.split(',') {
+        let file = std::fs::read(path).map_err(|e| format!("{}: {} (--audio-cd wants TRACKSxSECONDS, e.g. 12x200, or WAV files)", path, e))?;
+        recordings.push(rnse::wav::decode_cd(&file).map_err(|e| format!("{}: {}", path, e))?);
+    }
+    Ok(AudioDisc::from_tracks(&recordings))
+}
+
 fn repack(path: &str, dir: &str, out: &str) -> Result<(), Box<dyn std::error::Error>> {
     let image = std::fs::read(path)?;
     let dir = std::path::Path::new(dir);
@@ -136,7 +154,8 @@ struct Opts {
     gdb: Option<u16>,
     can_alone: bool,
     installed_index: Option<String>,
-    audio_cd: Option<(u32, u32)>,
+    audio_cd: Option<String>,
+    wav: Option<String>,
     nav_disc: Option<String>,
     gps: Option<rnse::dev::gps::Gps>,
     drive: Option<rnse::machine::Drive>,
@@ -168,7 +187,7 @@ struct Opts {
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
-    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, strict: false, gdb: None, can_alone: false, installed_index: None, audio_cd: None, nav_disc: None, gps: None, drive: None, car_type: None, sd_card: None, serial: None, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false, trace_serial: false, trace_ge: false, no_radio: false, only_layer: None, no_panel: false, panel_script: vec![], shots: vec![], call_windows: vec![], peeks: vec![] };
+    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, strict: false, gdb: None, can_alone: false, installed_index: None, audio_cd: None, wav: None, nav_disc: None, gps: None, drive: None, car_type: None, sd_card: None, serial: None, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false, trace_serial: false, trace_ge: false, no_radio: false, only_layer: None, no_panel: false, panel_script: vec![], shots: vec![], call_windows: vec![], peeks: vec![] };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| -> Result<&String, Box<dyn std::error::Error>> {
@@ -204,11 +223,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
             "--car-type" => o.car_type = Some(next(&mut i)?.parse()?),
             "--sd-card" => o.sd_card = Some(next(&mut i)?.clone()),
             "--serial" => o.serial = Some(next(&mut i)?.to_uppercase()),
-            "--audio-cd" => {
-                let spec = next(&mut i)?;
-                let (tracks, seconds) = spec.split_once('x').ok_or("--audio-cd wants TRACKSxSECONDS, e.g. 12x200")?;
-                o.audio_cd = Some((tracks.parse()?, seconds.parse()?));
-            }
+            "--audio-cd" => o.audio_cd = Some(next(&mut i)?.to_string()),
+            "--wav" => o.wav = Some(next(&mut i)?.to_string()),
             "--screenshot" => o.screenshot = Some(next(&mut i)?.clone()),
             "--flash" => o.flash = Some(next(&mut i)?.clone()),
             "--trace-bios" => o.trace_bios = true,
@@ -310,6 +326,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     }
     let mut m = Machine::for_model(model);
     m.can().alone = o.can_alone;
+    if o.wav.is_some() {
+        m.sound = Some(Vec::new());
+    }
     if o.strict {
         m.scramble_ram();
         m.cache_model();
@@ -362,8 +381,8 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     m.panel.trace = o.trace_serial;
     m.panel_present = !o.no_panel;
     m.panel_script = o.panel_script.clone();
-    if let Some((tracks, seconds)) = o.audio_cd {
-        m.atapi().insert_audio(rnse::dev::atapi::AudioDisc::uniform(tracks, seconds), false);
+    if let Some(spec) = &o.audio_cd {
+        m.atapi().insert_audio(audio_disc(spec)?, false);
     } else if let Some(path) = &o.nav_disc {
         m.atapi().load_disc(rnse::dev::atapi::Disc::open(path)?);
     } else if !o.no_disc {
@@ -585,6 +604,11 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         for ((n, code), count) in &m.bios_calls {
             eprintln!("  trap {:02x} fn {:04x}: {} calls", n, code, count);
         }
+    }
+    if let (Some(path), Some(sound)) = (&o.wav, m.sound.take()) {
+        std::fs::write(path, rnse::wav::encode(44_100, 2, &sound))?;
+        let loud = sound.iter().filter(|s| **s != 0).count();
+        eprintln!("sound: {} ({:.1} s, {:.1} s of it not silence)", path, sound.len() as f64 / 88_200.0, loud as f64 / 88_200.0);
     }
     if let Some(path) = &o.save_flash {
         std::fs::write(path, &m.board.flash)?;

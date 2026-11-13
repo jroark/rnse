@@ -31,16 +31,71 @@ enum Phase {
 
 /// An audio disc: where each track starts (in frames of 1/75 s from
 /// the start of the programme area) and where the last one ends.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub struct AudioDisc {
     pub tracks: Vec<u32>,
     pub lead_out: u32,
+    /// What is on the disc: 44.1 kHz stereo samples, left first, from
+    /// the start of the programme area.  Without it every track is a
+    /// tone of its own pitch (see [`AudioDisc::samples`]).
+    pub sound: Option<std::sync::Arc<Vec<i16>>>,
 }
+
+impl std::fmt::Debug for AudioDisc {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AudioDisc {{ tracks: {:?}, lead_out: {}, sound: {} }}", self.tracks, self.lead_out, self.sound.is_some())
+    }
+}
+
+/// Stereo samples to a frame of 1/75 s.
+pub const SAMPLES_PER_FRAME: u64 = 588;
 
 impl AudioDisc {
     /// A disc of `count` tracks of `seconds` each.
     pub fn uniform(count: u32, seconds: u32) -> AudioDisc {
-        AudioDisc { tracks: (0..count).map(|i| i * seconds * 75).collect(), lead_out: count * seconds * 75 }
+        AudioDisc { tracks: (0..count).map(|i| i * seconds * 75).collect(), lead_out: count * seconds * 75, sound: None }
+    }
+
+    /// A disc made of recordings, one per track: 44.1 kHz stereo
+    /// samples each.  Tracks are padded to whole frames.
+    pub fn from_tracks(recordings: &[Vec<i16>]) -> AudioDisc {
+        let (mut tracks, mut sound) = (Vec::new(), Vec::new());
+        for r in recordings {
+            tracks.push((sound.len() as u64 / (2 * SAMPLES_PER_FRAME)) as u32);
+            sound.extend_from_slice(r);
+            let whole = (sound.len() as u64).div_ceil(2 * SAMPLES_PER_FRAME) * 2 * SAMPLES_PER_FRAME;
+            sound.resize(whole as usize, 0);
+        }
+        let lead_out = (sound.len() as u64 / (2 * SAMPLES_PER_FRAME)) as u32;
+        AudioDisc { tracks, lead_out, sound: Some(std::sync::Arc::new(sound)) }
+    }
+
+    /// The pitch of track `n` (from 1) of a disc without recordings:
+    /// 220 Hz, 330 Hz, 440 Hz and so on, so that tracks can be told
+    /// apart by ear and by a test.
+    pub fn tone_hz(n: usize) -> u32 {
+        110 * (n as u32 + 1)
+    }
+
+    /// `out.len() / 2` stereo samples from sample `start` of the disc.
+    pub fn samples(&self, start: u64, out: &mut [i16]) {
+        match &self.sound {
+            Some(sound) => {
+                for (i, o) in out.iter_mut().enumerate() {
+                    *o = sound.get(start as usize * 2 + i).copied().unwrap_or(0);
+                }
+            }
+            None => {
+                for (i, pair) in out.chunks_mut(2).enumerate() {
+                    let n = start + i as u64;
+                    let track = self.track_at((n / SAMPLES_PER_FRAME) as u32);
+                    let begin = self.tracks.get(track - 1).copied().unwrap_or(0) as u64 * SAMPLES_PER_FRAME;
+                    let t = (n - begin.min(n)) as f64 / 44_100.0;
+                    let v = ((t * Self::tone_hz(track) as f64 * std::f64::consts::TAU).sin() * 8000.0) as i16;
+                    pair.fill(v);
+                }
+            }
+        }
     }
 
     /// Track number (from 1) playing at `frame`.
@@ -176,7 +231,10 @@ pub struct Atapi {
     pub audio_status: AudioStatus,
     /// Where the pickup is on an audio disc, in thousandths of a frame,
     /// and where playing stops.
-    audio_pos: u64,
+    /// Where the pickup is, in stereo samples from the start of the
+    /// programme area, and the fraction of a sample time has got ahead.
+    audio_sample: u64,
+    audio_micros: u64,
     audio_end: u32,
     error: u8,
     features: u8,
@@ -249,7 +307,8 @@ impl Atapi {
             packet_irq: false,
             audio: None,
             audio_status: AudioStatus::None,
-            audio_pos: 0,
+            audio_sample: 0,
+            audio_micros: 0,
             audio_end: 0,
             log: IoLog::new(false, 4),
             trace: false,
@@ -280,7 +339,7 @@ impl Atapi {
         self.image = None;
         self.audio = Some(disc);
         self.audio_status = AudioStatus::None;
-        self.audio_pos = 0;
+        self.audio_sample = 0;
         self.unit_attention = running;
     }
 
@@ -295,17 +354,38 @@ impl Atapi {
 
     /// Frame of an audio disc the pickup is at.
     pub fn audio_frame(&self) -> u32 {
-        (self.audio_pos / 1000) as u32
+        (self.audio_sample / SAMPLES_PER_FRAME) as u32
     }
 
     /// Let `ms` milliseconds pass for the audio player.
     pub fn tick(&mut self, ms: u64) {
+        self.play_out(ms * 1000, None);
+    }
+
+    /// Let `micros` microseconds pass for the audio player.  What comes
+    /// out of the drive's audio output in that time, 44.1 kHz stereo, is
+    /// added to `out`: the disc while it plays, silence otherwise.
+    pub fn play_out(&mut self, micros: u64, mut out: Option<&mut Vec<i16>>) {
+        // Whole samples in this much time, the remainder carried over.
+        self.audio_micros += micros * 441;
+        let mut n = self.audio_micros / 10_000;
+        self.audio_micros %= 10_000;
         if self.audio_status == AudioStatus::Playing {
-            self.audio_pos += ms * 75;
-            if self.audio_frame() >= self.audio_end {
-                self.audio_pos = self.audio_end as u64 * 1000;
+            let end = self.audio_end as u64 * SAMPLES_PER_FRAME;
+            let playing = n.min(end.saturating_sub(self.audio_sample));
+            if let (Some(out), Some(disc)) = (out.as_deref_mut(), self.audio.as_ref()) {
+                let at = out.len();
+                out.resize(at + playing as usize * 2, 0);
+                disc.samples(self.audio_sample, &mut out[at..]);
+            }
+            self.audio_sample += playing;
+            n -= playing;
+            if self.audio_sample >= end {
                 self.audio_status = AudioStatus::Completed;
             }
+        }
+        if let Some(out) = out {
+            out.resize(out.len() + n as usize * 2, 0);
         }
     }
 
@@ -319,7 +399,7 @@ impl Atapi {
             self.fail(5, 0x21, 0);
             return;
         }
-        self.audio_pos = from as u64 * 1000;
+        self.audio_sample = from as u64 * SAMPLES_PER_FRAME;
         self.audio_end = to;
         self.audio_status = if from == to { AudioStatus::Completed } else { AudioStatus::Playing };
         self.complete_ok();
@@ -683,7 +763,7 @@ impl Atapi {
                 // START STOP UNIT, SEEK: playing ends
                 if self.audio.is_some() {
                     if op == 0x2b {
-                        self.audio_pos = be32(2) as u64 * 1000;
+                        self.audio_sample = be32(2) as u64 * SAMPLES_PER_FRAME;
                     }
                     self.audio_status = AudioStatus::None;
                 }
@@ -982,6 +1062,46 @@ mod tests {
             out.extend_from_slice(&[(w >> 8) as u8, w as u8]);
         }
         out
+    }
+
+    /// What the drive plays comes out as sound: the track's tone while
+    /// it plays, silence when it does not, a sample for every moment.
+    #[test]
+    fn audio_comes_out() {
+        let mut a = Atapi::new();
+        a.insert_audio(AudioDisc::uniform(3, 10), false);
+        let mut out = Vec::new();
+        a.play_out(100_000, Some(&mut out));
+        assert_eq!(out.len(), 4410 * 2);
+        assert!(out.iter().all(|s| *s == 0), "nothing plays yet");
+        // PLAY AUDIO MSF from the start of track 2 (00:12:00) to the end.
+        packet(&mut a, [0x47, 0, 0, 0, 12, 0, 0, 32, 0, 0, 0, 0]);
+        out.clear();
+        a.play_out(1_000_000, Some(&mut out));
+        assert_eq!(out.len(), 44_100 * 2);
+        assert_eq!(a.audio_frame(), 10 * 75 + 75);
+        // Track 2's tone: 330 Hz, so 660 changes of sign in a second.
+        let left: Vec<i16> = out.chunks(2).map(|p| p[0]).collect();
+        let crossings = left.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count();
+        assert!((655..=665).contains(&crossings), "{} zero crossings", crossings);
+        assert!(out.chunks(2).all(|p| p[0] == p[1]));
+        // Paused: silence, and the position stays.
+        packet(&mut a, [0x4b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        out.clear();
+        a.play_out(500_000, Some(&mut out));
+        assert!(out.len() == 22_050 * 2 && out.iter().all(|s| *s == 0));
+        assert_eq!(a.audio_frame(), 10 * 75 + 75);
+
+        // A disc of recordings plays the recordings.
+        let ramp: Vec<i16> = (0..2 * 588 * 3).map(|i| i as i16).collect();
+        let mut a = Atapi::new();
+        a.insert_audio(AudioDisc::from_tracks(&[vec![7; 100], ramp.clone()]), false);
+        // Track 2 starts at frame 1 (the first track is padded to one).
+        packet(&mut a, [0x45, 0, 0, 0, 0, 1, 0, 0, 3, 0, 0, 0]);
+        out.clear();
+        a.play_out(40_000, Some(&mut out));
+        assert_eq!(out.len(), 1764 * 2);
+        assert_eq!(out[..], ramp[..1764 * 2]);
     }
 
     #[test]

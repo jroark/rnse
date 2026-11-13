@@ -243,7 +243,8 @@ fn os_draws_193() {
 
 /// An audio CD, in the first variant of each unit on the disc: MEDIA
 /// makes the OS read the table of contents and start the drive's player,
-/// and the position moves in real time.
+/// the position moves in real time, and what the drive plays is the
+/// track.
 #[test]
 fn cd_audio_plays() {
     use rnse::board::Model;
@@ -268,9 +269,22 @@ fn cd_audio_plays() {
         assert_eq!(m.run(10_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
         assert_eq!(m.atapi().audio_status, AudioStatus::Playing, "{}: the OS did not start the player", v.name);
         let before = m.atapi().audio_frame();
+        // Listen to the drive from here on.
+        m.sound = Some(Vec::new());
         assert_eq!(m.run(10_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
         let played = m.atapi().audio_frame() - before;
-        assert!((700..=800).contains(&played), "{}: ten seconds should be 750 frames, not {}", v.name, played);
+        assert!((745..=755).contains(&played), "{}: ten seconds should be 750 frames, not {}", v.name, played);
+        // Ten seconds of sound, and it is the tone of the track that is
+        // playing (a disc without recordings has a pitch per track).
+        let sound = m.sound.take().unwrap();
+        let seconds = sound.len() as f64 / 88_200.0;
+        assert!((9.9..=10.1).contains(&seconds), "{}: {} s of sound", v.name, seconds);
+        let track = 1 + (m.atapi().audio_frame() / (180 * 75)) as usize;
+        let left: Vec<i16> = sound.chunks(2).map(|p| p[0]).collect();
+        let crossings = left.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count() as f64;
+        let hz = crossings / 2.0 / seconds;
+        let want = AudioDisc::tone_hz(track) as f64;
+        assert!((hz - want).abs() < 2.0, "{}: track {} should sound at {} Hz, not {:.1}", v.name, track, want, hz);
     }
 }
 

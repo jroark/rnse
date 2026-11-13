@@ -76,6 +76,12 @@ pub struct Machine {
     pub echo_console: bool,
     /// CPU cycles per display frame.
     pub frame_cycles: u64,
+    /// The drive's audio output since it was last taken away: 44.1 kHz
+    /// stereo, a sample for every moment of emulated time (silence while
+    /// nothing plays).  `None`: nobody is listening.  It is the signal
+    /// at the drive, before the unit's volume control and amplifier,
+    /// which belong to the radio processor.
+    pub sound: Option<Vec<i16>>,
     /// The external watchdog as last looked at.
     pub watchdog: Watchdog,
     /// The watchdog bites from the start, not only once the software
@@ -176,7 +182,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -1133,8 +1139,12 @@ impl Machine {
             }
             if self.cpu.cycles >= self.next_frame {
                 self.next_frame += self.frame_cycles;
-                let frame_ms = self.frame_cycles / self.cycles_per_ms();
-                self.atapi().tick(frame_ms);
+                // The drive's audio player keeps time with the machine;
+                // what it plays is kept when somebody wants to hear it.
+                let frame_micros = self.frame_cycles * 1000 / self.cycles_per_ms();
+                let mut sound = self.sound.take();
+                self.atapi().play_out(frame_micros, sound.as_mut());
+                self.sound = sound;
                 self.board.vsync();
                 if let Some(navi) = self.cpu.io.navi.as_mut() {
                     navi.vsync(&mut self.cpu.io.intc);

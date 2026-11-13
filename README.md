@@ -45,11 +45,16 @@ In the browser front end the 193 has a fix in San Francisco unless
 
 ![The 193's navigation map in the emulator](docs/nav-193.png)
 
-Audio CDs play on both units, silently (`--audio-cd 12x200`). The 192's
-SD/MP3 processor stand-ins now complete their boot handshake and startup
-commands; both card slots report empty. Card images, MP3 decoding and
-audio output are still missing, as are the power button, GPS receiver
-and the 3D half of the 192's graphics chip.
+Audio CDs play on both units (`--audio-cd 12x200` for a disc of test
+tones, `--audio-cd a.wav,b.wav` for recordings), and `--wav out.wav`
+writes what the drive plays: its output before the unit's volume
+control and amplifier, which belong to the radio processor and are not
+emulated. The 192's installed software reads data discs (it takes an
+update disc with a higher software index for an update and runs the
+whole update itself). The 192's SD/MP3 processor stand-ins complete
+their boot handshake and startup commands; both card slots report
+empty. Card images and MP3 decoding are still missing, as are the power
+button, the 192's GPS receiver and the 3D half of its graphics chip.
 
 `sdk/` has the start of a kit for writing software of your own for the
 unit: start-up code, a hardware layer for each generation and four

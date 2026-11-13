@@ -331,7 +331,9 @@ state is known to the OS, which is not the case in the emulator yet.
   address, 0x07880000, word by word (the loader reads 0x07800000); disc
   data goes through the DMA controller from the same address.  Audio
   discs are played by the drive: READ TOC format 2, PLAY CD (0xbc) and
-  READ SUB-CHANNEL, as on the 193.  No sound comes out.  The display-
+  READ SUB-CHANNEL, as on the 193.  What the drive plays can be had as
+  sound (`--wav`), as it leaves the drive.  Disc data needs three boot
+  ROM services for the DMA controller (see `boot-rom.md`).  The display-
   open key works (the display's position follows the motor outputs) and
   shows the drive and the two card slots.
 * The SD/MP3 processor stand-ins accept the firmware download and startup
