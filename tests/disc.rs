@@ -21,6 +21,80 @@ fn disc() -> Option<Vec<u8>> {
     Some(std::fs::read(path).expect("RNSE_DISC is not readable"))
 }
 
+/// Exercise the real SD/MP3 driver, including both downloads, polling,
+/// companion-chip receive interrupts and the switch to block DMA.
+#[test]
+fn media_dsps_boot() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192))
+        .expect("RNSE_DISC needs a 192 variant for the media DSP test");
+    let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+    let mut m = Machine::new();
+    m.echo_console = false;
+    m.install_boot_stub(&v.name);
+    m.install(v, &index);
+    m.atapi().load(image);
+    m.set_ignition(true);
+    let printf = Machine::known_printf(&v.module("OSM").unwrap().version);
+    if let Some(address) = printf { m.hook_printf(address); }
+    m.start_os(v).unwrap();
+    assert_eq!(m.run(30_000 * m.cycles_per_ms()), Stop::Budget, "{:?}", m.cpu.fault);
+    let log = String::from_utf8_lossy(&m.console);
+    for ch in 0..2 {
+        assert!(m.board.media.initialized(ch), "DSP{ch} initialization failed:\n{log}");
+        assert_eq!(m.board.media.mode(ch), 2, "DSP{ch} transfer mode was not selected");
+        assert!(m.board.media.uploaded_words(ch) > 20_000, "DSP{ch} download was incomplete");
+        assert!(m.board.media.command_count(ch) >= 2, "DSP{ch} runtime commands stalled:\n{log}");
+        if printf.is_some() {
+            assert!(log.contains(&format!("SDC{ch}-DSPC_SYS_INIT Success")), "driver rejected DSP{ch}:\n{log}");
+        }
+    }
+    assert!(m.board.media.command_count(0) >= 5, "DSP0 DMA commands stalled:\n{log}");
+    assert!(m.cpu.irq_counts[0x7e0 >> 5] > 0, "DSP0 DMA completion never interrupted");
+    assert!(!log.contains("BOOT ERROR"), "DSP boot failure:\n{log}");
+    assert!(!log.contains("ERR_cmd_dma"), "media DMA did not complete:\n{log}");
+}
+
+/// The boot ROM supplies CAN software state and a running CAN timer.
+/// Without these the UI boots, but cyclic status and transport retries
+/// remain queued forever. Exercise both implementations of that handover.
+#[test]
+fn can_timer_drives_status_and_transport() {
+    use rnse::board::Model;
+    use rnse::dev::hcan::Frame;
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(model)) else { continue };
+        let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+        let mut m = Machine::for_model(model);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        m.atapi().load(image.clone());
+        m.set_ignition(true);
+        // In the 192 this uses the shared 0x600..0x67f receive box.
+        m.can_send_cyclic(Frame::new(0x665, &[0; 7]), 100);
+        m.start_os(v).unwrap();
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(30_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        let frames = &m.can().tx;
+        assert!(frames.iter().filter(|f| f.id == 0x661).count() >= 3,
+            "{}: periodic CAN status never started", v.name);
+        assert!(frames.iter().any(|f| f.id == 0x6c0 && f.data[0] == 0xa0),
+            "{}: transport channel-open timer never ran", v.name);
+        if model == Model::Rnse192 {
+            assert!(frames.iter().any(|f| f.id == 0x6c4 && f.data[0] == 0xa0),
+                "{}: telephone status never reached its handler", v.name);
+        }
+        let timer_irq = if model == Model::Rnse192 { 0x440 } else { 0x480 };
+        assert!(m.cpu.irq_counts[timer_irq >> 5] > 100,
+            "{}: CAN timer did not interrupt", v.name);
+    }
+}
+
 #[test]
 fn every_module_on_the_disc_has_a_valid_checksum() {
     let Some(image) = disc() else { return };
@@ -276,14 +350,20 @@ fn navigation_shows_the_map() {
         m.set_serial(&serial).unwrap();
     }
     m.atapi().load_disc(rnse::dev::atapi::Disc::open(nav.to_str().unwrap()).expect("RNSE_NAV_DISC is not readable"));
-    m.hook_printf(Machine::known_printf(&v.module("OSM").unwrap().version).expect("printf of this OS"));
-    m.hook_printf_also(Machine::known_app_printf(&v.module("APM").unwrap().version).expect("printf of this application"));
+    m.hook_debug_output(v, false);
+    assert!(m.printf_hook.is_some() && !m.printf_hooks.is_empty(), "the debug printf of the OS and the application");
+    // A GPS fix, in Chicago, far from where the software starts.
+    let gps = Machine::find_gps_getter(v.module("OSM").unwrap());
+    if let Some((getter, context)) = gps {
+        m.set_gps(rnse::dev::gps::Gps::at(41.8781, -87.6298), getter, context);
+    }
     m.set_ignition(true);
     m.start_os(v).unwrap();
     let ms = m.cycles_per_ms();
     assert_eq!(m.run(45_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
     let text = String::from_utf8_lossy(&m.console).into_owned();
     assert!(text.contains("media judge = 1"), "the OS did not take the disc for a DVD");
+
     assert!(text.contains("DISCTYPE:CDDISC_MAP"), "the application did not take the disc for a map disc (is it tied to a serial number? RNSE_SERIAL)");
     assert!(m.atapi().sectors_read > 1000, "only {} sectors read", m.atapi().sectors_read);
 
@@ -303,4 +383,7 @@ fn navigation_shows_the_map() {
     assert!(light > 150_000, "only {} light pixels: this is not the map", light);
     let colours: std::collections::BTreeSet<&[u8]> = picture.chunks(3).collect();
     assert!(colours.len() > 50, "only {} colours on the screen", colours.len());
+    if gps.is_some() {
+        assert!(m.gps_fixes > 10, "the application was given a GPS fix {} times", m.gps_fixes);
+    }
 }

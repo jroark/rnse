@@ -195,6 +195,9 @@ processor is off, so it presumably goes to the radio processor.
 
 ## CAN
 
+Telephone-module investigation and the remaining protocol prerequisites
+are recorded in [telephone.md](telephone.md).
+
 The unit is a node on the car's infotainment CAN bus (100 kbit/s).  The
 controller is register-compatible with Renesas' HCAN2: mailbox n at
 +0x100 + 0x20n holds the identifier (standard id << 4 in the first
@@ -260,8 +263,9 @@ state is known to the OS, which is not the case in the emulator yet.
   READ SUB-CHANNEL, as on the 193.  No sound comes out.  The display-
   open key works (the display's position follows the motor outputs) and
   shows the drive and the two card slots.
-* `SDCARD DSP0/1 BOOT ERROR`: the SD card processors are missing (see
-  "SD card processors").
+* The SD/MP3 processor stand-ins accept the firmware download and startup
+  commands. Both slots report empty; card images and MP3 audio are not
+  implemented (see "SD card processors").
 * The radio processor stand-in knows one command (see above); there is
   no tuner, no sound and no power button.
 * Navigation stays at "Navigation wird initialisiert": no GPS receiver
@@ -275,20 +279,65 @@ state is known to the OS, which is not the case in the emulator yet.
 
 The two SD card slots and MP3 decoding belong to two processors of
 their own (the firmware calls them DSP 0 and DSP 1), each behind one
-16-bit host port: 0x15000002 and 0x1500004a.  At start-up the OS
-writes the same program of 29363 words (58 KiB, stored inside the OS
-module) into each port, reading a word back now and then, and finally
-expects an answer to a first command; the log line
-`SDC0-ERR_cmd_res=(1202-d762)-(-1)` is that check failing.  The driver
-also uses ports 5 and 9 (0x12500000, 0x12900000) and DMA channel 3 and
-a further channel of the SH-4.
+16-bit host port: 0x15000002 and 0x1500004a. `src/dev/media.rs` answers
+their host protocol, without executing the downloaded DSP program.
+
+The following was traced through the V2220371 driver and checked with
+V2220317 as well:
+
+| Register | Meaning |
+|----------|---------|
+| 0x12400001 bit 2 / bit 0 | DSP0 / DSP1 receive FIFO empty (1 = empty) |
+| 0x12400001 bit 3 / bit 1 | DSP0 / DSP1 transmit busy (1 = busy) |
+| 0x16000004 bit 2 / bit 3 | DSP0 / DSP1 reset release; the driver pulses these low |
+| 0x07b00016 bit 2 / bit 3 | DSP0 / DSP1 receive edge latch; cleared by writing 0 |
+| 0x07b0001e bit 2 / bit 3 | Receive interrupt mask; the driver clears these to enable |
+| 0x07b00000 bits 11:8 / 15:12 | DSP0 / DSP1 interrupt priority |
+
+At startup the OS downloads the same embedded program to each port.
+There are **four sections**, each starting with a block count. Each
+block sends a length, an address and its data, then reads one acknowledgement
+word. Lengths in the first two sections count pairs of 16-bit words;
+the final two sections count individual words. Empty sections are allowed.
+V2220371 sends 29,452 payload words in nine blocks. The acknowledgement
+contents are not checked by this uploader; the stand-in returns zero.
+The firmware's source file uses little-endian lengths and addresses,
+converted by the SH-4 driver before writing these 16-bit port words.
+
+Runtime commands have a header whose low byte counts following words.
+The receive handler puts only the response header into a software FIFO;
+the task reads the response payload directly from the host port. The
+stand-in raises one receive edge for each response, not each payload word.
+
+| Command and arguments | Stand-in reply | Purpose / confidence |
+|-----------------------|----------------|----------------------|
+| `1202 d762 0034` | `f000` | System initialization; the driver logs `DSPC_SYS_INIT Success` |
+| `7301 mode` | `f000` | Host transfer mode; startup selects 2 |
+| `3301 enable`, `3101 enable` | `f000` | Library/output startup controls; exact semantics inferred |
+| `3201 0000` | `d503 0000 0000 0000` | Library identity; synthetic version 0.0, build 0 |
+| `2203 0001 5000 selector` | `d301 0000` | Card status; both slots absent |
+
+Other commands are left unanswered. The first command is sent with
+polled I/O; later blocks use SH-4 DMA channel **7 for DSP0**, **3 for DSP1**,
+with 16-bit transfers. The device provides requests only for available
+FIFO words on reads, and accepts writes immediately. The companion DMA
+request selectors are at 0x12d00007 and 0x12d00003. This is a simplified
+data-ready model, not a complete emulation of the DDT request bus.
+
+The OS also configures port interrupt controls at 0x12500000 and
+0x12900000. Card insertion and removal events on those ports are not
+implemented. The firmware regression test `media_dsps_boot` checks both
+downloads, the initialization replies, and the switch to DMA without
+`BOOT ERROR` or `ERR_cmd_dma` messages.
 
 The processor type is not known: the program is 16-bit words with what
 looks like a table of eight-word interrupt vectors at its start and no
 readable text.  Emulating SD card access and MP3 playback the way the
 unit does it means either running that program (which needs the
-processor identified) or answering its command protocol from outside.
-Nothing of either exists yet.
+processor identified) or extending the host command stand-in. The next
+missing pieces are card/image access and file commands, followed by MP3
+decoding and an audio output path. The 193 uses a different media
+interface; this device is only mapped on the 192.
 
 ## GPS
 

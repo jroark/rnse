@@ -651,9 +651,12 @@ impl Q2 {
                     pc += 24;
                 }
                 0xa8 => {
-                    // Blend a colour through a coverage map (text): one
-                    // byte per pixel, rows as wide as the width given,
-                    // which the firmware rounds up to a multiple of 16.
+                    // Blend a colour through a coverage map (text, and the
+                    // shadows of pictures): one byte per pixel, rows as
+                    // wide as the width given, which the firmware rounds
+                    // up to a multiple of 16.  (The source width register
+                    // is not the map's: reading it that way garbles the
+                    // shadows.)
                     let colour = arg(1) as u16;
                     let map = arg(2);
                     let (w, h) = (arg(3) as i32 + 1, arg(4) as i32 + 1);

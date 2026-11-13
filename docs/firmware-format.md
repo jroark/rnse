@@ -138,3 +138,39 @@ the compact one of `fw::module_directory_compact`: 256 bytes on the 192
 that follows the variant ("00" for V220, V574 and VB48, "02" for V222,
 "01" for V575) - presumably the market.
 
+
+## Changing a module
+
+`rnse repack disc.iso dir out.iso` writes a copy of an update disc with
+the modules found in `dir` (as `rnse extract` lays them out) in place of
+the disc's.  A replacement has to be as long as the module it replaces,
+with the same load address and size in its header; its checksum is put
+right, and nothing else on the disc is touched.  With the modules as
+extracted the copy is the disc, byte for byte.  The loader is not
+replaced: the disc has it a second time outside the container, for the
+boot ROM.
+
+Tried in the emulator with the North American disc (V575, software
+0320): one menu text changed in `APM` (two places, 19 bytes each), the
+disc repacked (42 bytes differ from the original: the text and the
+checksum), the update run by the disc's own loader, and the unit
+started from the flash it left.  The loader accepts the module, writes
+it, and the menu shows the new text.
+
+What the loader does with a module it does not like matters more.
+With the same change and the old checksum it stops with its "cannot
+read, check the disc" message - after it has erased everything:
+
+    FLASH ERASE START ADDR=400000 SIZE=c00000
+    FLASH ERASE START ADDR=1c00000 SIZE=1400000
+    FLASH WRITE START ADDR=b00000 SIZE=52f0        (APFM)
+    MSG_CANNOTREAD, MSG_CHECKDISK
+
+It erases the OS and the applications first and checks each module
+only as it comes to write it.  A unit that was given a bad disc is
+therefore left without software, and so is one whose update was
+interrupted; getting it back is up to the boot ROM, which has to start
+a loader from a disc on its own.  That it does so is how every update
+must work, but the boot ROM is not on any disc and what exactly it
+needs to see has not been observed (see boot-rom.md).  None of this
+has been tried on a unit.

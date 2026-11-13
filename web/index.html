@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RNS-E emulator</title>
+<meta name="description" content="An emulator for the RNS-E navigation unit that runs the unit's real firmware in your browser, from your own update disc image.">
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0c0c0d; color: #c8c8cc; font: 14px/1.4 system-ui, sans-serif; }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; }
+  /* The faceplate is 1620 x 971; everything inside is placed in percent
+     of that so the whole thing scales with the window.  The screen sits
+     behind the picture's transparent window (116,106 to 1238,730), one
+     pixel larger all round. */
+  #unit { position: relative; width: 100%; aspect-ratio: 1620 / 971; user-select: none; }
+  #screen { position: absolute; left: 7.099%; top: 10.814%; width: 69.444%; height: 64.573%; background: #000; }
+  #plate { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+  .zone { position: absolute; cursor: pointer; border-radius: 6px; }
+  .zone.round { border-radius: 50%; }
+  .zone:hover { background: rgba(255, 60, 40, .10); }
+  .zone.down { background: rgba(255, 60, 40, .28); }
+  body.debug .zone { outline: 1px solid #3cf; }
+  #bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 14px 0 8px; }
+  button { background: #222226; color: #ddd; border: 1px solid #3a3a40; border-radius: 6px; padding: 6px 12px; font: inherit; cursor: pointer; }
+  button:hover { background: #2c2c32; }
+  button.on { border-color: #d0392b; color: #ff6a55; }
+  #status { margin-left: auto; color: #88888f; font-variant-numeric: tabular-nums; }
+  #note { color: #b9954a; margin: 4px 0 10px; min-height: 1.4em; }
+  #log { height: 220px; overflow: auto; background: #111113; border: 1px solid #26262b; border-radius: 6px;
+         padding: 8px 10px; margin: 0; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; }
+  kbd { background: #222226; border: 1px solid #3a3a40; border-radius: 4px; padding: 0 5px; font: 12px ui-monospace, monospace; }
+  #help { color: #77777e; margin-top: 8px; }
+  #flap { position: absolute; left: 7.099%; top: 10.814%; width: 69.444%; height: 64.573%; display: none;
+          align-items: center; justify-content: center; text-align: center; color: #9a9aa2; background: rgba(0, 0, 0, .78); }
+  #unit.open #flap { display: flex; }
+  h1 { font-size: 20px; font-weight: 600; margin: 4px 0 2px; color: #e6e6ea; }
+  p { margin: 6px 0; max-width: 70ch; }
+  a { color: #ff6a55; }
+  #setup { border: 1px solid #26262b; border-radius: 8px; padding: 14px 16px; margin: 12px 0 18px; background: #111113; }
+  #setup label { display: block; margin: 10px 0 2px; color: #e6e6ea; }
+  #setup .hint { color: #77777e; font-size: 13px; }
+  #setup input[type=text], #setup select { background: #1a1a1d; color: #ddd; border: 1px solid #3a3a40; border-radius: 6px; padding: 5px 8px; font: inherit; width: 16em; max-width: 100%; }
+  #setup .row { display: flex; flex-wrap: wrap; gap: 6px 24px; }
+  #start { margin-top: 14px; border-color: #d0392b; color: #ff6a55; }
+  #start:disabled { opacity: .45; cursor: default; }
+  #error { color: #ff6a55; min-height: 1.4em; margin-top: 8px; }
+  #machine { display: none; }
+  body.running #machine { display: block; }
+  body.running #intro { display: none; }
+  footer { color: #66666d; font-size: 13px; margin: 22px 0 10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>RNS-E emulator</h1>
+  <div id="intro">
+    <p>This runs the real software of the RNS-E navigation unit on an emulated unit, inside this page.
+       The software is not here: it comes from an update disc, and you have to bring an image of one
+       (an <code>.iso</code> file of the CD).</p>
+    <p><strong>Your files stay on your computer.</strong> They are read by this page and are not sent anywhere;
+       the site only serves the emulator itself.</p>
+    <div id="setup">
+      <label for="fw">Update disc image</label>
+      <input type="file" id="fw" accept=".iso,.kwi,.KWI,application/octet-stream">
+      <div class="hint">An ISO image of a software update CD, or its <code>LOADING.KWI</code> file.</div>
+      <div id="more" hidden>
+        <label for="variant">Unit</label>
+        <select id="variant"></select>
+        <label for="nav">Navigation disc image <span class="hint">(optional, units of the 193 kind)</span></label>
+        <input type="file" id="nav" accept=".iso,.img,application/octet-stream">
+        <div class="hint">An ISO image of a navigation DVD, or the image of an SD card prepared for the unit. Read as needed, not loaded.</div>
+        <div class="row">
+          <div><label for="gps">Position</label><input type="text" id="gps" placeholder="37.7749,-122.4194" autocomplete="off">
+            <div class="hint">Latitude, longitude and optionally course. Empty: San Francisco.</div></div>
+          <div><label for="drive">Driving</label><input type="text" id="drive" placeholder="e.g. 50" autocomplete="off">
+            <div class="hint">Speed in km/h, optionally <code>,turn</code> in degrees a second.</div></div>
+          <div><label for="serial">Unit serial number</label><input type="text" id="serial" placeholder="AUZ…" maxlength="14" autocomplete="off">
+            <div class="hint">Only for map data that was made for one unit.</div></div>
+        </div>
+        <label><input type="checkbox" id="loader"> Run the update loader instead of the installed software</label>
+        <button id="start">Start</button>
+      </div>
+      <div id="error"></div>
+    </div>
+  </div>
+  <div id="machine">
+  <div id="unit">
+    <canvas id="screen" width="400" height="235"></canvas>
+    <div id="flap">display folded down<br>(CD drive and card slots accessible)</div>
+    <img id="plate" src="faceplate.png" alt="">
+  </div>
+  <div id="bar">
+    <button id="ign" title="Ignition lock status on the CAN bus (key in, ignition on)">Ignition</button>
+    <button id="disc" title="Put the disc image in the drive or take it out">Disc</button>
+    <button id="eject" title="The key that folds the display down; this faceplate picture does not show it">Open display</button>
+    <button id="cdeject" title="The CD eject key sits behind the fold-down display">CD eject key</button>
+    <button id="reset" title="Restart the firmware">Restart</button>
+    <span id="status">connecting…</span>
+  </div>
+  <div id="note"></div>
+  <pre id="log" aria-label="Firmware debug log"></pre>
+  <div id="help">
+    Keys: <kbd>↑</kbd> <kbd>↓</kbd> (or <kbd>←</kbd> <kbd>→</kbd>) turn the main knob, <kbd>Enter</kbd> presses it, <kbd>Esc</kbd> RETURN,
+    <kbd>1</kbd>–<kbd>8</kbd> RADIO … SETUP, <kbd>Q</kbd> <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> the four soft keys,
+    <kbd>,</kbd> <kbd>.</kbd> previous / next, <kbd>-</kbd> <kbd>+</kbd> volume.  On a knob, the middle presses it and the left or right edge (or the mouse wheel) turns it.
+    The power button is not connected to the main processor and does nothing here.
+  </div>
+  </div>
+  <footer>
+    An independent hobby project for interoperability and preservation, not affiliated with Audi, Aisin AW or anyone else.
+    No firmware or map data is distributed here. Source: <a href="https://github.com/jroark/rnse">github.com/jroark/rnse</a>.
+  </footer>
+</main>
+<script>
+"use strict";
+const W = 1620, H = 971;
+// Click targets in faceplate pixels: [name, x0, y0, x1, y1] or, for the
+// knobs, [name, cx, cy, radius].
+const KEYS = [
+  ["PREV", 1303, 88, 1422, 160], ["NEXT", 1438, 88, 1558, 160],
+  ["SOFT_TL", 1308, 205, 1424, 332], ["SOFT_TR", 1440, 205, 1562, 332],
+  ["SOFT_BL", 1308, 468, 1424, 588], ["SOFT_BR", 1440, 468, 1562, 588],
+  ["RETURN", 1305, 605, 1563, 677],
+  ["RADIO", 70, 833, 218, 900], ["MEDIA", 236, 833, 388, 900], ["NAME", 405, 833, 548, 900], ["TEL", 562, 833, 705, 900],
+  ["NAV", 722, 833, 865, 900], ["INFO", 882, 833, 1030, 900], ["CAR", 1050, 833, 1192, 900], ["SETUP", 1210, 833, 1362, 900],
+];
+const KNOBS = [["SELECT", "main", 1437, 400, 106], ["POWER", "volume", 1472, 787, 72]];
+
+const unit = document.getElementById("unit");
+// The emulator runs in a worker; events go to it as text.
+const worker = new Worker("worker.js");
+const send = (text) => worker.postMessage({ type: "input", text });
+const keyEvent = (name, down) => send(`key ${name} ${down ? 1 : 0}`);
+
+function addZone(name, x0, y0, x1, y1, round) {
+  const z = document.createElement("div");
+  z.className = "zone" + (round ? " round" : "");
+  z.title = name;
+  z.style.left = (100 * x0 / W) + "%"; z.style.top = (100 * y0 / H) + "%";
+  z.style.width = (100 * (x1 - x0) / W) + "%"; z.style.height = (100 * (y1 - y0) / H) + "%";
+  const up = () => { if (z.classList.contains("down")) { z.classList.remove("down"); keyEvent(name, false); } };
+  z.addEventListener("pointerdown", (e) => { e.preventDefault(); z.setPointerCapture(e.pointerId); z.classList.add("down"); keyEvent(name, true); });
+  z.addEventListener("pointerup", up);
+  z.addEventListener("pointercancel", up);
+  unit.appendChild(z);
+  return z;
+}
+for (const [name, x0, y0, x1, y1] of KEYS) addZone(name, x0, y0, x1, y1, false);
+// A knob: the middle presses it, the rim turns it (right half clockwise,
+// left half anticlockwise), and so does the mouse wheel.
+for (const [name, knob, cx, cy, r] of KNOBS) {
+  const z = document.createElement("div");
+  z.className = "zone round";
+  z.title = `${name}: click the middle to press, the left or right edge (or the mouse wheel) to turn`;
+  z.style.left = (100 * (cx - r) / W) + "%"; z.style.top = (100 * (cy - r) / H) + "%";
+  z.style.width = (200 * r / W) + "%"; z.style.height = (200 * r / H) + "%";
+  const turn = (d) => send(`knob ${knob} ${d}`);
+  let pressed = false;
+  z.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    const b = z.getBoundingClientRect();
+    const dx = (e.clientX - b.left) / b.width - 0.5, dy = (e.clientY - b.top) / b.height - 0.5;
+    if (Math.hypot(dx, dy) < 0.24) { pressed = true; z.setPointerCapture(e.pointerId); z.classList.add("down"); keyEvent(name, true); }
+    else turn(dx > 0 ? 1 : -1);
+  });
+  const up = () => { if (pressed) { pressed = false; z.classList.remove("down"); keyEvent(name, false); } };
+  z.addEventListener("pointerup", up);
+  z.addEventListener("pointercancel", up);
+  // Wheel down moves down a list (clockwise); wheel up is louder.
+  z.addEventListener("wheel", (e) => { e.preventDefault(); turn((e.deltaY > 0) === (knob === "main") ? 1 : -1); }, { passive: false });
+  unit.appendChild(z);
+}
+if (location.search.includes("debug")) document.body.classList.add("debug");
+
+const KEYMAP = { Enter: "SELECT", Escape: "RETURN", Backspace: "RETURN",
+  1: "RADIO", 2: "MEDIA", 3: "NAME", 4: "TEL", 5: "NAV", 6: "INFO", 7: "CAR", 8: "SETUP",
+  q: "SOFT_TL", w: "SOFT_TR", a: "SOFT_BL", s: "SOFT_BR", ",": "PREV", ".": "NEXT" };
+const TURN = { ArrowRight: ["main", 1], ArrowDown: ["main", 1], ArrowLeft: ["main", -1], ArrowUp: ["main", -1],
+  "+": ["volume", 1], "=": ["volume", 1], "-": ["volume", -1] };
+addEventListener("keydown", (e) => {
+  if (e.repeat && KEYMAP[e.key]) return;
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!document.body.classList.contains("running") || e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
+  if (TURN[e.key]) send(`knob ${TURN[e.key][0]} ${TURN[e.key][1]}`);
+  else if (KEYMAP[e.key]) keyEvent(KEYMAP[e.key], true);
+  else return;
+  e.preventDefault();
+});
+addEventListener("keyup", (e) => { if (KEYMAP[e.key]) keyEvent(KEYMAP[e.key], false); });
+
+// ---- screen, status and log, as the worker reports them ------------------
+const canvas = document.getElementById("screen");
+const ctx = canvas.getContext("2d");
+const ign = document.getElementById("ign"), disc = document.getElementById("disc");
+const logEl = document.getElementById("log");
+const decoder = new TextDecoder("euc-jp");   // the firmware's messages are partly Japanese
+const errorEl = document.getElementById("error");
+let st = {};
+ign.onclick = () => send("ignition " + (st.ignition ? 0 : 1));
+disc.onclick = () => send("disc " + (st.disc ? 0 : 1));
+document.getElementById("reset").onclick = () => { logEl.append("\n--- restart ---\n"); send("reset"); };
+const tap = (name) => { keyEvent(name, true); setTimeout(() => keyEvent(name, false), 200); };
+document.getElementById("eject").onclick = () => tap("EJECT");
+document.getElementById("cdeject").onclick = () => tap("CD_EJECT");
+
+worker.onmessage = (e) => {
+  const m = e.data;
+  if (m.type === "frame") {
+    if (canvas.width !== m.w || canvas.height !== m.h) { canvas.width = m.w; canvas.height = m.h; }
+    ctx.putImageData(new ImageData(m.pixels, m.w, m.h), 0, 0);
+  } else if (m.type === "log") {
+    const stick = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8;
+    logEl.append(decoder.decode(m.bytes, { stream: true }));
+    if (logEl.textContent.length > 200000) logEl.textContent = logEl.textContent.slice(-150000);
+    if (stick) logEl.scrollTop = logEl.scrollHeight;
+  } else if (m.type === "status") {
+    st = m.status;
+    ign.classList.toggle("on", !!st.ignition); ign.textContent = "Ignition " + (st.ignition ? "on" : "off");
+    disc.classList.toggle("on", !!st.disc); disc.textContent = st.disc ? "Disc in drive" : "No disc";
+    unit.classList.toggle("open", st.display !== undefined && st.display < 894);
+    document.getElementById("status").textContent =
+      `${st.what} · ${(st.seconds || 0).toFixed(1)} s emulated · ${(m.speed || 0).toFixed(0)} % speed` + (st.stopped ? " · STOPPED: " + st.stopped : "");
+    document.getElementById("note").textContent = st.note || "";
+  } else if (m.type === "variants") {
+    const select = document.getElementById("variant");
+    select.textContent = "";
+    for (const v of m.variants) {
+      const o = document.createElement("option");
+      o.value = v.name; o.dataset.model = v.model;
+      o.textContent = `${v.name}, software ${v.version} (unit 8P0 035 ${v.model})`;
+      o.disabled = v.model === "unknown";
+      select.appendChild(o);
+    }
+    // The newer unit first, if the disc has it: it is the one with navigation.
+    const newer = m.variants.find((v) => v.model === "193");
+    if (newer) select.value = newer.name;
+    document.getElementById("more").hidden = false;
+    errorEl.textContent = "";
+  } else if (m.type === "started") {
+    document.body.classList.add("running");
+    errorEl.textContent = "";
+  } else if (m.type === "error") {
+    errorEl.textContent = m.message;
+    document.getElementById("note").textContent = m.message;
+    document.getElementById("start").disabled = false;
+  }
+};
+
+// ---- setting up ---------------------------------------------------------
+document.getElementById("fw").onchange = (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  errorEl.textContent = "reading the disc image…";
+  worker.postMessage({ type: "firmware", file });
+};
+document.getElementById("start").onclick = () => {
+  const value = (id) => document.getElementById(id).value.trim();
+  const settings = { variant: value("variant") };
+  if (document.getElementById("loader").checked) settings.loader = 1;
+  for (const id of ["gps", "drive", "serial"]) if (value(id)) settings[id] = value(id);
+  document.getElementById("start").disabled = true;
+  errorEl.textContent = "starting…";
+  worker.postMessage({ type: "boot", settings, nav: document.getElementById("nav").files[0] || null });
+};
+</script>
+</body>
+</html>

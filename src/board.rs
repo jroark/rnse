@@ -16,6 +16,8 @@
 //! | 0x1000_0000 - 0x100f_ffff | 4  | battery-backed SRAM (settings)       |
 //! | 0x1230_0001               | 4  | watchdog strobe (bit 0 toggled)      |
 //! | 0x12N0_0000 / 0x12N0_0001 | 4  | port N: direction (1 = output), data |
+//! | 0x1500_0002 / 0x1500_004a | 5  | SD/MP3 DSP0 / DSP1 host data ports   |
+//! | 0x1600_0004               | 5  | DSP reset release (bits 2 and 3)    |
 //! | 0x1400_0000 - 0x17ff_ffff | 5  | peripherals (not identified yet)     |
 //! | 0x1800_0000 - 0x1bff_ffff | 6  | Fujitsu Coral graphics controller    |
 //!
@@ -27,6 +29,7 @@ use crate::dev::atapi::Atapi;
 use crate::dev::coral::{self, Coral};
 use crate::dev::flash::Flash;
 use crate::dev::hcan::Hcan;
+use crate::dev::media::Media;
 use crate::dev::uart::Uart;
 use crate::iolog::IoLog;
 use crate::sh4::Bus;
@@ -120,6 +123,8 @@ pub struct Board {
     pub coral: Coral,
     pub atapi: Atapi,
     pub can: Hcan,
+    /// The 192's two SD/MP3 coprocessor host interfaces.
+    pub media: Media,
     /// The companion chip's serial channels, indexed by the channel
     /// digit of the address (0x07aN_0000).  Channel 5 carries the
     /// loader's debug text, channel 1 the link to the radio processor.
@@ -169,6 +174,7 @@ impl Board {
             coral: Coral::new(),
             atapi: Atapi::new(),
             can: Hcan::new(),
+            media: Media::new(),
             uart: Default::default(),
             gpio_in: [0, 0, 0x10, 0x04, 0, 0, 0, 0],
             gpio_out: [0; 8],
@@ -247,6 +253,8 @@ impl Board {
     /// | source          | level        | latch bit |
     /// |-----------------|--------------|-----------|
     /// | ATAPI INTRQ     | +0x00, 7:4   | -         |
+    /// | SD/MP3 DSP0 RX  | +0x00, 11:8  | 2         |
+    /// | SD/MP3 DSP1 RX  | +0x00, 15:12 | 3         |
     /// | display VSYNC   | +0x02, 11:8  | 6         |
     /// | Coral INT       | +0x02, 7:4   | -         |
     /// | serial ch. 1    | +0x08, 3:0   | -         |
@@ -284,6 +292,13 @@ impl Board {
         }
         if self.ipr(0x16) & self.ipr(0x1e) & 0x40 != 0 {
             level = level.max((self.ipr(0x02) >> 8) & 0xf);
+        }
+        // The SD driver clears these mask bits when enabling RX.
+        let dsp_edges = self.ipr(0x16) & !self.ipr(0x1e);
+        for i in 0..2 {
+            if dsp_edges & (4 << i) != 0 {
+                level = level.max((self.ipr(0x00) >> (8 + 4 * i)) & 0xf);
+            }
         }
         self.irl = level as u8;
     }
@@ -351,6 +366,17 @@ impl Board {
         if addr >> 26 == 6 {
             return self.coral.read(addr - CORAL_BASE, size, self.pc);
         }
+        if size == 2 && matches!(addr, 0x1500_0002 | 0x1500_004a) {
+            let v = self.media.read(usize::from(addr == 0x1500_004a)) as u32;
+            self.log.log("media", false, addr, size, v, self.pc);
+            return v;
+        }
+        if addr == 0x1240_0001 && size == 1 {
+            let v = self.unmapped.get(&(addr >> 12)).map_or(0, |p| p[1]);
+            let v = u32::from((v & !0x0f) | self.media.status());
+            self.log.log("media", false, addr, size, v, self.pc);
+            return v;
+        }
         if addr & 0xffff_fffc == 0x07b0_0018 {
             // Interrupt status: which sources are requesting right now.
             // Handlers that share a level test their bit here.
@@ -416,6 +442,21 @@ impl Board {
         if addr >> 26 == 6 {
             self.coral.write(addr - CORAL_BASE, size, v, self.pc);
             return;
+        }
+        if size == 2 && matches!(addr, 0x1500_0002 | 0x1500_004a) {
+            self.media.write(usize::from(addr == 0x1500_004a), v as u16);
+            let edges = self.media.take_edges();
+            self.set_ipr(0x16, self.ipr(0x16) | u32::from(edges));
+            self.log.log("media", true, addr, size, v, self.pc);
+            return;
+        }
+        if addr == 0x1600_0004 && size == 4 {
+            for i in 0..2 {
+                if v & (4 << i) == 0 {
+                    self.media.reset(i);
+                    self.set_ipr(0x16, self.ipr(0x16) & !(4 << i));
+                }
+            }
         }
         match addr & 0xfff0_0000 {
             NVRAM_BASE => {

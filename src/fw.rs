@@ -233,6 +233,36 @@ impl Module {
     pub fn phys_addr(&self) -> u32 {
         self.load_addr & 0x1fff_ffff
     }
+
+    /// The address the module's code runs at for a place in its image:
+    /// the load address in the address region of its entry points.
+    pub fn code_addr(&self, offset: usize) -> u32 {
+        (self.entries[0] & 0xe000_0000) | (self.phys_addr() + offset as u32)
+    }
+
+    /// Big-endian long word at a code address, if it is in the image.
+    pub fn long_at(&self, addr: u32) -> Option<u32> {
+        let o = (addr & 0x1fff_ffff).checked_sub(self.phys_addr())? as usize;
+        let b = self.data.get(o..o + 4)?;
+        Some(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Where a sequence of instruction words occurs in the image, as
+    /// code addresses.  Each word is given with a mask of the bits that
+    /// must match.
+    pub fn find_code(&self, pattern: &[(u16, u16)]) -> Vec<u32> {
+        let end = (self.size as usize).min(self.data.len());
+        let mut found = Vec::new();
+        let mut o = 0;
+        while o + 2 * pattern.len() <= end {
+            let hit = pattern.iter().enumerate().all(|(i, &(word, mask))| u16::from_be_bytes([self.data[o + 2 * i], self.data[o + 2 * i + 1]]) & mask == word);
+            if hit {
+                found.push(self.code_addr(o));
+            }
+            o += 2;
+        }
+        found
+    }
 }
 
 /// The software for one hardware variant.
@@ -293,6 +323,84 @@ pub fn parse_kwi(d: &[u8]) -> Result<Vec<Variant>, FwError> {
         out.push(Variant { name, version, modules });
     }
     Ok(out)
+}
+
+/// Where the modules of a `LOADING.KWI` container lie in it: variant,
+/// module name, offset and stored size in bytes (see [`parse_kwi`]).
+pub fn kwi_modules(d: &[u8]) -> Result<Vec<(String, String, usize, usize)>, FwError> {
+    if d.len() < 0x800 {
+        return bad("KWI file too short");
+    }
+    let n = d[0x11] as usize;
+    if n == 0 || n > 8 {
+        return bad(format!("KWI: implausible variant count {}", n));
+    }
+    let mut out = Vec::new();
+    for i in 0..n {
+        let b = 0x14 + n * 0x40 + i * 0x100;
+        let blk = &d[b..b + 0x100];
+        let name = cstr(&blk[4..12]);
+        let count = (u16::from_be_bytes([blk[0x44], blk[0x45]]) as usize).min(11);
+        let start = blk[0xf8..0xfd].iter().fold(0u64, |a, &x| (a << 8) | x as u64) as usize * 0x800;
+        for j in 0..count {
+            let e = &blk[0x48 + j * 16..0x58 + j * 16];
+            out.push((name.clone(), cstr(&e[..8]), start + be32(e, 8) as usize * 2, be32(e, 12) as usize));
+        }
+    }
+    Ok(out)
+}
+
+/// Give a module image the checksum its header should have (the sum of
+/// the big-endian long words from 0x80 to the size in the header).
+/// Returns the old and the new one.
+pub fn fix_checksum(module: &mut [u8]) -> Result<(u32, u32), FwError> {
+    let parsed = Module::parse("module", module)?;
+    let new = parsed.compute_checksum();
+    module[0x78..0x7c].copy_from_slice(&new.to_be_bytes());
+    Ok((parsed.checksum, new))
+}
+
+/// A copy of an update disc image (or of a bare `LOADING.KWI`) with some
+/// modules replaced.  `replacement(variant, module)` supplies the new
+/// image of a module, which must be as long as the one stored, with the
+/// same load address and size in its header: nothing moves, and no
+/// other part of the disc is touched.  The module's checksum is put
+/// right.  Returns the new image and, for each module that changed, its
+/// variant, name, old and new checksum.
+///
+/// The update loader has its own copies on the disc outside the
+/// container (`LDM.BIN`), which the boot ROM loads; replacing it here
+/// would leave the two different, and is refused.
+#[allow(clippy::type_complexity)]
+pub fn repack(image: &[u8], replacement: &dyn Fn(&str, &str) -> Option<Vec<u8>>) -> Result<(Vec<u8>, Vec<(String, String, u32, u32)>), FwError> {
+    let base = if image.len() > 0x8006 && &image[0x8001..0x8006] == b"CD001" {
+        let kwi = Iso::new(image)?.file("LOADING.KWI").ok_or_else(|| FwError::Format("disc image has no LOADING.KWI".into()))?;
+        kwi.as_ptr() as usize - image.as_ptr() as usize
+    } else {
+        0
+    };
+    let mut out = image.to_vec();
+    let mut changed = Vec::new();
+    for (variant, name, offset, size) in kwi_modules(&image[base..])? {
+        let Some(mut new) = replacement(&variant, &name) else { continue };
+        let old = image.get(base + offset..base + offset + size).ok_or_else(|| FwError::Format(format!("module {} of {} lies outside the file", name, variant)))?;
+        if new.len() != size {
+            return bad(format!("{} of {}: the replacement is {:#x} bytes, the module on the disc {:#x}", name, variant, new.len(), size));
+        }
+        if new[0x70..0x78] != old[0x70..0x78] {
+            return bad(format!("{} of {}: load address or size in the header differ from the disc's", name, variant));
+        }
+        let (_, sum) = fix_checksum(&mut new)?;
+        if new == old {
+            continue;
+        }
+        if name == "LDM" {
+            return bad(format!("{} of {}: the loader is on the disc a second time outside the container; not replaced", name, variant));
+        }
+        changed.push((variant, name, be32(old, 0x78), sum));
+        out[base + offset..base + offset + size].copy_from_slice(&new);
+    }
+    Ok((out, changed))
 }
 
 /// Values from the `INDEX.TXT` file that accompanies a variant on the
@@ -544,6 +652,46 @@ mod tests {
         assert_eq!(&dir[0x1c..0x20], b"0650");
         assert_eq!(dir[0x5f], 1);
         assert_eq!(&dir[0x60..0x70], b".APLV9990002\x00\x28\x00\x00");
+    }
+
+    /// Repacking with the modules as they are gives the same image;
+    /// with one changed, only that module and its checksum change.
+    #[test]
+    fn repack_replaces_a_module() {
+        let os = fake_module(b".OS ", b"V9990001", 0x0000_c100, b"operating system");
+        let apm = fake_module(b".APL", b"V9990002", 0x0028_0000, b"application");
+        let mut kwi = vec![0u8; 0x800];
+        kwi[0x11] = 1;
+        let b = 0x14 + 0x40;
+        kwi[b + 4..b + 8].copy_from_slice(b"V999");
+        kwi[b + 0x45] = 2;
+        for (j, (name, off)) in [("OSM", 0u32), ("APM", os.len() as u32)].iter().enumerate() {
+            let e = b + 0x48 + j * 16;
+            kwi[e..e + 3].copy_from_slice(name.as_bytes());
+            kwi[e + 8..e + 12].copy_from_slice(&(off / 2).to_be_bytes());
+            kwi[e + 12..e + 16].copy_from_slice(&0x800u32.to_be_bytes());
+        }
+        kwi[b + 0xfc] = 1;
+        kwi.extend_from_slice(&os);
+        kwi.extend_from_slice(&apm);
+
+        let same = repack(&kwi, &|_, name| Some(if name == "OSM" { os.clone() } else { apm.clone() })).unwrap();
+        assert_eq!(same.0, kwi);
+        assert!(same.1.is_empty());
+
+        let mut patched = apm.clone();
+        patched[0x90..0x9b].copy_from_slice(b"APPLICATION");
+        let (out, changed) = repack(&kwi, &|v, name| (v == "V999" && name == "APM").then(|| patched.clone())).unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!((changed[0].0.as_str(), changed[0].1.as_str()), ("V999", "APM"));
+        assert_ne!(changed[0].2, changed[0].3);
+        let variants = parse_kwi(&out).unwrap();
+        assert!(variants[0].modules.iter().all(|m| m.checksum_ok()));
+        assert_eq!(&variants[0].module("APM").unwrap().data[0x90..0x9b], b"APPLICATION");
+        assert_eq!(out[..0x1000], kwi[..0x1000], "header and the other module untouched");
+
+        // A replacement of another length, or a different loader, is refused.
+        assert!(repack(&kwi, &|_, _| Some(vec![0; 0x1000])).is_err());
     }
 
     #[test]

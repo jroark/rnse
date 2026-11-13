@@ -36,14 +36,20 @@ The North American 192 software (`V222`) runs like `V220`, in English:
 With a navigation DVD in the 193's drive (`--nav-disc`: an ISO image, or
 the image of an SD card prepared for the unit) the navigation software
 reads it, shows its destination menus and draws the map, which can be
-zoomed and scrolled.  There is no GPS, so the position does not move.
-`rnse ui disc.iso --variant V575 --nav-disc card.img`
+zoomed and scrolled.  `--gps LAT,LON,COURSE` gives the unit a GPS fix,
+and the map shows that place; `--drive KMH` sets the car moving (speed
+pulses, gyroscope, and the fix along its course), and the map follows.
+`rnse ui disc.iso --variant V575 --nav-disc card.img --gps 41.8781,-87.6298,270 --drive 50@60000`
+In the browser front end the 193 has a fix in San Francisco unless
+`--gps` puts it elsewhere or `--no-gps` leaves it without one.
 
 ![The 193's navigation map in the emulator](docs/nav-193.png)
 
-Audio CDs play on both units, silently (`--audio-cd 12x200`).  Not done
-yet: the power button, any sound, the GPS receiver and the SD card
-processors, the 3D half of the 192's graphics chip.
+Audio CDs play on both units, silently (`--audio-cd 12x200`). The 192's
+SD/MP3 processor stand-ins now complete their boot handshake and startup
+commands; both card slots report empty. Card images, MP3 decoding and
+audio output are still missing, as are the power button, GPS receiver
+and the 3D half of the 192's graphics chip.
 
 See [docs/hardware.md](docs/hardware.md) and
 [docs/hardware-193.md](docs/hardware-193.md) for what is known about the
@@ -121,6 +127,10 @@ full list):
     --trace-calls A:B  list the subroutines called in a time window
     --trace-coral      display lists sent to the graphics chip
     --surface ...      save an off-screen drawing surface as a PNG
+    --gps LAT,LON[,COURSE]  a GPS fix at that place, in degrees (193)
+    --drive KMH[,TURN][@MS]  the car moves, turning TURN degrees a
+                       second, from MS milliseconds on (193)
+    --car-type N       code the unit for car type N, 1-7 (193)
     --nav-disc FILE    a navigation DVD in the drive instead (an ISO image,
                        or an SD card image with the DVD in a partition
                        of type 0x96); read as needed, not loaded
@@ -131,6 +141,20 @@ full list):
     --trace-exc        every exception and interrupt
     --tp ADDR          print the registers whenever PC reaches ADDR
     --break ADDR       stop there
+
+## In a browser, without installing anything
+
+`web/` is a front end that needs no server of its own: the emulator
+compiled to WebAssembly (`src/web.rs`), a worker that runs it and a page.
+The visitor picks an image of their own update disc, and optionally of
+a navigation disc, which the page reads in place; nothing is uploaded
+and the site holds no firmware.  It is published at
+[rns-e.com](https://rns-e.com/).
+
+    web/build.sh                  # into target/web/site; needs the
+                                  # wasm32-unknown-unknown target
+    node web/smoke.mjs target/web/site/rnse.wasm disc.iso V575
+    BUCKET=... DISTRIBUTION=... web/deploy.sh
 
 ## Tests
 

@@ -8,10 +8,12 @@
   :root { color-scheme: dark; }
   body { margin: 0; background: #0c0c0d; color: #c8c8cc; font: 14px/1.4 system-ui, sans-serif; }
   main { max-width: 1100px; margin: 0 auto; padding: 16px; }
-  /* The faceplate is 1619 x 971; everything inside is placed in percent
-     of that so the whole thing scales with the window. */
-  #unit { position: relative; width: 100%; aspect-ratio: 1619 / 971; user-select: none; }
-  #screen { position: absolute; left: 8.709%; top: 19.464%; width: 65.658%; height: 56.643%; background: #000; }
+  /* The faceplate is 1620 x 971; everything inside is placed in percent
+     of that so the whole thing scales with the window.  The screen sits
+     behind the picture's transparent window (116,106 to 1238,730), one
+     pixel larger all round. */
+  #unit { position: relative; width: 100%; aspect-ratio: 1620 / 971; user-select: none; }
+  #screen { position: absolute; left: 7.099%; top: 10.814%; width: 69.444%; height: 64.573%; background: #000; }
   #plate { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
   .zone { position: absolute; cursor: pointer; border-radius: 6px; }
   .zone.round { border-radius: 50%; }
@@ -28,7 +30,7 @@
          padding: 8px 10px; margin: 0; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; }
   kbd { background: #222226; border: 1px solid #3a3a40; border-radius: 4px; padding: 0 5px; font: 12px ui-monospace, monospace; }
   #help { color: #77777e; margin-top: 8px; }
-  #flap { position: absolute; left: 8.709%; top: 19.464%; width: 65.658%; height: 56.643%; display: none;
+  #flap { position: absolute; left: 7.099%; top: 10.814%; width: 69.444%; height: 64.573%; display: none;
           align-items: center; justify-content: center; text-align: center; color: #9a9aa2; background: rgba(0, 0, 0, .78); }
   #unit.open #flap { display: flex; }
 </style>
@@ -43,6 +45,7 @@
   <div id="bar">
     <button id="ign" title="Ignition lock status on the CAN bus (key in, ignition on)">Ignition</button>
     <button id="disc" title="Put the disc image in the drive or take it out">Disc</button>
+    <button id="eject" title="The key that folds the display down; this faceplate picture does not show it">Open display</button>
     <button id="cdeject" title="The CD eject key sits behind the fold-down display">CD eject key</button>
     <button id="reset" title="Restart the firmware">Restart</button>
     <span id="status">connecting…</span>
@@ -58,18 +61,18 @@
 </main>
 <script>
 "use strict";
-const W = 1619, H = 971;
+const W = 1620, H = 971;
 // Click targets in faceplate pixels: [name, x0, y0, x1, y1] or, for the
 // knobs, [name, cx, cy, radius].
 const KEYS = [
-  ["EJECT", 112, 78, 250, 148], ["PREV", 1300, 90, 1422, 156], ["NEXT", 1438, 90, 1556, 156],
+  ["PREV", 1303, 88, 1422, 160], ["NEXT", 1438, 88, 1558, 160],
   ["SOFT_TL", 1308, 205, 1424, 332], ["SOFT_TR", 1440, 205, 1562, 332],
   ["SOFT_BL", 1308, 468, 1424, 588], ["SOFT_BR", 1440, 468, 1562, 588],
   ["RETURN", 1305, 605, 1563, 677],
   ["RADIO", 70, 833, 218, 900], ["MEDIA", 236, 833, 388, 900], ["NAME", 405, 833, 548, 900], ["TEL", 562, 833, 705, 900],
   ["NAV", 722, 833, 865, 900], ["INFO", 882, 833, 1030, 900], ["CAR", 1050, 833, 1192, 900], ["SETUP", 1210, 833, 1362, 900],
 ];
-const KNOBS = [["SELECT", "main", 1433, 400, 104], ["POWER", "volume", 1470, 787, 70]];
+const KNOBS = [["SELECT", "main", 1437, 400, 106], ["POWER", "volume", 1472, 787, 72]];
 
 const unit = document.getElementById("unit");
 const post = (q) => fetch("/input?" + q, { method: "POST" }).catch(() => {});
@@ -164,6 +167,7 @@ let st = {};
 ign.onclick = () => post("type=ignition&on=" + (st.ignition ? 0 : 1));
 disc.onclick = () => post("type=disc&in=" + (st.disc ? 0 : 1));
 document.getElementById("reset").onclick = () => post("type=reset");
+document.getElementById("eject").onclick = () => { keyEvent("EJECT", true); setTimeout(() => keyEvent("EJECT", false), 200); };
 document.getElementById("cdeject").onclick = () => { keyEvent("CD_EJECT", true); setTimeout(() => keyEvent("CD_EJECT", false), 200); };
 async function pollStatus() {
   try {

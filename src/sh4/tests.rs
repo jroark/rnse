@@ -371,3 +371,34 @@ fn delay_loop_fast_path_keeps_register_and_time_exact() {
     let done = 1_000_000 - cpu.r_bank[4] as u64;
     assert!((198..=202).contains(&done), "{} iterations in 400 cycles", done);
 }
+
+#[test]
+fn navi_can_timer_uses_its_own_registers_and_interrupt() {
+    let mut ram = Ram(vec![0; 0x10000]);
+    let mut cpu = Cpu::new();
+    cpu.io.navi = Some(Box::default());
+    cpu.io.intc.int2 = Some(Default::default());
+    // Unit 1 channel 0: 25 ticks of Pclk/4. Priority 8, shared
+    // unit-1 mask bit 2; neither the OS tick nor timestamp timer starts.
+    cpu.io.write(&mut ram, 0xff80_4004, 4, 0x1000_0000, 0, 0);
+    cpu.io.write(&mut ram, 0xff80_403c, 4, 4, 0, 0);
+    cpu.io.write(&mut ram, 0xffd8_1008, 4, 24, 0, 0);
+    cpu.io.write(&mut ram, 0xffd8_100c, 4, 24, 0, 0);
+    cpu.io.write(&mut ram, 0xffd8_1010, 2, 0x20, 0, 0);
+    cpu.io.write(&mut ram, 0xffd8_1004, 1, 1, 0, 0);
+    assert!(cpu.io.tmu[..3].iter().all(|t| !t.running));
+    assert_eq!(cpu.io.read(&mut ram, 0xffd8_0004, 1, 0, 0), 0);
+    assert_eq!(cpu.io.read(&mut ram, 0xffd8_1004, 1, 0, 0), 1);
+    let due = 25 * 4 * cpu.io.pclk_div;
+    cpu.io.run_events(&mut ram, due - 1);
+    assert_eq!(cpu.io.intc.best(), (0, 0));
+    cpu.io.run_events(&mut ram, due);
+    assert_eq!(cpu.io.intc.best(), (8, 0x480));
+    assert_eq!(cpu.io.read(&mut ram, 0xffd8_1010, 2, due, 0), 0x120);
+    cpu.io.write(&mut ram, 0xffd8_1010, 2, 0x20, due, 0);
+    assert_eq!(cpu.io.intc.best(), (0, 0));
+    cpu.io.run_events(&mut ram, 2 * due);
+    assert_eq!(cpu.io.intc.best(), (8, 0x480));
+    cpu.io.write(&mut ram, 0xff80_4038, 4, 4, 2 * due, 0);
+    assert_eq!(cpu.io.intc.best(), (0, 0));
+}
