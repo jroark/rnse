@@ -146,6 +146,8 @@ pub struct Board {
     pub log: IoLog,
     /// Accesses to hardware without a model.
     pub unmodelled: crate::iolog::Unmodelled,
+    /// Edges seen on the 192's watchdog strobe (port 3, bit 0).
+    pub watchdog_edges: u64,
     /// Some device log is on and wants the return address of each
     /// instruction (see [`Board::refresh_logging`]).
     log_pr: bool,
@@ -188,6 +190,7 @@ impl Board {
             display_pos: 1023,
             log: IoLog::new(false, 4),
             unmodelled: Default::default(),
+            watchdog_edges: 0,
             log_pr: false,
             pc: 0,
             irl: 0,
@@ -220,6 +223,16 @@ impl Board {
     }
 
     /// 16-bit register of the interrupt priority block.
+    /// Registers of the 192 whose model is simply that they hold what
+    /// is written: the companion chip's interrupt priorities, masks and
+    /// flags (which `update_irl` reads), the byte-wide ports' direction
+    /// and data registers, and the output latches.  What the port lines
+    /// are wired to is mostly unknown, but not how the registers behave
+    /// for outputs.
+    fn stored_192(addr: u32) -> bool {
+        matches!(addr, 0x07b0_0000..=0x07b0_001f | 0x1230_0000..=0x12a0_0001 | 0x12d0_0000..=0x12d0_0006) && (addr & 0xffff < 0x20)
+    }
+
     fn ipr(&self, reg: u32) -> u32 {
         let a = 0x07b0_0000 + reg;
         match self.unmapped.get(&(a >> 12)) {
@@ -432,7 +445,9 @@ impl Board {
             0x0790_0000 => return self.atapi.read(8, size, self.pc),
             _ => {}
         }
-        self.unmodelled.note(addr, false, self.pc);
+        if !Self::stored_192(addr) {
+            self.unmodelled.note(addr, false, self.pc);
+        }
         let mut v = 0u32;
         for i in 0..size {
             let a = addr + i;
@@ -502,7 +517,15 @@ impl Board {
             self.uart[((addr >> 16) & 0xf) as usize].write(addr & 0xffff, v as u16);
             return;
         }
-        self.unmodelled.note(addr, true, self.pc);
+        if !Self::stored_192(addr) {
+            self.unmodelled.note(addr, true, self.pc);
+        }
+        if addr == 0x1230_0001 && size == 1 {
+            let old = self.unmapped.get(&(addr >> 12)).map_or(0, |p| p[(addr & 0xfff) as usize]);
+            if (old ^ v as u8) & 1 != 0 {
+                self.watchdog_edges += 1;
+            }
+        }
         for i in 0..size {
             let a = addr + i;
             let b = (v >> ((size - 1 - i) * 8)) as u8;

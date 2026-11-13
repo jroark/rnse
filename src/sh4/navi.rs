@@ -105,6 +105,8 @@ pub struct Navi {
     pub radio_uart: Uart,
     /// Link to the faceplate controller.
     pub panel_scif: Scif,
+    /// The debug console's port.
+    pub debug_scif: Scif,
     /// Position of the motorised display, 0 (open) to 1023 (closed).
     pub display_pos: u16,
     /// The 2D graphics engine.
@@ -151,7 +153,7 @@ impl Navi {
         let mut atapi = Atapi::new();
         atapi.packet_irq = true;
         // A/D inputs: the display closed (4) and 25 degrees (5).
-        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() }
+        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), debug_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() }
     }
 
     /// Whether this module, rather than the SH-4 model, owns `addr`.
@@ -281,8 +283,10 @@ impl Navi {
             // Signal levels: bit 0 is the drive's DMA request.
             ATAPI_SIGNALS => self.atapi.dma_request() as u32,
             DU..=0xfff9_ffff if size == 4 => self.du32((addr - DU) & !3),
-            // Debug console status: transmitter empty, FIFO has room.
-            a if a == SCIF_DEBUG + 0x10 => 0x0060,
+            SCIF_DEBUG..=0xffe4_003f => self.debug_scif.read(addr - SCIF_DEBUG) as u32,
+            // Port blocks: direction, output and the rest hold what is
+            // written (the input register is handled above where known).
+            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.raw_read(addr, size),
             _ => {
                 self.unmodelled.note(addr, false, pc);
                 self.raw_read(addr, size)
@@ -354,7 +358,16 @@ impl Navi {
                 }
                 self.du_irq(intc);
             }
-            a if a == SCIF_DEBUG + 0x0c => self.console.push(v as u8),
+            SCIF_DEBUG..=0xffe4_003f => {
+                // The debug console.  Nothing leaves the port unless the
+                // transmitter has been switched on (SCSCR bit 5).
+                self.debug_scif.write(addr - SCIF_DEBUG, v as u16);
+                let sent = std::mem::take(&mut self.debug_scif.tx);
+                if self.debug_scif.control & 0x20 != 0 {
+                    self.console.extend_from_slice(&sent);
+                }
+            }
+            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.raw_write(addr, size, v),
             _ => {
                 self.unmodelled.note(addr, true, pc);
                 self.raw_write(addr, size, v)

@@ -58,7 +58,7 @@ The OS addresses its byte-wide ports through a table of eight (index 0-7
 
 | port (data register) | bit | direction | meaning |
 |----------------------|-----|-----------|---------|
-| 0 (0x12300001) | 0 | out | watchdog strobe, toggled periodically |
+| 0 (0x12300001) | 0 | out | watchdog strobe, toggled periodically.  The emulator resets the unit when, after the first two edges, 1.5 s pass without one (the real period is not known) |
 | 2 (0x12500001) | 4 | in  | supply voltage good.  Low for about six seconds and the OS masks all interrupts and waits for the watchdog to reset it |
 | 3 (0x12600001) | 4 | out | display motor, towards closed |
 | 3              | 3 | out | display motor, towards open |

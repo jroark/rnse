@@ -65,6 +65,9 @@ pub struct Machine {
     pub echo_console: bool,
     /// CPU cycles per display frame.
     pub frame_cycles: u64,
+    /// The 192's watchdog: strobe edges counted at the last frame and
+    /// when the count last moved.
+    watchdog_192: (u64, Option<u64>),
     next_frame: u64,
     /// Module entry points still to be called by the boot stand-in.
     boot_calls: VecDeque<(String, u32)>,
@@ -154,7 +157,22 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog_192: (0, None), next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
+    }
+
+    /// Fill RAM with arbitrary data, as it is after power-up on real
+    /// hardware (and with the last run's leftovers after a reset).  To
+    /// be called before anything is loaded.  Software that only works
+    /// when memory starts out as zeroes shows itself this way.
+    pub fn scramble_ram(&mut self) {
+        let mut x: u32 = 0x2545_f491;
+        for b in self.board.ram.chunks_mut(4) {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            let w = x.to_be_bytes();
+            b.copy_from_slice(&w[..b.len()]);
+        }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -978,6 +996,18 @@ impl Machine {
                     // unit.  (The update loader ends that way on purpose.)
                     if navi.watchdog_strobe.is_some_and(|t| self.cpu.cycles - t > watchdog_ms) {
                         navi.watchdog_strobe = None;
+                        eprintln!("[boot] the watchdog was not served: reset");
+                        self.reset_requested = true;
+                        self.cpu.fault = Some("reset requested".into());
+                        return Stop::Fault;
+                    }
+                } else {
+                    // The 192's: the same rule, on port 0's bit 0 (0x12300001).  The
+                    // real period is not known for either unit.
+                    if self.board.watchdog_edges != self.watchdog_192.0 {
+                        self.watchdog_192 = (self.board.watchdog_edges, Some(self.cpu.cycles));
+                    } else if self.board.watchdog_edges >= 2 && self.watchdog_192.1.is_some_and(|t| self.cpu.cycles - t > watchdog_ms) {
+                        self.watchdog_192.1 = None;
                         eprintln!("[boot] the watchdog was not served: reset");
                         self.reset_requested = true;
                         self.cpu.fault = Some("reset requested".into());

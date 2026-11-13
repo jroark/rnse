@@ -285,6 +285,15 @@ tick.  The loader ends an update by printing `*** WDT Reset ***` and no
 longer strobing; when it gets impatient it jumps to address 0 itself.
 The emulator resets after 1.5 s without a strobe.
 
+## Debug serial port
+
+A SCIF at 0xffe40000 with the register layout of the faceplate's
+(16-bit registers four apart: mode +0, bit rate +4, control +8, transmit
+data +0xc, status +0x10, receive data +0x14, FIFO control +0x18).  The
+loader and the OS's low-level output write characters to it after
+setting control bit 5 (transmitter enable); the emulator prints what is
+sent as the console, and nothing while the transmitter is off.
+
 ## Loader
 
 Entry and arguments as on the 192, but the loader sets its own stack
