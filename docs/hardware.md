@@ -146,6 +146,13 @@ then PACKET commands with the DMA bit set; data moves through DMAC
 channel 1 in 16-bit units from 0x07880000.  The drive is wired so that the
 first byte of each pair is the high half of the word.
 
+Registers: the ATA task file as bytes at 0x07800001 + 2n (n = 1 error
+and features ... 7 status and command), alternate status and device
+control at 0x0790000d, and the 16-bit data register at 0x07880000, the
+address the DMA controller reads from.  The loader writes the twelve
+bytes of a packet there as six words; the OS also reads the answers to
+commands other than disc reads from it, word by word.
+
 ## Serial
 
 Each channel at 0x07aN0000 has 16-bit registers:

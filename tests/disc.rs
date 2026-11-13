@@ -282,7 +282,7 @@ fn cd_audio_plays() {
 /// Build an SDK example for a unit, put it in the loader's place and
 /// start it.  None when there is no cross compiler or the disc has no
 /// software for that unit.
-fn sdk_example(image: &[u8], model: rnse::board::Model, example: &str) -> Option<(Machine, String)> {
+fn sdk_example(image: &[u8], model: rnse::board::Model, example: &str) -> Option<(Machine, String, Vec<u8>)> {
     use rnse::board::Model;
     let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
     let unit = if model == Model::Rnse192 { "192" } else { "193" };
@@ -318,7 +318,7 @@ fn sdk_example(image: &[u8], model: rnse::board::Model, example: &str) -> Option
     // As unforgiving as the emulator gets (`--strict`).
     m.busy_start();
     m.watchdog_always = true;
-    Some((m, v.name.clone()))
+    Some((m, v.name.clone(), custom))
 }
 
 #[test]
@@ -326,7 +326,7 @@ fn custom_program_runs() {
     use rnse::board::Model;
     let Some(image) = disc() else { return };
     for model in [Model::Rnse192, Model::Rnse193] {
-        let Some((mut m, name)) = sdk_example(&image, model, "hello") else { continue };
+        let Some((mut m, name, _)) = sdk_example(&image, model, "hello") else { continue };
         let ms = m.cycles_per_ms();
         assert_eq!(m.run(3_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
@@ -355,7 +355,7 @@ fn custom_program_reads_the_faceplate() {
     use rnse::board::Model;
     let Some(image) = disc() else { return };
     for model in [Model::Rnse192, Model::Rnse193] {
-        let Some((mut m, name)) = sdk_example(&image, model, "keys") else { continue };
+        let Some((mut m, name, _)) = sdk_example(&image, model, "keys") else { continue };
         let ms = m.cycles_per_ms();
         assert!(m.panel.in_reset || !m.panel.online, "{}: the controller starts in reset", name);
         assert_eq!(m.run(500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
@@ -375,6 +375,32 @@ fn custom_program_reads_the_faceplate() {
         }
         assert!(!text.contains("unexpected") && !text.contains("lost"), "{}: {:?}", name, text);
         assert_eq!(m.panel.resets, 0, "{}", name);
+    }
+}
+
+/// The SDK's drive code against the drive's model: the program waits
+/// for the disc, reads the volume descriptor, finds a file in the root
+/// directory and adds up its first megabyte.
+#[test]
+fn custom_program_reads_the_disc() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some((mut m, name, custom)) = sdk_example(&image, model, "cd") else { continue };
+        let ms = m.cycles_per_ms();
+        // The disc "changed": the drive answers the first command with
+        // a unit attention, which the program has to get past.
+        m.atapi().insert(Some(custom.clone()));
+        assert_eq!(m.run(4_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        // What the program should have found, from the image itself.
+        let iso = fw::Iso::new(&custom).unwrap();
+        let entry = iso.find("LOADING.KWI").expect("LOADING.KWI on the disc");
+        let start = entry.lba as usize * 2048;
+        let sum = custom[start..start + (entry.len as usize).min(0x100000)].iter().fold(0u32, |a, b| a.wrapping_add(*b as u32));
+        assert!(text.contains(&format!("file at sector {}, {} bytes\r\n", entry.lba, entry.len)), "{}: {:?}", name, text);
+        assert!(text.contains(&format!("sum {:08x}\r\n", sum)), "{}: sum {:08x} in {:?}", name, sum, text);
+        assert!(!text.contains("unexpected"), "{}: {:?}", name, text);
     }
 }
 
