@@ -104,8 +104,9 @@ pub struct Cpu {
     /// Instructions executed (also the emulated time base).
     pub cycles: u64,
     pub sleeping: bool,
-    /// Something the run loop has to look at happened: sleep, a fault
-    /// or a hypercall.  Lets it test one flag per instruction.
+    /// Something the run loop has to look at happened: sleep, a fault,
+    /// a hypercall, or anything that bears on interrupts (see
+    /// [`Cpu::run`]).  Lets it test one flag per instruction.
     pub(super) attention: bool,
     pub(super) in_delay: bool,
     /// Set while executing the delay slot of RTE (accesses are privileged).
@@ -245,6 +246,7 @@ impl Cpu {
             self.mmu.flush_soft();
         }
         self.fetch_page = 1;
+        self.attention = true;
         self.sr = val;
     }
 
@@ -385,6 +387,9 @@ impl Cpu {
     }
 
     fn p4_read<B: Bus>(&mut self, bus: &mut B, addr: u32, size: u32) -> Result<u32, Exc> {
+        // Reads of on-chip registers can change interrupt requests too
+        // (a status read that clears a flag).
+        self.attention = true;
         if self.sr & SR_MD == 0 && !self.rte_slot {
             return Err(Exc::mem(ExcKind::AddrErrRead, addr));
         }
@@ -403,6 +408,7 @@ impl Cpu {
 
     fn p4_write<B: Bus>(&mut self, bus: &mut B, addr: u32, size: u32, v: u32) -> Result<(), Exc> {
         self.fetch_page = 1;
+        self.attention = true;
         if addr < 0xe400_0000 {
             if self.sr & SR_MD == 0 && self.mmu.sqmd() {
                 return Err(Exc::mem(ExcKind::AddrErrWrite, addr));
@@ -518,9 +524,9 @@ impl Cpu {
 
     // ---- execution ------------------------------------------------------
 
-    /// Execute one instruction (or accept one interrupt).
+    /// Accept a pending interrupt if the CPU is open to one.
     #[inline(always)]
-    pub fn step<B: Bus>(&mut self, bus: &mut B) {
+    fn accept_pending(&mut self) {
         // Interrupts are held off by SR.BL, except that they still end
         // sleep mode.
         if self.io.intc.level > self.imask() && (self.sr & SR_BL == 0 || self.sleeping) {
@@ -535,9 +541,11 @@ impl Cpu {
             self.pc = self.vbr.wrapping_add(0x600);
             self.sleeping = false;
         }
-        if self.sleeping {
-            return;
-        }
+    }
+
+    /// Fetch and execute the instruction at PC.
+    #[inline(always)]
+    fn exec_one<B: Bus>(&mut self, bus: &mut B) {
         let pc = self.pc;
         self.insn_pc = pc;
         self.pc_hist[self.pc_hist_pos & 255] = pc;
@@ -552,6 +560,15 @@ impl Cpu {
             }
             Err(e) => self.raise(e),
         }
+    }
+
+    /// Execute one instruction (or accept one interrupt).
+    pub fn step<B: Bus>(&mut self, bus: &mut B) {
+        self.accept_pending();
+        if self.sleeping {
+            return;
+        }
+        self.exec_one(bus);
     }
 
     /// Run for up to `budget` cycles.  Peripheral time advances with the
@@ -571,10 +588,12 @@ impl Cpu {
         while self.cycles < end {
             if self.cycles >= self.io.next_event {
                 self.io.run_events(bus, self.cycles);
+                self.attention = true;
             }
             let irl = bus.irl();
             if irl != self.io.intc.irl {
                 self.io.intc.set_irl(irl);
+                self.attention = true;
             }
             if self.sleeping && self.io.intc.level <= self.imask() && !self.io.intc.nmi_pending {
                 // Idle: skip ahead to the next peripheral event.
@@ -583,13 +602,29 @@ impl Cpu {
                 continue;
             }
             while self.cycles < end && self.cycles < self.io.next_event {
-                self.step(bus);
+                // Interrupts are looked at only when something that
+                // bears on them has happened: SR written, an on-chip
+                // register accessed, a timed event, the IRL pins moved.
+                // All of those raise `attention`.
+                if self.attention {
+                    self.attention = false;
+                    self.accept_pending();
+                    if self.sleeping {
+                        self.attention = true;
+                        self.cycles += 1;
+                        break;
+                    }
+                }
+                self.exec_one(bus);
                 self.cycles += 1;
                 let irl = bus.irl();
                 if irl != self.io.intc.irl {
                     self.io.intc.set_irl(irl);
+                    self.attention = true;
                 }
                 if self.attention {
+                    // Left set: the next instruction starts with the
+                    // interrupt check.
                     if self.sleeping {
                         break;
                     }
@@ -599,7 +634,6 @@ impl Cpu {
                     if self.hypercall.is_some() {
                         return Stop::Hypercall;
                     }
-                    self.attention = false;
                 }
                 if bp_filter[(self.pc >> 1) as usize & 4095] && self.breakpoints.contains(&self.pc) {
                     return Stop::Breakpoint;
