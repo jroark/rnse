@@ -389,7 +389,12 @@ impl Board {
                 return v;
             }
             0x07c0_0000 => return self.can.read(addr & 0xf_ffff, size, self.pc),
-            0x0780_0000 if addr & 0x8_0000 != 0 => return self.atapi.dma_read(size),
+            // The data register's second address: the DMA controller
+            // reads disc data here, and the OS's driver takes the answers
+            // to other commands from it word by word.
+            0x0780_0000 if addr & 0x8_0000 != 0 => {
+                return if self.atapi.dma_request() { self.atapi.dma_read(size) } else { self.atapi.read(0, size, self.pc) };
+            }
             0x0780_0000 => return self.atapi.read((addr & 0x1f) >> 1, size, self.pc),
             0x0790_0000 => return self.atapi.read(8, size, self.pc),
             _ => {}

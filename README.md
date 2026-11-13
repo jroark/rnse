@@ -33,8 +33,9 @@ which is built around an SH7770-family system-on-chip:
 The North American 192 software (`V222`) runs like `V220`, in English:
 `rnse ui disc.iso --variant V222`.
 
-Not done yet: the power button, opening the display, CD playback, the
-GPS and SD card processors, sound, the 3D half of the graphics chip.
+Audio CDs play on both units, silently (`--audio-cd 12x200`).  Not done
+yet: the power button, any sound, the GPS receiver and the SD card
+processors, the 3D half of the 192's graphics chip.
 
 See [docs/hardware.md](docs/hardware.md) and
 [docs/hardware-193.md](docs/hardware-193.md) for what is known about the

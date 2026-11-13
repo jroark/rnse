@@ -250,9 +250,14 @@ state is known to the OS, which is not the case in the emulator yet.
 
 ## Open ends
 
-* The OS's view of the CD drive stays "unknown" (its 11-byte status
-  block at 0x8c0e9088 is never filled in), so the display-open key is
-  refused and a disc in the drive shows as "CD leer".
+* The CD drive is answered for data and audio discs.  The OS's driver
+  takes the answers to packet commands from the data register's second
+  address, 0x07880000, word by word (the loader reads 0x07800000); disc
+  data goes through the DMA controller from the same address.  Audio
+  discs are played by the drive: READ TOC format 2, PLAY CD (0xbc) and
+  READ SUB-CHANNEL, as on the 193.  No sound comes out.  The display-
+  open key works (the display's position follows the motor outputs) and
+  shows the drive and the two card slots.
 * `SDCARD DSP0/1 BOOT ERROR`: the SD card processors are missing (see
   "SD card processors").
 * The radio processor stand-in knows one command (see above); there is
