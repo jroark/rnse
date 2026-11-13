@@ -42,7 +42,7 @@ impl Cpu {
         self.in_delay = true;
         let op = self.fetch(bus, slot_pc)?;
         self.pc = slot_pc.wrapping_add(2);
-        self.exec(bus, op)?;
+        self.exec_slot(bus, op)?;
         self.in_delay = false;
         self.pc = target;
         self.cycles += 1;
@@ -84,6 +84,18 @@ impl Cpu {
         }
     }
 
+    /// The instruction of a delay slot: a call of its own, since the
+    /// executor is otherwise inlined into the run loop and a branch
+    /// executes its slot from inside it.
+    #[inline(never)]
+    fn exec_slot<B: Bus>(&mut self, bus: &mut B, op: u16) -> R {
+        self.exec(bus, op)
+    }
+
+    /// Execute one instruction.  Inlined into its two callers, the run
+    /// loop and [`Self::exec_slot`]: a call per instruction, with this
+    /// function's large frame, cost more than most instructions do.
+    #[inline(always)]
     pub(super) fn exec<B: Bus>(&mut self, bus: &mut B, op: u16) -> R {
         let n = ((op >> 8) & 0xf) as usize;
         let m = ((op >> 4) & 0xf) as usize;
@@ -163,6 +175,7 @@ impl Cpu {
                     3 => {
                         self.need_priv()?;
                         self.mmu.ldtlb();
+                        self.fetch_page = 1;
                     }
                     4 => self.sr &= !SR_S,
                     5 => self.sr |= SR_S,
@@ -213,6 +226,7 @@ impl Cpu {
                         // SLEEP
                         self.need_priv()?;
                         self.sleeping = true;
+                        self.attention = true;
                     }
                     2 => {
                         // RTE
@@ -221,9 +235,11 @@ impl Cpu {
                         let target = self.spc;
                         let ssr = self.ssr;
                         self.set_sr(ssr);
+                        self.fetch_page = 1;
                         self.rte_slot = true;
                         let r = self.delay(bus, target);
                         self.rte_slot = false;
+                        self.fetch_page = 1;
                         r?;
                     }
                     _ => return Err(self.illegal()),

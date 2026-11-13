@@ -144,6 +144,9 @@ pub struct Board {
     /// card slots accessible) to 1023 (closed).
     pub display_pos: u16,
     pub log: IoLog,
+    /// Some device log is on and wants the return address of each
+    /// instruction (see [`Board::refresh_logging`]).
+    log_pr: bool,
     pub pc: u32,
     pub irl: u8,
 }
@@ -182,6 +185,7 @@ impl Board {
             adc: Adc::with_inputs([0, 0, 0, 1023, 0, 0, 0, 0]),
             display_pos: 1023,
             log: IoLog::new(false, 4),
+            log_pr: false,
             pc: 0,
             irl: 0,
         }
@@ -660,14 +664,24 @@ impl Bus for Board {
     #[inline(always)]
     fn set_pc(&mut self, pc: u32, pr: u32) {
         self.pc = pc;
-        self.log.pr = pr;
-        self.coral.log.pr = pr;
-        self.atapi.log.pr = pr;
-        self.can.log.pr = pr;
+        if self.log_pr {
+            self.log.pr = pr;
+            self.coral.log.pr = pr;
+            self.atapi.log.pr = pr;
+            self.can.log.pr = pr;
+        }
     }
 
     #[inline(always)]
     fn irl(&self) -> u8 {
         self.irl
+    }
+}
+
+impl Board {
+    /// Note whether any device log is switched on; called before the CPU
+    /// runs, so that the logs' fields can be set directly.
+    pub fn refresh_logging(&mut self) {
+        self.log_pr = self.log.enabled || self.coral.log.enabled || self.atapi.log.enabled || self.can.log.enabled;
     }
 }

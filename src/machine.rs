@@ -139,11 +139,22 @@ impl Machine {
 
     pub fn for_model(model: crate::board::Model) -> Self {
         let mut cpu = Cpu::new();
+        // One instruction is counted as one CPU clock cycle.  The CPU
+        // clocks are those of the parts: 8 x 29.4 MHz = 235 MHz for the
+        // 192's SH7750R (a 240 MHz part), 16 x 25 MHz = 400 MHz for the
+        // 193's SH-4A (a 400 MHz part).  The firmware's calibrated delay
+        // loops agree in proportion: the 193's does 1056 instructions
+        // where the 192's does 304.
+        cpu.io.pclk_div = 8;
         if model == crate::board::Model::Rnse193 {
             cpu.io.navi = Some(Box::default());
             cpu.io.intc.int2 = Some(Default::default());
+            cpu.io.pclk_div = 16;
         }
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
+        // A display frame every 60th of a second.
+        let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
+        let frame = per_ms * 1000 / 60;
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -892,6 +903,7 @@ impl Machine {
     /// Run for `cycles` CPU cycles, forwarding serial output.
     pub fn run(&mut self, cycles: u64) -> Stop {
         let mut left = cycles;
+        self.board.refresh_logging();
         loop {
             let slice = left.min(20_000);
             let stop = self.cpu.run(&mut self.board, slice);

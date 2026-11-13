@@ -121,7 +121,7 @@ fn loader_installs_the_firmware() {
     m.install_boot_stub(&v.name);
     m.atapi().load(image.clone());
     m.start_loader(ldm, [0; 3]);
-    let stop = m.run(8_000_000_000);
+    let stop = m.run(120_000 * m.cycles_per_ms());
     assert_eq!(stop, Stop::Fault, "the loader ends by jumping to the reset entry");
     assert!(m.reset_requested);
     let text = String::from_utf8_lossy(&m.console);
@@ -158,7 +158,7 @@ fn loader_installs_the_firmware_193() {
         m.atapi().load(image.clone());
         m.start_loader(ldm, [0; 3]);
         m.hook_printf(Machine::known_printf(&ldm.version).expect("printf address of this loader"));
-        let stop = m.run(8_000_000_000);
+        let stop = m.run(120_000 * m.cycles_per_ms());
         assert_eq!(stop, Stop::Fault, "{}: the loader ends with a watchdog reset", v.name);
         assert!(m.reset_requested, "{}: {:?}", v.name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console);
@@ -194,7 +194,7 @@ fn os_runs_193() {
         m.install(v, &index);
         m.atapi().load(image.clone());
         m.start_os(v).unwrap();
-        let stop = m.run(1_000_000_000);
+        let stop = m.run(10_000 * m.cycles_per_ms());
         assert_eq!(stop, Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
         assert!(m.cpu.irq_counts[0x400 >> 5] > 1000, "{}: system tick is not running", v.name);
     }
@@ -288,7 +288,7 @@ fn os_reaches_idle() {
     m.install(v, &index);
     m.atapi().load(image.clone());
     m.start_os(v).unwrap();
-    let stop = m.run(400_000_000);
+    let stop = m.run(3_400 * m.cycles_per_ms());
     assert_eq!(stop, Stop::Budget, "{:?}", m.cpu.fault);
     assert!(m.cpu.irq_counts[0x400 >> 5] > 100, "system tick is not running");
 }

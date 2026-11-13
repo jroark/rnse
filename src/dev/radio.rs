@@ -15,8 +15,16 @@
 //! check   one's complement of the sum of all preceding bytes
 //! ```
 //!
-//! The main unit repeats a command five times, 600 ms apart, when it gets
-//! no answer.
+//! The main unit knows two kinds of command.  A request is answered by a
+//! frame with the same command number carrying the data asked for.  A
+//! setting is answered by an acknowledgement: command 0x20 with one
+//! status byte, zero for "done".  The main unit sends one command at a
+//! time and repeats it five times, 600 ms apart, while the answer it
+//! expects does not come; everything else queued for the radio waits
+//! behind it.
+
+/// Command number of the radio's acknowledgement of a setting.
+pub const ACK: u8 = 0x20;
 
 /// A decoded frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -138,8 +146,12 @@ impl Radio {
                 id[..8].copy_from_slice(&self.version);
                 vec![Frame::new(0x0b, &id)]
             }
-            // Everything else: acknowledge with an empty frame of the
-            // same command.  This is a guess that keeps the link quiet.
+            // Settings the main software has been seen to send:
+            // acknowledged.
+            0x17 | 0x19 | 0x80 | 0x81 => vec![Frame::new(ACK, &[0])],
+            // Everything else is taken for a request and answered with
+            // an empty frame of the same command, which satisfies the
+            // ones seen so far (0x88, 0x8a, 0xd0, 0xd1, 0xd9, 0xdd, 0xde).
             _ => vec![Frame::new(f.cmd, &[])],
         }
     }
@@ -163,6 +175,15 @@ mod tests {
         // A bad checksum drops the frame.
         let mut p = Parser::new(0x01);
         assert!([0x01, 0x0b, 0x00, 0x00, 0xf4].iter().all(|b| p.push(*b).is_none()));
+    }
+
+    #[test]
+    fn settings_are_acknowledged() {
+        let mut r = Radio::new();
+        let reply = r.from_unit(&Frame::new(0x81, &[0x0d, 0x04, 0x05, 0xa0]).encode(0x01));
+        assert_eq!(reply, [0x00, 0x20, 0x00, 0x01, 0x00, 0xde]);
+        let reply = r.from_unit(&Frame::new(0xd1, &[]).encode(0x01));
+        assert_eq!(reply, Frame::new(0xd1, &[]).encode(0x00));
     }
 
     #[test]

@@ -104,9 +104,19 @@ pub struct Cpu {
     /// Instructions executed (also the emulated time base).
     pub cycles: u64,
     pub sleeping: bool,
+    /// Something the run loop has to look at happened: sleep, a fault
+    /// or a hypercall.  Lets it test one flag per instruction.
+    pub(super) attention: bool,
     pub(super) in_delay: bool,
     /// Set while executing the delay slot of RTE (accesses are privileged).
     pub(super) rte_slot: bool,
+    /// The page instructions were last fetched from: its virtual
+    /// address and the physical address it translates to.  Saves the
+    /// translation for every fetch but the first in a page; 1 (no page
+    /// address) when nothing is cached.  Dropped whenever the
+    /// translation could change: SR, the MMU registers, an RTE's slot.
+    pub(super) fetch_page: u32,
+    fetch_phys: u32,
     pub(super) insn_pc: u32,
 
     pub fault: Option<String>,
@@ -166,8 +176,11 @@ impl Cpu {
             io: OnChip::new(),
             cycles: 0,
             sleeping: false,
+            attention: true,
             in_delay: false,
             rte_slot: false,
+            fetch_page: 1,
+            fetch_phys: 0,
             insn_pc: 0,
             fault: None,
             breakpoints: Vec::new(),
@@ -187,6 +200,7 @@ impl Cpu {
     /// Power-on reset state.
     pub fn reset(&mut self) {
         self.sr = SR_MD | SR_RB | SR_BL | (0xf << SR_IMASK_SHIFT);
+        self.fetch_page = 1;
         self.vbr = 0;
         self.pc = 0xa000_0000;
         self.fpscr = 0x0004_0001;
@@ -230,6 +244,7 @@ impl Cpu {
         if (val ^ self.sr) & SR_MD != 0 {
             self.mmu.flush_soft();
         }
+        self.fetch_page = 1;
         self.sr = val;
     }
 
@@ -356,10 +371,16 @@ impl Cpu {
 
     #[inline(always)]
     pub(super) fn fetch<B: Bus>(&mut self, bus: &mut B, addr: u32) -> Result<u16, Exc> {
+        // Same page as the last fetch (an odd address never matches).
+        if addr & 0xffff_f001 == self.fetch_page {
+            return Ok(bus.read16(self.fetch_phys | (addr & 0xffe)));
+        }
         if addr & 1 != 0 || addr >= 0xe000_0000 {
             return Err(Exc::mem(ExcKind::AddrErrRead, addr));
         }
         let pa = self.translate(addr, Access::Exec)?;
+        self.fetch_page = addr & 0xffff_f000;
+        self.fetch_phys = pa & 0xffff_f000;
         Ok(bus.read16(pa))
     }
 
@@ -381,6 +402,7 @@ impl Cpu {
     }
 
     fn p4_write<B: Bus>(&mut self, bus: &mut B, addr: u32, size: u32, v: u32) -> Result<(), Exc> {
+        self.fetch_page = 1;
         if addr < 0xe400_0000 {
             if self.sr & SR_MD == 0 && self.mmu.sqmd() {
                 return Err(Exc::mem(ExcKind::AddrErrWrite, addr));
@@ -444,6 +466,7 @@ impl Cpu {
                 "exception {:?} (addr {:08x}) at pc {:08x} while SR.BL=1",
                 e.kind, e.addr, self.insn_pc
             ));
+            self.attention = true;
             return;
         }
         let mut spc = self.insn_pc;
@@ -496,7 +519,7 @@ impl Cpu {
     // ---- execution ------------------------------------------------------
 
     /// Execute one instruction (or accept one interrupt).
-    #[inline]
+    #[inline(always)]
     pub fn step<B: Bus>(&mut self, bus: &mut B) {
         // Interrupts are held off by SR.BL, except that they still end
         // sleep mode.
@@ -536,7 +559,15 @@ impl Cpu {
     pub fn run<B: Bus>(&mut self, bus: &mut B, budget: u64) -> Stop {
         let end = self.cycles + budget;
         self.run_end = end;
-        let check_bp = !self.breakpoints.is_empty();
+        // Breakpoints (the firmware's log hooks are some) are looked up
+        // through a small filter: one bit test per instruction instead
+        // of a search of the list.
+        let mut bp_filter = [false; 4096];
+        for bp in &self.breakpoints {
+            bp_filter[(bp >> 1) as usize & 4095] = true;
+        }
+        // Whatever was set from outside since the last call.
+        self.attention = true;
         while self.cycles < end {
             if self.cycles >= self.io.next_event {
                 self.io.run_events(bus, self.cycles);
@@ -558,16 +589,19 @@ impl Cpu {
                 if irl != self.io.intc.irl {
                     self.io.intc.set_irl(irl);
                 }
-                if self.sleeping {
-                    break;
+                if self.attention {
+                    if self.sleeping {
+                        break;
+                    }
+                    if self.fault.is_some() {
+                        return Stop::Fault;
+                    }
+                    if self.hypercall.is_some() {
+                        return Stop::Hypercall;
+                    }
+                    self.attention = false;
                 }
-                if self.fault.is_some() {
-                    return Stop::Fault;
-                }
-                if self.hypercall.is_some() {
-                    return Stop::Hypercall;
-                }
-                if check_bp && self.breakpoints.contains(&self.pc) {
+                if bp_filter[(self.pc >> 1) as usize & 4095] && self.breakpoints.contains(&self.pc) {
                     return Stop::Breakpoint;
                 }
             }

@@ -13,6 +13,11 @@ SH7751R but not on the original SH7750.
 
 * Peripheral clock about 29.4 MHz: the OS loads TMU0 with 14699 at Pclk/4
   for a 2 ms tick, the loader 73499 for 10 ms.
+* CPU clock: taken as eight times that, 235 MHz (the SH7750R is a
+  240 MHz part), and the emulator counts one instruction per cycle.
+  That is an estimate of the real speed, not a measurement.  The OS's
+  calibrated delay routine (0x800ab794 in V2200815) runs 304
+  instructions per unit of its argument.
 * FPSCR is 0x00040001 in every task: round to zero, denormals as zero.
 * The MMU is not enabled by anything run so far.
 
@@ -172,10 +177,15 @@ repeats an unanswered frame five times, 600 ms apart.  Command 0x0B
 asks for the version; the answer carries 16 bytes of which the first
 eight are the version text (`A2210141` for this disc).
 
-The emulator's stand-in answers 0x0B and acknowledges everything else
-with an empty frame of the same command, which is a guess: the proper
-replies to 0x80, 0x81, 0x17 and 0x19 are not known and the unit keeps
-retrying them.  The firmware also contains a second, FT1.2-style parser
+The unit sends one command at a time and knows two kinds.  A request
+(0x0B, 0x88, 0x8A, 0xD0, 0xD1, 0xD9, 0xDD, 0xDE) is answered by a frame
+with the same command number.  A setting (0x80, 0x81, 0x17, 0x19) is
+answered by an acknowledgement: command 0x20 with one status byte, zero
+for "done"; the unit ignores an acknowledgement with another status and
+goes on waiting.  The emulator's stand-in answers accordingly, with
+empty data for the requests other than 0x0B.  Answering the settings
+with an echo instead, as it first did, made the unit repeat each of
+them five times and stretched the start-up by most of a minute.  The firmware also contains a second, FT1.2-style parser
 (`68 L L 68 ... CS 16`) for this processor's boot loader.
 
 ### Faceplate (channel 3)

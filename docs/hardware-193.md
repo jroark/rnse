@@ -319,7 +319,12 @@ the debug log), with two differences in how they are started:
 As on the 192, the OS starts timer 0 for its 2 ms tick without giving it
 a priority; the boot ROM has done that (the loader's value is level 7,
 with the timers' mask bit cleared).  The peripheral clock is 25 MHz,
-going by the tick's reload value.
+going by the tick's reload value.  The CPU clock is taken as sixteen
+times that, 400 MHz, the rated speed of this family, and the emulator
+counts one instruction per cycle; this is an estimate.  The firmware's
+calibrated delay routine (0x804dd960 in V5741040) runs 1056 instructions
+per unit of its argument where the 192's runs 304, which fits a CPU
+about three and a half times as fast.
 
 In the emulator the OS starts all its tasks, checks its flash file
 system, sees the ignition, talks to the radio processor and the

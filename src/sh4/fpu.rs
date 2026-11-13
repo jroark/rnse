@@ -305,6 +305,7 @@ impl Cpu {
         let m = ((op >> 4) & 0xf) as usize;
         if op == 0xfffd && self.hypercalls_enabled {
             self.hypercall = Some(self.insn_pc);
+            self.attention = true;
             return Ok(());
         }
         self.fpu_check()?;
