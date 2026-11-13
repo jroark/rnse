@@ -302,6 +302,8 @@ impl Machine {
     pub fn known_app_printf(apm_version: &str) -> Option<u32> {
         match apm_version {
             "V57510AA" => Some(0x021a_2b16),
+            // The 192's European application.
+            "V2200815" => Some(0x0071_9898),
             _ => None,
         }
     }
@@ -985,6 +987,37 @@ impl Machine {
                 }
                 9
             }
+            // The DMA controller, for the 192's drive: master enable,
+            // a channel's addresses and count, its control register.
+            // The update loader has the same routines as plain
+            // subroutines (at 0x8df928b8, 0x8df92838 and 0x8df92850 in
+            // V220's), and the OS passes these services what the loader
+            // passes those.
+            (0x3d, 0x0201) => {
+                let now = self.cpu.cycles;
+                let dmaor = self.cpu.io.read(&mut self.board, 0xffa0_0040, 4, now, caller);
+                self.cpu.io.write(&mut self.board, 0xffa0_0040, 4, (dmaor & 0xc000) | 1, now, caller);
+                (dmaor & 0xc000) | 1
+            }
+            (0x3d, 0x0202) => {
+                let now = self.cpu.cycles;
+                let base = 0xffa0_0000 + (regs[4] & 7) * 16;
+                self.cpu.io.write(&mut self.board, base + 4, 4, regs[5], now, caller); // destination
+                self.cpu.io.write(&mut self.board, base, 4, regs[6], now, caller); // source
+                self.cpu.io.write(&mut self.board, base + 8, 4, regs[7], now, caller); // count
+                regs[4] & 7
+            }
+            (0x3d, 0x0203) => {
+                let now = self.cpu.cycles;
+                let chcr = 0xffa0_000c + (regs[4] & 7) * 16;
+                self.cpu.io.read(&mut self.board, chcr, 4, now, caller);
+                self.cpu.io.write(&mut self.board, chcr, 4, regs[5], now, caller);
+                self.cpu.io.read(&mut self.board, chcr, 4, now, caller)
+            }
+            (0x3d, 0x0204) => {
+                let now = self.cpu.cycles;
+                self.cpu.io.read(&mut self.board, 0xffa0_000c + (regs[4] & 7) * 16, 4, now, caller)
+            }
             _ => 0,
         };
         if self.trace_bios && shown {
@@ -997,7 +1030,6 @@ impl Machine {
         self.cpu.bank0()[0] = ret;
     }
 
-    /// Write a big-endian word to RAM through a P0/P1/P2 address.
     /// Write a byte of RAM; false when the address is not RAM.
     pub fn poke8(&mut self, addr: u32, v: u8) -> bool {
         let o = (addr & 0x1fff_ffff).wrapping_sub(self.board.ram_base) as usize;
@@ -1011,6 +1043,7 @@ impl Machine {
         }
     }
 
+    /// Write a big-endian word to RAM through a P0/P1/P2 address.
     pub fn poke32(&mut self, addr: u32, v: u32) {
         let o = (addr & 0x1fff_ffff).wrapping_sub(self.board.ram_base) as usize;
         if o + 4 <= self.board.ram.len() {
@@ -1187,7 +1220,9 @@ impl Machine {
         } else if (pa as usize) < self.board.flash.len() {
             Some(self.board.flash[pa as usize])
         } else {
-            None
+            // Battery-backed memory.
+            let n = pa.wrapping_sub(self.board.model.nvram_base()) as usize;
+            self.board.nvram.get(n).copied()
         }
     }
 

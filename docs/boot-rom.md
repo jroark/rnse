@@ -14,11 +14,50 @@ software expects of it.  This file records that evidence.
 
 ## Starting the loader
 
-The boot ROM copies `LDM.BIN` to its load address (0x8df00000) and calls
-entry point 1 with three byte arguments in r4-r6.  r4 is an index 0..8
-selecting the language of the loader's screens (the loader prints it as
-`SET Lang_data`); r5 and r6 are stored but their use is unknown.  The
-loader sets up its own stack, vectors and SR.
+In normal use it is not the boot ROM that starts the update loader but
+the installed navigation application.  Its disc task finds a program
+disc in the drive (`DISCTYPE:CDISC_PRG` in its log), compares the
+disc's software index with the installed one and, for an update:
+
+1. checks the project code of the software set in `LOADING.KWI` against
+   its own (`プロジェクトコード一致`, "project code matches");
+2. adds up every module of the set on the disc and compares with the
+   sums in the container (`チェックサムチェック`);
+3. finds the module `LDM` in the container, reads it into a buffer,
+   copies it to the load address in its header and flushes the cache;
+4. writes a zero byte and its complement to the first two bytes of the
+   battery-backed memory (0xb0000000);
+5. calls the loader's first entry point with the screen language in r4
+   (an index 0..8; the loader prints it as `SET Lang_data`) and 1 in r5
+   and r6, and after it the third.
+
+The comparison of the indexes is of their second and third characters
+only, as text, after checking that the first characters are equal and
+one of `0`, `X` and `Y`: installed `0650` takes a disc with `0660` for
+an update, and neither `0651` nor `0640`.  When it is no update the log
+has `ON ROM IDX = ...` and `ON DISC IDX = ...` instead of `IDX
+VersionUP`.
+
+What the loader's first entry point finds (V220, stopped there in the
+emulator): privileged mode, SR = 0x40000100, that is interrupts *open*,
+with the operating system's vector base, tick and other interrupt
+sources as they were a moment before; a return address in the
+application; the application task's stack.  Flash is byte for byte as an
+ordinary start leaves it at that time: nothing about the update is
+recorded there before the loader runs, and the two bytes of
+battery-backed memory are the same after a complete stock update as
+after step 4.  The stock loader sets up its own stack, vectors and SR.
+
+The 193's application does the same (`DVC:dvc_exeverup` in both), and
+so does the North American software of both units.  `rnse boot
+<disc> --installed-index NNNN` runs the whole of it: the installed
+software then reports that index, and a disc with a higher one is
+updated from, by the stock application and the stock loader.
+
+Whether the boot ROM can also start a loader from a disc by itself, as
+it would have to after an update that was cut short, is not known.
+`rnse loader` starts one directly, with interrupts masked and zeroes in
+r4-r6 unless told otherwise (`--args`).
 
 ## Starting the OS
 
@@ -89,7 +128,20 @@ r0.  Function codes seen in the modules:
 | 0x3e | 01-0a, 12, 13 |
 | 0x3f | 03 04 06 |
 
-Understood so far (all trap 0x3e):
+Understood so far, trap 0x3d:
+
+| fn | arguments | meaning | evidence |
+|----|-----------|---------|----------|
+| 0201 | - | DMA master enable: DMAOR = (DMAOR & 0xc000) \| 1 | The 192's OS calls 0201, 0202, 0203 in this order before every disc read, with the arguments the update loader passes to three plain subroutines of its own (0x8df928b8, 0x8df92838, 0x8df92850 in V220's) that do these things; the loader shares its hardware layer with the boot ROM. |
+| 0202 | channel, destination, source, count | sets a DMA channel's DAR, SAR and DMATCR | For the drive: channel 1, the buffer, 0xa7880000, words. |
+| 0203 | channel, value | writes the channel's CHCR and returns it read back | The drive's is 0x00094021. |
+| 0204 | channel | returns the channel's CHCR | By the place in the loader's code; the OS has the call but does not use it. |
+
+Without these the 192's installed software could send the drive its
+commands but never got any disc data: every read of a data disc timed
+out (`$CD$ disc_read(Error3)`).
+
+Trap 0x3e:
 
 | fn | arguments | meaning | evidence |
 |----|-----------|---------|----------|

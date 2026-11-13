@@ -153,6 +153,12 @@ address the DMA controller reads from.  The loader writes the twelve
 bytes of a packet there as six words; the OS also reads the answers to
 commands other than disc reads from it, word by word.
 
+The OS does not program the DMA controller itself: before a disc read
+it calls three boot ROM services (trap 0x3d, 0201 to 0203, see
+`boot-rom.md`) that enable the controller, set channel 1's addresses
+and count and write its control register, then raises bit 0 of the
+latch at 0x12d00001 and sends the command.
+
 ## Serial
 
 Each channel at 0x07aN0000 has 16-bit registers:

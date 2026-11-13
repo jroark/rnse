@@ -459,6 +459,35 @@ pub fn custom_loader(image: &[u8], variant: &str, payload: &[u8]) -> Result<(Vec
     Ok((out, places))
 }
 
+/// Give a variant's software on the disc another software index: the
+/// four digits after `SOFIDX:` in its index file.  The installed
+/// application takes a program disc for an update only when this number
+/// is greater than the one it has in flash (it logs `ON ROM IDX`, `ON
+/// DISC IDX` and, for an update, `IDX VersionUP`).  Returns the old
+/// index.
+pub fn set_disc_index(image: &mut [u8], variant: &str, index: &str) -> Result<String, FwError> {
+    if index.len() != 4 || !index.bytes().all(|b| b.is_ascii_digit()) {
+        return bad("a software index is four digits");
+    }
+    let named = format!("{}INDEX.TXT", &variant[1..]);
+    let entry = {
+        let iso = Iso::new(image)?;
+        match iso.find(&named).or_else(|| iso.find("INDEX.TXT")) {
+            Some(e) if !e.is_dir => e,
+            _ => return bad("the disc has no index file for this variant"),
+        }
+    };
+    let start = entry.lba as usize * 2048;
+    let text = &mut image[start..start + entry.len as usize];
+    let Some(at) = text.windows(7).position(|w| w == b"SOFIDX:") else { return bad("the index file has no SOFIDX line") };
+    if at + 11 > text.len() {
+        return bad("the index file's SOFIDX line is cut short");
+    }
+    let old = String::from_utf8_lossy(&text[at + 7..at + 11]).into_owned();
+    text[at + 7..at + 11].copy_from_slice(index.as_bytes());
+    Ok(old)
+}
+
 /// Values from the `INDEX.TXT` file that accompanies a variant on the
 /// disc (`KEY:value$` lines).
 #[derive(Clone, Debug, Default)]

@@ -438,6 +438,89 @@ fn custom_program_talks_on_the_can_bus() {
     }
 }
 
+/// How a real unit would come to run a program of one's own: its
+/// installed software finds a program disc in the drive whose software
+/// index is higher than its own, checks the disc (project, module
+/// checksums), copies the loader into RAM and calls it.  Here the stock
+/// software of each unit does all that with a disc from `rnse custom`,
+/// and what it starts is the SDK's first example, which then has to
+/// cope with the machine as a running operating system leaves it.
+/// Nothing may be written to flash on the way.
+#[test]
+fn stock_software_starts_a_custom_program() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let variants = fw::load_variants(&image).unwrap();
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(model)) else { continue };
+        if sdk_example(&image, model, "hello").is_none() {
+            return; // no cross compiler
+        }
+        let unit = if model == Model::Rnse192 { "192" } else { "193" };
+        let program = std::fs::read(sdk.join(format!("out/hello-{}.bin", unit))).unwrap();
+        let (mut custom, _) = fw::custom_loader(&image, &v.name, &program).unwrap();
+        // The disc's index, its two middle digits one up: those are what
+        // the application compares.
+        let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+        let middle: u32 = index.sofidx[1..3].parse().unwrap();
+        let higher = format!("{}{:02}{}", &index.sofidx[..1], middle + 1, &index.sofidx[3..]);
+        assert_eq!(fw::set_disc_index(&mut custom, &v.name, &higher).unwrap(), index.sofidx);
+
+        let mut m = Machine::for_model(model);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        m.atapi().load(custom.clone());
+        m.start_os(v).unwrap();
+        m.set_ignition(true);
+        let ms = m.cycles_per_ms();
+        // Up to the moment the application calls the loader's first
+        // entry point.
+        let entry = fw::load_variants(&custom).unwrap().iter().find(|x| x.name == v.name).unwrap().module("LDM").unwrap().entries[0];
+        m.cpu.breakpoints.push(entry);
+        let mut stop = Stop::Budget;
+        for _ in 0..40 {
+            stop = m.run(1_000 * ms);
+            if stop != Stop::Budget {
+                break;
+            }
+        }
+        assert_eq!(stop, Stop::Breakpoint, "{}: the installed software did not start the program: {:?}", v.name, m.cpu.fault);
+        // What a loader finds: privileged mode with interrupts open and
+        // the operating system's handlers in place, a return address in
+        // the application, the language in r4.
+        assert_eq!(m.cpu.sr & (rnse::sh4::SR_MD | rnse::sh4::SR_BL | 0xf0), rnse::sh4::SR_MD, "{}: SR {:08x}", v.name, m.cpu.sr);
+        assert_ne!(m.cpu.pr, 0, "{}", v.name);
+        assert!(m.cpu.r[4] < 9, "{}: language {}", v.name, m.cpu.r[4]);
+        let flash = m.board.flash.clone();
+        m.cpu.breakpoints.clear();
+        assert_eq!(m.run(3_500 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        assert!(text.contains("rnse sdk: hello") && text.contains("tick 2\r\n") && !text.contains("unexpected"), "{}: {:?}", v.name, &text[text.len().saturating_sub(300)..]);
+        assert!(m.board.flash == flash, "{}: the program wrote to flash", v.name);
+        // The program's picture, not the installed software's.
+        let (w, h, rgb) = m.render();
+        let at = |x: usize, y: usize| [rgb[(y * w + x) * 3], rgb[(y * w + x) * 3 + 1], rgb[(y * w + x) * 3 + 2]];
+        let near = |p: [u8; 3], q: [u8; 3]| p.iter().zip(q).all(|(a, b)| a.abs_diff(b) <= 4);
+        assert!(near(at(w * 3 / 16, h / 6), [255, 255, 0]), "{}: second colour bar is {:?}", v.name, at(w * 3 / 16, h / 6));
+        assert!(near(at(w / 2, h * 7 / 8), [0, 0, 0]), "{}: background is {:?}", v.name, at(w / 2, h * 7 / 8));
+
+        // The same disc with the index it had is no update: the
+        // installed software goes on as usual.
+        let (same, _) = fw::custom_loader(&image, &v.name, &program).unwrap();
+        let mut m = Machine::for_model(model);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        m.atapi().load(same);
+        m.start_os(v).unwrap();
+        m.set_ignition(true);
+        assert_eq!(m.run(15_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        assert!(!String::from_utf8_lossy(&m.console).contains("rnse sdk"), "{}: started without a higher index", v.name);
+    }
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]
