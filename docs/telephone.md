@@ -98,6 +98,28 @@ With them the software of both units (V220, V222, V574, V575)
 Data blocks carry no length: a block is the data of consecutive frames
 up to the one marked as the last.
 
+## What travels on the telephone's channel
+
+AT commands, as text.  The 192's European OS (V2200815) holds the
+standard GSM ones it uses (`+CPIN?`, `+CPIN="%s"`, `+COPS?`,
+`+CSCS="GSM";+COPS=3,1`, `+CLCC`, `+CHLD=0`, `+CHLD=1`, `+CMUT=0`,
+`+CMUT=1`, `+CMUT?`, `+CCWA=0,n,1`, `+CGSN`, `+CIMI`, `+CMEE=1`,
+`+CPBS?`, `+CPBS="%s"`, `+CPBR=?`, `+CPBR=%d,%d`, and the answer prefix
+`+CME ERROR: `) and a set of the module's own: `^CTEL?`, `^CTEL=1`,
+`^CTEL: `, `^CINFO=1`, `^CINFO: `, `^CLCC=1`, `^CLCC:`, `^CMCC: `,
+`^CNCC:`, `^CPBID=1`, `^CPBID:`, `^BTON?`, `^BTCN=1`, `^BTCN: `,
+`^BTDC?`, `^BTDC=%s`, `^BTDL`, `^BPIN?`, `^BPIN=%s`.  The telephone
+module is, to the unit, a modem with a phone book (`+CPBR`) and
+Bluetooth pairing (`^BT..`, `^BPIN`).
+
+The unit's status frames from the module (665) are queued by
+`80119f70` (fifty entries of ten bytes at 0x8c07a398) and taken out by
+`8011a050`, which looks at bit 2 of the first byte for a change of
+state and hands seven-byte frames to `80119dee`.  With seven zero bytes
+the channel opens and nothing is said on it; which bits make the unit
+start its dialogue (`^CTEL?` is the likely opening) is the next thing
+to find.
+
 ## Remaining protocol prerequisite
 
 Before exposing `--phone` or browser controls, establish how the real
