@@ -24,7 +24,9 @@
 //! | 0x0F | 2 | none: the controller has (re)started                     |
 //! | 0x0C | 8 | six bytes: the state of every key, one bit each          |
 //! | 0x0D | 6 | four bytes: detents turned; byte 0 = volume knob, byte 2 |
-//! |      |   | = select knob, bit 7 = clockwise, bits 6..0 = count      |
+//! |      |   | = select knob, bits 6..0 = count.  Bit 7: for the select |
+//! |      |   | knob clockwise (down a list), for the volume knob the    |
+//! |      |   | direction that lowers the volume                         |
 //! | 0x10 | 3 | one byte: controller software version                    |
 //! | 0x04, 0x08, 0x0B, 0x11, 0x12 | | accepted, meaning not worked out      |
 //!
@@ -248,14 +250,18 @@ impl Panel {
     }
 
     /// A knob was turned: `knob` is [`KNOB_VOLUME`] or [`KNOB_SELECT`],
-    /// `delta` in detents, positive = clockwise.  (Clockwise is the
-    /// direction that moves the selection down a list; for the volume
-    /// knob the same sense is assumed.)
+    /// `delta` in detents, positive = clockwise: down a list, or louder.
+    /// (The frame's direction bit means clockwise for the select knob.
+    /// For the volume knob the 192's software takes it as "quieter",
+    /// subtracting the count from its volume; that this is the
+    /// anticlockwise direction is an assumption about the knob, not
+    /// something read from the software.)
     pub fn knob(&mut self, knob: usize, delta: i32) {
         if delta == 0 || self.in_reset {
             return;
         }
-        let v = (delta.unsigned_abs().min(0x7f) as u8) | if delta > 0 { 0x80 } else { 0 };
+        let flagged = if knob == 0 { delta < 0 } else { delta > 0 };
+        let v = (delta.unsigned_abs().min(0x7f) as u8) | if flagged { 0x80 } else { 0 };
         let mut d = [0u8; 4];
         d[if knob == 0 { 0 } else { 2 }] = v;
         self.queue.push_back(frame(CMD_ROTARY, &d));

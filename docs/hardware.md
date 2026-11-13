@@ -209,6 +209,16 @@ with an echo instead, as it first did, made the unit repeat each of
 them five times and stretched the start-up by most of a minute.  The firmware also contains a second, FT1.2-style parser
 (`68 L L 68 ... CS 16`) for this processor's boot loader.
 
+Volume and source go to this processor too (`19 [01 level]`, level 0
+to 30; `81 [08 source ..]`, 3 the tuner and 1 the CD drive), and its
+status block, the answer to request 0x88, reports the amplifier's
+source and volume back in bytes 33 and 34; the OS will not raise its
+own volume more than five steps above the volume reported there.  The
+stand-in does not play the amplifier yet: a status block with those
+two bytes filled in and the rest zero makes the OS stop sending volume
+changes, so the block's first bytes matter and are not understood
+(`src/dev/radio.rs`).  The volume knob's direction bit means "quieter".
+
 ### Faceplate (channel 3)
 
 Keys, the two rotary encoders and the lighting belong to a controller in

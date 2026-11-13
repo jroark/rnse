@@ -15,6 +15,24 @@
 //! check   one's complement of the sum of all preceding bytes
 //! ```
 //!
+//! What is known of the amplifier's part (192, software 0815), none of
+//! it acted on here:
+//!
+//! * `19 [01 v]` sets the volume, v from 0 to 30 (7 after a first
+//!   start).  The main unit keeps the level itself and sends the new
+//!   one for every movement of the volume knob.
+//! * `81 [08 s ..]` selects the source: 3 the tuner, 1 the CD drive.
+//! * The answer to request 0x88 is a status block.  The main unit takes
+//!   four fields from its first eight bytes and the amplifier's source
+//!   and volume from bytes 33 and 34 (it logs them: `AMP SOURCE = %d
+//!   VOL = %d`), and it lets its own volume rise at most five steps
+//!   above the volume reported there.  The same block is accepted
+//!   unasked, at any time.  Answered with an empty block, as here, the
+//!   unit reads zeroes and volume changes above 5 are held back; with a
+//!   block of 40 zero bytes (and the volume, or the source, filled in)
+//!   it stops sending volume changes at all, so the first bytes carry
+//!   state that has to be right.  They are not understood yet.
+//!
 //! The main unit knows two kinds of command.  A request is answered by a
 //! frame with the same command number carrying the data asked for.  A
 //! setting is answered by an acknowledgement: command 0x20 with one
