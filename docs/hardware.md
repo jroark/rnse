@@ -39,6 +39,8 @@ Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2
 | 0x12d00000-6          | output latches | bits unknown; 0x12d00001 is driven around CD DMA transfers |
 | 0x15000002, 0x1500004a | 16-bit host ports of the two SD card/MP3 processors | see "SD card processors" |
 | 0x16000000-0x16000020 | 32-bit control registers | unknown |
+| 0x17c00000-0x17c00014 | GPS baseband, control registers | see "GPS" |
+| 0x17e00400, 0x17e00800 | GPS baseband, further register blocks | see "GPS" |
 | 0x18000000-0x19fbffff | Coral video memory | certain |
 | 0x19fc0000            | Coral host interface registers | certain |
 | 0x19fd0000            | Coral display controller registers | certain |
@@ -262,8 +264,8 @@ state is known to the OS, which is not the case in the emulator yet.
   "SD card processors").
 * The radio processor stand-in knows one command (see above); there is
   no tuner, no sound and no power button.
-* Navigation stays at "Navigation wird initialisiert": no GPS receiver,
-  no map DVD.
+* Navigation stays at "Navigation wird initialisiert": no GPS receiver
+  (see "GPS"), no map DVD.
 * The battery-backed SRAM starts empty, so the unit is uncoded
   (`car_model = ffffffff`).
 * Interrupt status bits 2, 13 and 29, the ports' remaining bits and the
@@ -287,3 +289,39 @@ readable text.  Emulating SD card access and MP3 playback the way the
 unit does it means either running that program (which needs the
 processor identified) or answering its command protocol from outside.
 Nothing of either exists yet.
+
+## GPS
+
+There is no self-contained GPS receiver with a serial port.  The OS
+contains a GPS software library (`GPSLIB-R01.01.01`, code from about
+0x8000c800 to 0x80030000) with its own tasks: initialisation, events,
+navigation message subframes, position, satellite selection,
+differential corrections and external input/output, plus an interface
+task towards the navigation application and one watching the antenna.
+The hardware underneath is a baseband device on chip select 5:
+
+* 0x17c00000-0x17c00014: six 32-bit control registers.  +0x00 and
+  +0x04 are written at start-up (0x00020000, by the antenna task, and
+  0x00000300); the low half of +0x08 is set to 1 when the library
+  starts; +0x0c has a two-bit state in its low bits; +0x14 is the
+  interrupt status (bit 31: a periodic event that the handler counts,
+  bit 16, bits 1 and 0: events that wake the library's tasks; bits are
+  cleared by writing them as 0) and bit 0 of +0x10 is cleared at the end
+  of the handler.
+* 0x17e00400 and 0x17e00800: referenced only by the library; presumably
+  the per-channel measurements.
+* Its interrupt is vector 0x1e, INTEVT 0x3c0, the lowest external level.
+* 0x07e00000-0x07e00008 (companion chip) is used by the library to set
+  and read three 16-bit values at once, a counter or clock of some kind.
+
+The library keeps its satellite data in the battery-backed SRAM.
+
+None of this is emulated: the interrupt never comes, so the library
+waits forever.  Emulating it properly means producing the baseband's
+measurements for a simulated sky, which needs the device identified;
+the alternative is to hand a position to the navigation software above
+the library.
+
+The OS's table of interrupt handlers (handler, vector << 16 | 0x0800)
+is at 0x80032990 in V2200815: vectors 0x1e (GPS), 0x19, 0x11, 0x18,
+0x1a, 0x34, 0x35, 0x3c and 0x3f.
