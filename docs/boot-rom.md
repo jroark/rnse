@@ -54,6 +54,14 @@ so does the North American software of both units.  `rnse boot
 software then reports that index, and a disc with a higher one is
 updated from, by the stock application and the stock loader.
 
+The place the loader is copied to is not reserved for it.  The North
+American 192 software (V222 0371) has operating system variables at
+0x8df710f0-0x8df71108, in the middle of it, which its interrupt
+handlers go on changing after the copy; its own loader has picture
+data there.  And step 3's cache flush is `ocbwb` over the copied range
+only: the data cache is written back, the instruction cache is not
+touched.
+
 Whether the boot ROM can also start a loader from a disc by itself, as
 it would have to after an update that was cut short, is not known.
 `rnse loader` starts one directly, with interrupts masked and zeroes in

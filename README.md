@@ -59,7 +59,9 @@ listens and talks on the CAN bus.
 `rnse custom` puts such a program in the update loader's place on a
 copy of a disc (it then runs from RAM and leaves the flash alone); the
 unit's own software, run in the emulator, takes such a disc for an
-update and starts the program, as a real unit would have to.  And
+update and starts the program, as a real unit would have to, and the
+program can end by handing over to the stock loader, which the image
+carries along, so that the unit is its ordinary self again.  And
 `--strict` lists what a program used that the emulator has no model of.
 `--gdb PORT` puts the machine under GDB's control.
 It runs in the emulator on both units; whether a real unit starts it is

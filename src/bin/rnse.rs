@@ -93,6 +93,9 @@ fn custom(path: &str, variant: &str, program: &str, out: &str, index: Option<&St
     for place in &places {
         println!("replaced the loader in {}", place);
     }
+    if payload.len() >= 0x14 && &payload[0x10..0x14] == fw::SDK_MARK {
+        println!("the stock loader is packed into the image: the program can end by starting it (stock_update)");
+    }
     if places.len() < 2 {
         println!("warning: the loader's own file was not found on the disc; the boot ROM would still load the old one");
     }

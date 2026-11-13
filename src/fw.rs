@@ -403,6 +403,160 @@ pub fn repack(image: &[u8], replacement: &dyn Fn(&str, &str) -> Option<Vec<u8>>)
     Ok((out, changed))
 }
 
+/// Pack `data` for the SDK's unpacker (`sdk/src/wayback.c`): LZSS with a
+/// window of 4095 bytes and matches of 3 to 18.  Tokens come in groups
+/// of eight behind a byte of flags, lowest bit first: 1 = a byte as it
+/// is, 0 = two bytes `b0 b1` meaning "copy (b1 & 15) + 3 bytes from
+/// b0 + (b1 >> 4) * 256 bytes back".
+pub fn lzss_pack(data: &[u8]) -> Vec<u8> {
+    const WINDOW: usize = 4095;
+    const MAX: usize = 18;
+    let n = data.len();
+    let hash = |i: usize| ((data[i] as usize) << 8 ^ (data[i + 1] as usize) << 4 ^ data[i + 2] as usize) & 0xffff;
+    // Chains of earlier positions with the same three bytes' hash.
+    let mut head = vec![usize::MAX; 0x10000];
+    let mut prev = vec![usize::MAX; n];
+    let mut out = Vec::with_capacity(n / 2);
+    let mut i = 0;
+    while i < n {
+        let flags_at = out.len();
+        out.push(0u8);
+        for bit in 0..8 {
+            if i >= n {
+                break;
+            }
+            let (mut best, mut dist) = (0, 0);
+            if i + 3 <= n {
+                let mut p = head[hash(i)];
+                let mut tries = 64;
+                while p != usize::MAX && i - p <= WINDOW && tries > 0 {
+                    let mut l = 0;
+                    while l < MAX && i + l < n && data[p + l] == data[i + l] {
+                        l += 1;
+                    }
+                    if l > best {
+                        (best, dist) = (l, i - p);
+                        if l == MAX {
+                            break;
+                        }
+                    }
+                    p = prev[p];
+                    tries -= 1;
+                }
+            }
+            let step = if best >= 3 {
+                out.push(dist as u8);
+                out.push(((dist >> 8) << 4) as u8 | (best - 3) as u8);
+                best
+            } else {
+                out[flags_at] |= 1 << bit;
+                out.push(data[i]);
+                1
+            };
+            for k in i..i + step {
+                if k + 3 <= n {
+                    let h = hash(k);
+                    prev[k] = head[h];
+                    head[h] = k;
+                }
+            }
+            i += step;
+        }
+    }
+    out
+}
+
+/// The reverse of [`lzss_pack`]; `None` when the data is not sound.
+pub fn lzss_unpack(packed: &[u8], len: usize) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(len);
+    let mut i = 0;
+    while i < packed.len() {
+        let flags = packed[i];
+        i += 1;
+        for bit in 0..8 {
+            if i >= packed.len() {
+                break;
+            }
+            if flags >> bit & 1 != 0 {
+                out.push(packed[i]);
+                i += 1;
+            } else {
+                let (b0, b1) = (packed[i] as usize, *packed.get(i + 1)? as usize);
+                i += 2;
+                let (dist, n) = (b0 | (b1 >> 4) << 8, (b1 & 15) + 3);
+                if dist == 0 || dist > out.len() {
+                    return None;
+                }
+                for _ in 0..n {
+                    out.push(out[out.len() - dist]);
+                }
+            }
+        }
+    }
+    (out.len() == len).then_some(out)
+}
+
+/// Mark at offset 0x10 of a program built with the SDK: `RNSE`, the size
+/// of the memory the program uses from its load address on, and two
+/// words for the offsets of the two copies of the packed stock loader's
+/// directory ([`custom_loader`]).
+pub const SDK_MARK: &[u8; 4] = b"RNSE";
+/// What a directory of the packed stock loader starts with.
+pub const WAY_BACK_MARK: &[u8; 8] = b"RNSEBACK";
+/// Unpacked bytes to a block of the packed stock loader.
+pub const WAY_BACK_BLOCK: usize = 0x4000;
+
+/// The stock loader `stock`, packed for the SDK's `stock_update`, to be
+/// placed at offset `at` of the module.  Returns the bytes and the
+/// offsets (in the module) of the two copies of the directory.
+///
+/// The loader is cut into blocks of [`WAY_BACK_BLOCK`] bytes, each
+/// packed by itself and stored twice, all first copies before all
+/// second copies; a directory (mark, length, block size, number of
+/// blocks, sum of what follows as long words, then for either copy and
+/// each block its offset in the module, packed length and the sum of
+/// its unpacked bytes) comes first and again last.  The redundancy is
+/// there because the memory a loader is copied to is not all its own:
+/// the North American 192 software keeps a few variables of its
+/// operating system in the middle of it and goes on changing them
+/// until the loader has taken the machine over.  The stock loader has
+/// part of a picture there.
+pub fn way_back(stock: &[u8], at: usize) -> (Vec<u8>, [usize; 2]) {
+    let blocks: Vec<(Vec<u8>, u32)> = stock
+        .chunks(WAY_BACK_BLOCK)
+        .map(|c| (lzss_pack(c), c.iter().fold(0u32, |a, b| a.wrapping_add(*b as u32))))
+        .collect();
+    let n = blocks.len();
+    let dir_len = 24 + n * 2 * 12;
+    let data_len: usize = blocks.iter().map(|(p, _)| p.len()).sum();
+    let pad = |x: usize| (x + 3) & !3;
+    let second_dir = pad(dir_len + 2 * data_len);
+    let mut entries = Vec::new();
+    let mut off = at + dir_len;
+    for _ in 0..2 {
+        for (packed, sum) in &blocks {
+            entries.extend([off as u32, packed.len() as u32, *sum]);
+            off += packed.len();
+        }
+    }
+    let mut dir = WAY_BACK_MARK.to_vec();
+    for word in [stock.len() as u32, WAY_BACK_BLOCK as u32, n as u32, entries.iter().fold(0u32, |a, b| a.wrapping_add(*b))] {
+        dir.extend(word.to_be_bytes());
+    }
+    for word in &entries {
+        dir.extend(word.to_be_bytes());
+    }
+    let mut out = dir.clone();
+    for _ in 0..2 {
+        for (packed, _) in &blocks {
+            out.extend(packed);
+        }
+    }
+    out.resize(second_dir, 0);
+    out.extend(dir);
+    (out, [at, at + second_dir])
+}
+
 /// A copy of an update disc image with a program of one's own in the
 /// place of a variant's update loader.
 ///
@@ -413,7 +567,17 @@ pub fn repack(image: &[u8], replacement: &dyn Fn(&str, &str) -> Option<Vec<u8>>)
 /// loader's length (the rest is zero), so that the file the boot ROM
 /// reads differs from one it is known to accept in content only.  The
 /// loader is on the disc twice, in `LOADING.KWI` and as a file of its
-/// own, which the boot ROM loads; both are replaced.
+/// own; both are replaced.
+///
+/// A program built with the SDK (it carries [`SDK_MARK`]) also gets the
+/// stock loader it replaces, packed ([`way_back`]), at the end of the
+/// image, above the memory the program says it uses, and the offsets of
+/// its directories written into its mark.  With it the program can end by unpacking the stock loader
+/// over itself and starting it: the unit is then updated from the disc
+/// as from any update disc, ends up with the disc's software index and
+/// no longer takes the disc for an update.  Without that way back a
+/// unit starts the program again at every start, for as long as the
+/// disc is in the drive.
 ///
 /// Returns the new image and where it put the program.
 pub fn custom_loader(image: &[u8], variant: &str, payload: &[u8]) -> Result<(Vec<u8>, Vec<String>), FwError> {
@@ -438,6 +602,21 @@ pub fn custom_loader(image: &[u8], variant: &str, payload: &[u8]) -> Result<(Vec
     let mut new = old.to_vec();
     new[0x80..].fill(0);
     new[0x80..0x80 + payload.len()].copy_from_slice(payload);
+    if payload.len() >= 0x1c && &payload[0x10..0x14] == SDK_MARK {
+        let room = used.min(size);
+        let uses = be32(payload, 0x14) as usize;
+        let stock = &old[..room];
+        // Its length does not depend on where it goes.
+        let len = way_back(stock, 0).0.len();
+        let at = room.saturating_sub(len) & !3;
+        if at < uses.max(0x80 + payload.len()) || payload.len() < 0x20 {
+            return bad(format!("no room for the stock loader ({:#x} bytes packed, twice) above the {:#x} bytes the program uses, in a place of {:#x}", len, uses, room));
+        }
+        let (blob, dirs) = way_back(stock, at);
+        new[at..at + blob.len()].copy_from_slice(&blob);
+        new[0x80 + 0x18..0x80 + 0x1c].copy_from_slice(&(dirs[0] as u32).to_be_bytes());
+        new[0x80 + 0x1c..0x80 + 0x20].copy_from_slice(&(dirs[1] as u32).to_be_bytes());
+    }
     fix_checksum(&mut new)?;
 
     let mut out = image.to_vec();
@@ -658,6 +837,47 @@ pub fn load_variants(image: &[u8]) -> Result<Vec<Variant>, FwError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lzss_round_trip() {
+        // Code-like data: runs, repeats at several distances, noise.
+        let mut data = Vec::new();
+        let mut x = 12345u32;
+        for i in 0..40_000u32 {
+            x = x.wrapping_mul(1103515245).wrapping_add(12345);
+            data.push(match i % 97 {
+                0..=40 => (i % 7) as u8,
+                41..=70 => 0,
+                _ => (x >> 16) as u8,
+            });
+        }
+        data.extend(std::iter::repeat(0xff).take(5000));
+        for sample in [&data[..], &data[..1], &data[..2], &[][..], b"abcabcabcabcabcabcabcabcabcabcabcabc"] {
+            let packed = lzss_pack(sample);
+            assert_eq!(lzss_unpack(&packed, sample.len()).as_deref(), Some(sample));
+        }
+        assert!(lzss_pack(&data).len() < data.len() * 2 / 3);
+        // Damaged data is refused, not unpacked wrongly.
+        assert_eq!(lzss_unpack(&[0x00, 0x05, 0x00], 3), None, "a copy from before the start");
+        assert_eq!(lzss_unpack(&lzss_pack(&data), data.len() + 1), None);
+
+        // The packed loader: two directories that agree, and either
+        // copy of every block unpacks to the block.
+        let (blob, dirs) = way_back(&data, 0x1000);
+        let word = |o: usize| u32::from_be_bytes(blob[o..o + 4].try_into().unwrap()) as usize;
+        let (a, b) = (dirs[0] - 0x1000, dirs[1] - 0x1000);
+        let n = word(a + 16);
+        assert_eq!((word(a + 8), word(a + 12), n), (data.len(), WAY_BACK_BLOCK, data.len().div_ceil(WAY_BACK_BLOCK)));
+        assert_eq!(blob[a..a + 24 + n * 24], blob[b..b + 24 + n * 24]);
+        assert_eq!(blob.len(), b + 24 + n * 24);
+        for copy in 0..2 {
+            for (k, block) in data.chunks(WAY_BACK_BLOCK).enumerate() {
+                let e = a + 24 + (copy * n + k) * 12;
+                let at = word(e) - 0x1000;
+                assert_eq!(lzss_unpack(&blob[at..at + word(e + 4)], block.len()).as_deref(), Some(block), "copy {} block {}", copy, k);
+            }
+        }
+    }
 
     fn fake_module(tag: &[u8; 4], version: &[u8; 8], load: u32, body: &[u8]) -> Vec<u8> {
         let mut d = vec![0u8; 0x90];

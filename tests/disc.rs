@@ -584,6 +584,43 @@ fn stock_software_starts_programs_that_use_its_devices() {
     }
 }
 
+/// The way back.  The stock software starts the SDK's probe from a disc
+/// with a higher index; the probe counts down and hands over to the
+/// stock loader that `rnse custom` packed into its image; the stock
+/// loader updates the unit from the disc and resets it.  Afterwards the
+/// flash holds the disc's software with the disc's index, so that the
+/// disc is no update any more.
+#[test]
+fn custom_program_hands_back_to_the_stock_loader() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some((mut m, name, custom)) = started_by_stock_software(&image, model, "probe") else { continue };
+        let ms = m.cycles_per_ms();
+        // A minute of counting down, then the update.
+        let stop = m.run(240_000 * ms);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        let tail = &text[text.len().saturating_sub(300)..];
+        assert!(text.contains("the stock loader is carried along\r\n") && text.contains("starting the stock loader\r\n"), "{}: {:?}", name, tail);
+        assert!(!text.contains("did not unpack") && !text.contains("unexpected"), "{}: {:?}", name, tail);
+        assert_eq!(stop, Stop::Fault, "{}: the stock loader ends with a reset: {:?}", name, tail);
+        assert!(m.reset_requested, "{}: {:?}", name, m.cpu.fault);
+        // What the stock loader installed: the disc's modules, and a
+        // directory with the disc's (raised) index.
+        let v = variants.iter().find(|v| v.name == name).unwrap();
+        for module in v.modules.iter().filter(|x| x.kind != "LDR") {
+            let (a, n) = (module.phys_addr() as usize, module.size as usize);
+            assert!(m.board.flash[a..a + n] == module.data[..n], "{}: module {} as written by the stock loader", name, module.name);
+        }
+        let index = fw::IndexInfo::from_disc(&custom, &name).unwrap();
+        assert_ne!(index.sofidx, fw::IndexInfo::from_disc(&image, &name).unwrap().sofidx);
+        let dir = fw::module_directory_for(v, &index);
+        let at = v.module("OSM").unwrap().phys_addr() as usize - dir.len();
+        assert!(m.board.flash[at..at + dir.len()] == dir[..], "{}: module directory with index {}", name, index.sofidx);
+    }
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]
