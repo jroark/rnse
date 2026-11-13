@@ -8,6 +8,8 @@ license = "MIT"
 [lib]
 name = "rnse"
 path = "src/lib.rs"
+# cdylib: the WebAssembly module of the browser front end (see web/).
+crate-type = ["rlib", "cdylib"]
 
 [[bin]]
 name = "rnse"

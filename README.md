@@ -40,6 +40,8 @@ zoomed and scrolled.  `--gps LAT,LON,COURSE` gives the unit a GPS fix,
 and the map shows that place; `--drive KMH` sets the car moving (speed
 pulses, gyroscope, and the fix along its course), and the map follows.
 `rnse ui disc.iso --variant V575 --nav-disc card.img --gps 41.8781,-87.6298,270 --drive 50@60000`
+In the browser front end the 193 has a fix in San Francisco unless
+`--gps` puts it elsewhere or `--no-gps` leaves it without one.
 
 ![The 193's navigation map in the emulator](docs/nav-193.png)
 
@@ -139,6 +141,20 @@ full list):
     --trace-exc        every exception and interrupt
     --tp ADDR          print the registers whenever PC reaches ADDR
     --break ADDR       stop there
+
+## In a browser, without installing anything
+
+`web/` is a front end that needs no server of its own: the emulator
+compiled to WebAssembly (`src/web.rs`), a worker that runs it and a page.
+The visitor picks an image of their own update disc, and optionally of
+a navigation disc, which the page reads in place; nothing is uploaded
+and the site holds no firmware.  It is published at
+[rns-e.com](https://rns-e.com/).
+
+    web/build.sh                  # into target/web/site; needs the
+                                  # wasm32-unknown-unknown target
+    node web/smoke.mjs target/web/site/rnse.wasm disc.iso V575
+    BUCKET=... DISTRIBUTION=... web/deploy.sh
 
 ## Tests
 

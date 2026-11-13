@@ -67,6 +67,42 @@ pub enum AudioStatus {
 pub enum Disc {
     Mem(std::sync::Arc<Vec<u8>>),
     File { file: std::sync::Arc<std::sync::Mutex<std::fs::File>>, offset: u64, sectors: u32 },
+    /// An image somewhere else, read through a function: bytes from an
+    /// offset into a buffer, returning how many it got.  (In a browser:
+    /// a file the user picked, which never leaves their machine.)
+    Source { read: Reader, offset: u64, sectors: u32 },
+}
+
+/// Reads bytes of an image from an offset; see [`Disc::Source`].
+pub type Reader = std::sync::Arc<dyn Fn(u64, &mut [u8]) -> usize + Send + Sync>;
+
+/// Where in an image of `len` bytes the disc's volume is, and how many
+/// sectors it has: the whole image, or the partition of type 0x96 of an
+/// SD card prepared for the 193, cut to the size the volume descriptor
+/// gives.
+fn locate(len: u64, read: &mut dyn FnMut(u64, &mut [u8]) -> bool) -> (u64, u32) {
+    let mut mbr = [0u8; 512];
+    let (mut offset, mut bytes) = (0u64, len);
+    if len >= 512 && read(0, &mut mbr) && mbr[510] == 0x55 && mbr[511] == 0xaa {
+        for e in mbr[446..510].chunks(16) {
+            let start = u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as u64 * 512;
+            let size = u32::from_le_bytes([e[12], e[13], e[14], e[15]]) as u64 * 512;
+            if e[4] == 0x96 && start < len {
+                offset = start;
+                bytes = size.min(len - start);
+                break;
+            }
+        }
+    }
+    // The volume descriptor knows the real size.
+    let mut pvd = [0u8; 2048];
+    if read(offset + 16 * 2048, &mut pvd) && &pvd[1..6] == b"CD001" {
+        let n = u32::from_le_bytes([pvd[80], pvd[81], pvd[82], pvd[83]]) as u64 * 2048;
+        if n != 0 && n <= bytes {
+            bytes = n;
+        }
+    }
+    (offset, (bytes / 2048) as u32)
 }
 
 impl Disc {
@@ -78,36 +114,22 @@ impl Disc {
         use std::io::{Read, Seek, SeekFrom};
         let mut file = std::fs::File::open(path)?;
         let len = file.seek(SeekFrom::End(0))?;
-        let mut mbr = [0u8; 512];
-        file.seek(SeekFrom::Start(0))?;
-        let (mut offset, mut bytes) = (0u64, len);
-        if len >= 512 && file.read_exact(&mut mbr).is_ok() && mbr[510] == 0x55 && mbr[511] == 0xaa {
-            for e in mbr[446..510].chunks(16) {
-                let start = u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as u64 * 512;
-                let size = u32::from_le_bytes([e[12], e[13], e[14], e[15]]) as u64 * 512;
-                if e[4] == 0x96 && start < len {
-                    offset = start;
-                    bytes = size.min(len - start);
-                    break;
-                }
-            }
-        }
-        // The volume descriptor knows the real size.
-        let mut pvd = [0u8; 2048];
-        file.seek(SeekFrom::Start(offset + 16 * 2048))?;
-        if file.read_exact(&mut pvd).is_ok() && &pvd[1..6] == b"CD001" {
-            let n = u32::from_le_bytes([pvd[80], pvd[81], pvd[82], pvd[83]]) as u64 * 2048;
-            if n != 0 && n <= bytes {
-                bytes = n;
-            }
-        }
-        Ok(Disc::File { file: std::sync::Arc::new(std::sync::Mutex::new(file)), offset, sectors: (bytes / 2048) as u32 })
+        let (offset, sectors) = locate(len, &mut |at, buf| file.seek(SeekFrom::Start(at)).is_ok() && file.read_exact(buf).is_ok());
+        Ok(Disc::File { file: std::sync::Arc::new(std::sync::Mutex::new(file)), offset, sectors })
+    }
+
+    /// An image of `len` bytes read through `read`, taken the way
+    /// [`open`](Self::open) takes a file.
+    pub fn from_reader(len: u64, read: Reader) -> Disc {
+        let (offset, sectors) = locate(len, &mut |at, buf| read(at, buf) == buf.len());
+        Disc::Source { read, offset, sectors }
     }
 
     pub fn sectors(&self) -> u32 {
         match self {
             Disc::Mem(v) => (v.len() / 2048) as u32,
             Disc::File { sectors, .. } => *sectors,
+            Disc::Source { sectors, .. } => *sectors,
         }
     }
 
@@ -119,6 +141,9 @@ impl Disc {
                 let s = (lba as usize * 2048).min(v.len());
                 let e = (s + out.len()).min(v.len());
                 out[..e - s].copy_from_slice(&v[s..e]);
+            }
+            Disc::Source { read, offset, .. } => {
+                read(offset + lba as u64 * 2048, &mut out);
             }
             Disc::File { file, offset, .. } => {
                 use std::io::{Read, Seek, SeekFrom};
