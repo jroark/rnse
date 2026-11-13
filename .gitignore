@@ -7,5 +7,7 @@
 *.KWI
 *.MOT
 *.bz2*
+*.zip
+*.img
 /out/
 __pycache__/
