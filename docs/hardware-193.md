@@ -164,6 +164,13 @@ shows DRQ and the signal register (+0xb0) bit 0 shows the drive's DMA
 request, control bit 0 starts the transfer.  Bytes land in memory in
 the order the drive delivers them.
 
+Audio CDs are played by the drive itself.  For the MEDIA source the OS
+reads the full table of contents (READ TOC format 2), starts the player
+with PLAY CD (0xbc, addresses in minutes, seconds and frames, from the
+first track to the lead-out) and then polls READ SUB-CHANNEL for the
+position it shows.  The emulated drive keeps time for that; no sound
+comes out of it yet.
+
 ## CAN
 
 RCAN-ET at 0xffdf0000: the control registers of the 192's HCAN2, but a

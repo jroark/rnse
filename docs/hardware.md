@@ -37,6 +37,7 @@ Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2
 | 0x10000000-           | battery-backed SRAM for settings | likely (OS reads and writes it heavily; loader reads a "slot number" with complement check at +0, +1) |
 | 0x12N00000, 0x12N00001 | byte-wide ports, N = 3..a: direction register (1 = output) and data | see "Ports" |
 | 0x12d00000-6          | output latches | bits unknown; 0x12d00001 is driven around CD DMA transfers |
+| 0x15000002, 0x1500004a | 16-bit host ports of the two SD card/MP3 processors | see "SD card processors" |
 | 0x16000000-0x16000020 | 32-bit control registers | unknown |
 | 0x18000000-0x19fbffff | Coral video memory | certain |
 | 0x19fc0000            | Coral host interface registers | certain |
@@ -252,8 +253,8 @@ state is known to the OS, which is not the case in the emulator yet.
 * The OS's view of the CD drive stays "unknown" (its 11-byte status
   block at 0x8c0e9088 is never filled in), so the display-open key is
   refused and a disc in the drive shows as "CD leer".
-* `SDCARD DSP0/1 BOOT ERROR`: the SD card reader's controllers are
-  missing.
+* `SDCARD DSP0/1 BOOT ERROR`: the SD card processors are missing (see
+  "SD card processors").
 * The radio processor stand-in knows one command (see above); there is
   no tuner, no sound and no power button.
 * Navigation stays at "Navigation wird initialisiert": no GPS receiver,
@@ -262,3 +263,22 @@ state is known to the OS, which is not the case in the emulator yet.
   (`car_model = ffffffff`).
 * Interrupt status bits 2, 13 and 29, the ports' remaining bits and the
   devices at 0x07b80000, 0x07e00000 and 0x16000000 are unidentified.
+
+## SD card processors
+
+The two SD card slots and MP3 decoding belong to two processors of
+their own (the firmware calls them DSP 0 and DSP 1), each behind one
+16-bit host port: 0x15000002 and 0x1500004a.  At start-up the OS
+writes the same program of 29363 words (58 KiB, stored inside the OS
+module) into each port, reading a word back now and then, and finally
+expects an answer to a first command; the log line
+`SDC0-ERR_cmd_res=(1202-d762)-(-1)` is that check failing.  The driver
+also uses ports 5 and 9 (0x12500000, 0x12900000) and DMA channel 3 and
+a further channel of the SH-4.
+
+The processor type is not known: the program is 16-bit words with what
+looks like a table of eight-word interrupt vectors at its start and no
+readable text.  Emulating SD card access and MP3 playback the way the
+unit does it means either running that program (which needs the
+processor identified) or answering its command protocol from outside.
+Nothing of either exists yet.

@@ -28,7 +28,7 @@ which is built around an SH7770-family system-on-chip:
 | | |
 |---|---|
 | Update loader | Boots, shows its screen on the 800 x 480 display, reads the CD and writes the flash; the result is byte-for-byte the modules on the disc.  `rnse loader disc.iso --variant V574` |
-| Main software | Boots into its user interface: start-up picture, then the screens (radio, set-up and the others) drawn through the chip's 2D graphics engine onto the display unit's blended planes, with the car (ignition), the radio processor, the faceplate and the drive answered as on the 192.  Function keys, soft keys and the main knob work, also in the browser front end.  A freshly installed unit asks for the navigation disc first; the keys work regardless.  `rnse ui disc.iso --variant V574` |
+| Main software | Boots into its user interface: start-up picture, then the screens (radio, set-up and the others) drawn through the chip's 2D graphics engine onto the display unit's blended planes, with the car (ignition), the radio processor, the faceplate and the drive answered as on the 192.  Function keys, soft keys and the main knob work, also in the browser front end.  A freshly installed unit asks for the navigation disc first; the keys work regardless.  With an audio CD (`--audio-cd 12x200`: twelve tracks of 200 s) MEDIA lists the tracks and plays them, silently so far.  `rnse ui disc.iso --variant V574` |
 
 The North American 192 software (`V222`) runs like `V220`, in English:
 `rnse ui disc.iso --variant V222`.

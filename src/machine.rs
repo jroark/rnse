@@ -650,6 +650,8 @@ impl Machine {
             self.panel_link();
             if self.cpu.cycles >= self.next_frame {
                 self.next_frame += self.frame_cycles;
+                let frame_ms = self.frame_cycles / self.cycles_per_ms();
+                self.atapi().tick(frame_ms);
                 self.board.vsync();
                 let watchdog_ms = 1500 * self.cycles_per_ms();
                 if let Some(navi) = self.cpu.io.navi.as_mut() {

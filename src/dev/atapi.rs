@@ -29,8 +29,47 @@ enum Phase {
     DataInDma,
 }
 
+/// An audio disc: where each track starts (in frames of 1/75 s from
+/// the start of the programme area) and where the last one ends.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioDisc {
+    pub tracks: Vec<u32>,
+    pub lead_out: u32,
+}
+
+impl AudioDisc {
+    /// A disc of `count` tracks of `seconds` each.
+    pub fn uniform(count: u32, seconds: u32) -> AudioDisc {
+        AudioDisc { tracks: (0..count).map(|i| i * seconds * 75).collect(), lead_out: count * seconds * 75 }
+    }
+
+    /// Track number (from 1) playing at `frame`.
+    fn track_at(&self, frame: u32) -> usize {
+        self.tracks.iter().rposition(|&t| t <= frame).map_or(1, |i| i + 1)
+    }
+}
+
+/// What the drive's audio player is doing, as READ SUB-CHANNEL reports
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AudioStatus {
+    /// Nothing to report (0x15).
+    None,
+    Playing,
+    Paused,
+    /// Reached the end of what it was asked to play (0x13).
+    Completed,
+}
+
 pub struct Atapi {
     pub image: Option<Vec<u8>>,
+    /// An audio disc in the drive instead of a data disc.
+    pub audio: Option<AudioDisc>,
+    pub audio_status: AudioStatus,
+    /// Where the pickup is on an audio disc, in thousandths of a frame,
+    /// and where playing stops.
+    audio_pos: u64,
+    audio_end: u32,
     error: u8,
     features: u8,
     /// Sector count / interrupt reason.
@@ -97,6 +136,10 @@ impl Atapi {
             sense: (0, 0, 0),
             unit_attention: false,
             packet_irq: false,
+            audio: None,
+            audio_status: AudioStatus::None,
+            audio_pos: 0,
+            audio_end: 0,
             log: IoLog::new(false, 4),
             trace: false,
             sectors_read: 0,
@@ -109,7 +152,55 @@ impl Atapi {
     /// next command reports a unit attention, as after a real swap.
     pub fn insert(&mut self, image: Option<Vec<u8>>) {
         self.image = image;
+        self.audio = None;
+        self.audio_status = AudioStatus::None;
         self.unit_attention = true;
+    }
+
+    /// Put an audio disc in the drive (while running: with a unit
+    /// attention, as after a real swap).
+    pub fn insert_audio(&mut self, disc: AudioDisc, running: bool) {
+        self.image = None;
+        self.audio = Some(disc);
+        self.audio_status = AudioStatus::None;
+        self.audio_pos = 0;
+        self.unit_attention = running;
+    }
+
+    fn has_disc(&self) -> bool {
+        self.image.is_some() || self.audio.is_some()
+    }
+
+    /// Frame of an audio disc the pickup is at.
+    pub fn audio_frame(&self) -> u32 {
+        (self.audio_pos / 1000) as u32
+    }
+
+    /// Let `ms` milliseconds pass for the audio player.
+    pub fn tick(&mut self, ms: u64) {
+        if self.audio_status == AudioStatus::Playing {
+            self.audio_pos += ms * 75;
+            if self.audio_frame() >= self.audio_end {
+                self.audio_pos = self.audio_end as u64 * 1000;
+                self.audio_status = AudioStatus::Completed;
+            }
+        }
+    }
+
+    fn play(&mut self, from: u32, to: u32) {
+        let Some(disc) = self.audio.as_ref() else {
+            self.fail(5, 0x64, 0); // illegal mode for this track
+            return;
+        };
+        let to = to.min(disc.lead_out);
+        if from >= disc.lead_out || from > to {
+            self.fail(5, 0x21, 0);
+            return;
+        }
+        self.audio_pos = from as u64 * 1000;
+        self.audio_end = to;
+        self.audio_status = if from == to { AudioStatus::Completed } else { AudioStatus::Playing };
+        self.complete_ok();
     }
 
     /// Put a disc in the drive before power-on.
@@ -135,7 +226,10 @@ impl Atapi {
     }
 
     fn sectors(&self) -> u32 {
-        self.image.as_ref().map(|i| (i.len() / 2048) as u32).unwrap_or(0)
+        match self.audio.as_ref() {
+            Some(disc) => disc.lead_out,
+            None => self.image.as_ref().map(|i| (i.len() / 2048) as u32).unwrap_or(0),
+        }
     }
 
     // ---- register access --------------------------------------------------
@@ -396,7 +490,10 @@ impl Atapi {
             self.fail(5, 0x21, 0); // LBA out of range
             return;
         }
-        let img = self.image.as_ref().unwrap();
+        let Some(img) = self.image.as_ref() else {
+            self.fail(5, 0x64, 0); // an audio track cannot be read as data
+            return;
+        };
         let s = lba as usize * 2048;
         self.buf = img[s..s + n as usize * 2048].to_vec();
         self.pos = 0;
@@ -417,13 +514,14 @@ impl Atapi {
         if op != 0x03 && op != 0x12 {
             if self.unit_attention {
                 self.unit_attention = false;
-                if self.image.is_some() {
+                if self.has_disc() {
                     self.fail(6, 0x28, 0); // medium may have changed
                     return;
                 }
             }
             let needs_medium = matches!(op, 0x00 | 0x25 | 0x28 | 0xa8 | 0x2b | 0x43 | 0x42 | 0x51 | 0xbe | 0xb9 | 0xad);
-            if needs_medium && self.image.is_none() {
+            let needs_medium = needs_medium || matches!(op, 0x45 | 0x47 | 0x48 | 0x4b | 0x4e | 0xa5 | 0xbc);
+            if needs_medium && !self.has_disc() {
                 self.fail(2, 0x3a, 0); // medium not present
                 return;
             }
@@ -454,7 +552,17 @@ impl Atapi {
                 d[32..36].copy_from_slice(b"1.00");
                 self.data_in(d, p[4] as usize);
             }
-            0x1b | 0x1e | 0x2b | 0xbb | 0x35 => self.complete_ok(), // START STOP, PREVENT, SEEK, SET SPEED, SYNC
+            0x1b | 0x2b => {
+                // START STOP UNIT, SEEK: playing ends
+                if self.audio.is_some() {
+                    if op == 0x2b {
+                        self.audio_pos = be32(2) as u64 * 1000;
+                    }
+                    self.audio_status = AudioStatus::None;
+                }
+                self.complete_ok();
+            }
+            0x1e | 0xbb | 0x35 => self.complete_ok(), // PREVENT, SET SPEED, SYNC
             0x25 => {
                 // READ CAPACITY
                 let last = self.sectors().saturating_sub(1);
@@ -482,16 +590,42 @@ impl Atapi {
                         lba.to_be_bytes()
                     }
                 };
-                let mut d = vec![0u8, 0, 1, 1];
-                if format == 1 {
-                    d.extend_from_slice(&[0, 0x14, 1, 0]);
-                    d.extend_from_slice(&addr(0));
-                } else {
-                    if p[6] <= 1 {
-                        d.extend_from_slice(&[0, 0x14, 1, 0]);
-                        d.extend_from_slice(&addr(0));
+                // Tracks as (control and ADR, start); a data disc has one.
+                let tracks: Vec<(u8, u32)> = match self.audio.as_ref() {
+                    Some(disc) => disc.tracks.iter().map(|&t| (0x10, t)).collect(),
+                    None => vec![(0x14, 0)],
+                };
+                let mut d = vec![0u8, 0, 1, tracks.len() as u8];
+                if format == 2 {
+                    // Full TOC, the lead-in's Q channel: points A0 (first
+                    // track), A1 (last track), A2 (lead-out), then the
+                    // tracks; always in minutes, seconds and frames.
+                    d[3] = 1; // last session
+                    let msf = |frame: u32| {
+                        let f = frame + 150;
+                        [(f / 75 / 60) as u8, (f / 75 % 60) as u8, (f % 75) as u8]
+                    };
+                    let control = tracks[0].0;
+                    let mut point = |control: u8, point: u8, at: [u8; 3]| {
+                        d.extend_from_slice(&[1, control, 0, point, 0, 0, 0, 0, at[0], at[1], at[2]]);
+                    };
+                    point(control, 0xa0, [1, 0, 0]);
+                    point(control, 0xa1, [tracks.len() as u8, 0, 0]);
+                    point(control, 0xa2, msf(self.sectors()));
+                    for (i, (control, start)) in tracks.iter().enumerate() {
+                        point(*control, i as u8 + 1, msf(*start));
                     }
-                    d.extend_from_slice(&[0, 0x14, 0xaa, 0]);
+                } else if format == 1 {
+                    d.extend_from_slice(&[0, tracks[0].0, 1, 0]);
+                    d.extend_from_slice(&addr(tracks[0].1));
+                } else {
+                    for (i, (control, start)) in tracks.iter().enumerate() {
+                        if i + 1 >= p[6] as usize {
+                            d.extend_from_slice(&[0, *control, i as u8 + 1, 0]);
+                            d.extend_from_slice(&addr(*start));
+                        }
+                    }
+                    d.extend_from_slice(&[0, tracks[tracks.len() - 1].0, 0xaa, 0]);
                     d.extend_from_slice(&addr(self.sectors()));
                 }
                 let len = (d.len() - 2) as u16;
@@ -499,26 +633,102 @@ impl Atapi {
                 self.data_in(d, be16(7));
             }
             0x42 => {
-                // READ SUB-CHANNEL: no audio playing
+                // READ SUB-CHANNEL, current position
+                let msf = p[1] & 2 != 0;
+                let addr = |frame: u32, lead_in: u32| -> [u8; 4] {
+                    if msf {
+                        let f = frame + lead_in;
+                        [0, (f / 75 / 60) as u8, (f / 75 % 60) as u8, (f % 75) as u8]
+                    } else {
+                        frame.to_be_bytes()
+                    }
+                };
                 let mut d = vec![0u8; 16];
-                d[1] = 0x15;
+                d[1] = match self.audio_status {
+                    AudioStatus::None => 0x15,
+                    AudioStatus::Playing => 0x11,
+                    AudioStatus::Paused => 0x12,
+                    AudioStatus::Completed => 0x13,
+                };
                 d[3] = 12;
                 d[4] = 1;
-                d[5] = 0x14;
-                d[6] = 1;
-                d[7] = 1;
+                match self.audio.as_ref() {
+                    Some(disc) => {
+                        let frame = self.audio_frame();
+                        let track = disc.track_at(frame);
+                        d[5] = 0x10;
+                        d[6] = track as u8;
+                        d[7] = 1;
+                        d[8..12].copy_from_slice(&addr(frame, 150));
+                        d[12..16].copy_from_slice(&addr(frame - disc.tracks[track - 1], 0));
+                    }
+                    None => {
+                        d[5] = 0x14;
+                        d[6] = 1;
+                        d[7] = 1;
+                    }
+                }
+                // A finished play is reported once.
+                if self.audio_status == AudioStatus::Completed {
+                    self.audio_status = AudioStatus::None;
+                }
                 self.data_in(d, be16(7));
+            }
+            // PLAY AUDIO (10) and (12): start frame and length
+            0x45 | 0xa5 => {
+                let len = if op == 0x45 { be16(7) as u32 } else { be32(6) };
+                self.play(be32(2), be32(2).saturating_add(len));
+            }
+            // PLAY CD: like PLAY AUDIO, with the addresses as frames or
+            // (bit 1 of byte 1) as minutes, seconds and frames
+            0xbc => {
+                if p[1] & 2 != 0 {
+                    let frame = |i: usize| (p[i] as u32 * 60 + p[i + 1] as u32) * 75 + p[i + 2] as u32;
+                    self.play(frame(3).saturating_sub(150), frame(6).saturating_sub(150));
+                } else {
+                    self.play(be32(2), be32(2).saturating_add(be32(6)));
+                }
+            }
+            // PLAY AUDIO MSF
+            0x47 => {
+                let frame = |i: usize| (p[i] as u32 * 60 + p[i + 1] as u32) * 75 + p[i + 2] as u32;
+                self.play(frame(3).saturating_sub(150), frame(6).saturating_sub(150));
+            }
+            // PLAY AUDIO TRACK INDEX
+            0x48 => match self.audio.clone() {
+                Some(disc) => {
+                    let start = |t: u8| disc.tracks.get((t.max(1) - 1) as usize).copied();
+                    match start(p[4]) {
+                        Some(from) => self.play(from, start(p[7].saturating_add(1)).unwrap_or(disc.lead_out)),
+                        None => self.fail(5, 0x21, 0),
+                    }
+                }
+                None => self.fail(5, 0x64, 0),
+            },
+            // PAUSE / RESUME
+            0x4b => {
+                match (self.audio_status, p[8] & 1 != 0) {
+                    (AudioStatus::Playing, false) => self.audio_status = AudioStatus::Paused,
+                    (AudioStatus::Paused, true) => self.audio_status = AudioStatus::Playing,
+                    _ => {}
+                }
+                self.complete_ok();
+            }
+            // STOP PLAY / SCAN
+            0x4e => {
+                self.audio_status = AudioStatus::None;
+                self.complete_ok();
             }
             0x46 => {
                 // GET CONFIGURATION: feature header only, current profile
                 let mut d = vec![0u8; 8];
                 d[3] = 4;
-                d[7] = if self.image.is_some() { 0x08 } else { 0 }; // CD-ROM
+                d[7] = if self.has_disc() { 0x08 } else { 0 }; // CD-ROM
                 self.data_in(d, be16(7));
             }
             0x4a => {
                 // GET EVENT STATUS NOTIFICATION (media class)
-                let present = self.image.is_some();
+                let present = self.has_disc();
                 let d = vec![0, 6, 4, 0x10, 0, if present { 2 } else { 0 }, 0, 0];
                 self.data_in(d, be16(7));
             }
@@ -600,3 +810,58 @@ fn put_str(words: &mut [u16], s: &str) {
 
 #[allow(dead_code)]
 const _: u8 = ST_BSY;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Send a packet command and collect what the drive returns.
+    fn packet(a: &mut Atapi, p: [u8; 12]) -> Vec<u8> {
+        a.write(4, 1, 0xfe, 0);
+        a.write(5, 1, 0xff, 0);
+        a.write(7, 1, 0xa0, 0);
+        for pair in p.chunks(2) {
+            a.write(0, 2, (pair[0] as u32) << 8 | pair[1] as u32, 0);
+        }
+        let mut out = Vec::new();
+        while a.read(7, 1, 0) & 0x08 != 0 {
+            let w = a.read(0, 2, 0);
+            out.extend_from_slice(&[(w >> 8) as u8, w as u8]);
+        }
+        out
+    }
+
+    #[test]
+    fn audio_disc_plays() {
+        let mut a = Atapi::new();
+        a.insert_audio(AudioDisc::uniform(3, 60), false);
+        // Table of contents: three audio tracks and the lead-out.
+        let toc = packet(&mut a, [0x43, 2, 0, 0, 0, 0, 0, 0, 64, 0, 0, 0]);
+        assert_eq!(toc[2..4], [1, 3]);
+        assert_eq!(toc[4..12], [0, 0x10, 1, 0, 0, 0, 2, 0], "track 1 at 00:02:00");
+        assert_eq!(toc[12..20], [0, 0x10, 2, 0, 0, 1, 2, 0]);
+        assert_eq!(toc[28..36], [0, 0x10, 0xaa, 0, 0, 3, 2, 0]);
+        // Data cannot be read from it.
+        packet(&mut a, [0x28, 0, 0, 0, 0, 16, 0, 0, 1, 0, 0, 0]);
+        assert_ne!(a.read(7, 1, 0) & 1, 0);
+
+        // Play track 2 to the end of the disc, look after ten seconds.
+        packet(&mut a, [0x48, 0, 0, 0, 2, 1, 0, 3, 1, 0, 0, 0]);
+        assert_eq!(a.audio_status, AudioStatus::Playing);
+        a.tick(10_000);
+        let sub = packet(&mut a, [0x42, 2, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0]);
+        assert_eq!(sub[1], 0x11);
+        assert_eq!(sub[5..8], [0x10, 2, 1]);
+        assert_eq!(sub[8..12], [0, 1, 12, 0], "absolute 01:12:00");
+        assert_eq!(sub[12..16], [0, 0, 10, 0], "ten seconds into the track");
+
+        // Pause holds the position, resume goes on, the end is reported once.
+        packet(&mut a, [0x4b, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        a.tick(5_000);
+        assert_eq!(a.audio_frame(), 70 * 75);
+        packet(&mut a, [0x4b, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]);
+        a.tick(200_000);
+        assert_eq!(packet(&mut a, [0x42, 2, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0])[1], 0x13);
+        assert_eq!(packet(&mut a, [0x42, 2, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0])[1], 0x15);
+    }
+}
