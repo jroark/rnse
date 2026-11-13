@@ -39,7 +39,7 @@ rnse boot disc.iso --ignition --cycles 4000000000 \
 rnse ui disc.iso --variant V574                      # browser front end on 127.0.0.1:8080
 ```
 
-`boot` with `--screenshot`/`--shot MS:FILE` plus scripted `--key`/`--knob` is the way to verify UI-visible changes. The firmware's log arrives as `[fw] ...` lines on stdout, largely Japanese in EUC-JP (`| iconv -f EUC-JP -t UTF-8 -c`). The investigation switches (`--io-log`, `--trace-exc`, `--trace-bios`, `--trace-can`, `--trace-serial`, `--trace-coral`, `--trace-ge`, `--trace-atapi`, `--trace-calls`, `--tp`, `--break`, `--peek`) are the main debugging tools.
+`boot` with `--screenshot`/`--shot MS:FILE` plus scripted `--key`/`--knob` is the way to verify UI-visible changes. The firmware's log arrives as `[fw] ...` lines on stdout, largely Japanese in EUC-JP (`| iconv -f EUC-JP -t UTF-8 -c`). `--gdb PORT` serves GDB's remote protocol (`src/gdb.rs`; the SDK in `sdk/` builds ELF files with debug information for it). The investigation switches (`--io-log`, `--trace-exc`, `--trace-bios`, `--trace-can`, `--trace-serial`, `--trace-coral`, `--trace-ge`, `--trace-atapi`, `--trace-calls`, `--tp`, `--break`, `--peek`) are the main debugging tools.
 
 ## Architecture
 
@@ -58,6 +58,7 @@ Layers, bottom up:
 - `src/bootrom.rs` — the first 48 KiB of flash are a boot ROM that is not on any update disc. The stub places reserved opcode `0xFFFD` at each entry point; executing it stops the CPU with `Stop::Hypercall`, and `machine.rs` performs the service in Rust (`bootrom::Hook`, `TRAPA #0x3d..0x3f` services) and resumes. Everything about it is inferred from how the disc's modules use it — evidence in `docs/boot-rom.md`.
 - `src/machine.rs` — `Machine` owns `Cpu` + `Board`: start-up sequences (`install`, `install_boot_stub`, `start_loader`, `start_os`), boot ROM services, the run loop (`run(cycles)`, which also advances emulated time, CAN cyclic frames, scripted input), and `render()` for the screen.
 - `src/fw.rs` — disc side: ISO 9660 reader, the `LOADING.KWI` container, variants and modules with their 0x80-byte headers and checksums. Deliberately version-independent.
+- `sdk/` — a kit for writing software of one's own for the unit (C, built with an SH-4 GCC by `sdk/build.sh 192|193 [example]`): start-up code, one hardware layer per model that replays the stock software's bring-up, drivers for the faceplate and the CD drive, examples. `rnse custom` puts such a program in the update loader's place on a copy of a disc; `tests/disc.rs` builds and runs the examples when a cross compiler is installed. `docs/custom-firmware.md` says what this does and does not establish about real hardware; keep it honest when adding to the SDK.
 - Front ends: `src/bin/rnse.rs` (CLI; hand-written argument parsing and the usage text — update the usage string when adding an option), `src/ui.rs` (std-only HTTP server; the machine thread publishes frames into `Shared` and picks up input, the page in `assets/ui.html` polls), `src/bin/sh4run.rs` (bare CPU runner for the fuzzer only).
 
 ### Things that are easy to miss

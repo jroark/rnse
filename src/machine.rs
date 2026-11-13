@@ -998,6 +998,19 @@ impl Machine {
     }
 
     /// Write a big-endian word to RAM through a P0/P1/P2 address.
+    /// Write a byte of RAM; false when the address is not RAM.
+    pub fn poke8(&mut self, addr: u32, v: u8) -> bool {
+        let o = (addr & 0x1fff_ffff).wrapping_sub(self.board.ram_base) as usize;
+        if o < self.board.ram.len() {
+            self.board.ram[o] = v;
+            // The CPU may hold a translation for the page it runs in;
+            // the bytes themselves are read afresh each time.
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn poke32(&mut self, addr: u32, v: u32) {
         let o = (addr & 0x1fff_ffff).wrapping_sub(self.board.ram_base) as usize;
         if o + 4 <= self.board.ram.len() {

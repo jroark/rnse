@@ -58,6 +58,7 @@ reads the faceplate's keys and knobs, one reads a file from the CD.
 `rnse custom` puts such a program in the update loader's place on a
 copy of a disc (it then runs from RAM and leaves the flash alone), and
 `--strict` lists what a program used that the emulator has no model of.
+`--gdb PORT` puts the machine under GDB's control.
 It runs in the emulator on both units; whether a real unit starts it is
 untested.  See [docs/custom-firmware.md](docs/custom-firmware.md).
 

@@ -4,6 +4,7 @@ pub mod board;
 pub mod bootrom;
 pub mod dev;
 pub mod fw;
+pub mod gdb;
 pub mod iolog;
 pub mod machine;
 pub mod png;
