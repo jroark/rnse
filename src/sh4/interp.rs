@@ -151,10 +151,12 @@ impl Cpu {
                             self.sq_flush(bus, a)?;
                         }
                     }
-                    9 | 0xa | 0xb => {} // OCBI / OCBP / OCBWB
+                    // OCBI / OCBP / OCBWB: nothing to do unless the
+                    // caches are modelled.
+                    9 | 0xa | 0xb => self.cache_op(bus, self.r[n], m as u16)?,
                     0xc => {
                         // MOVCA.L R0,@Rn
-                        self.write32(bus, self.r[n], self.r[0])?;
+                        self.movca(bus, self.r[n], self.r[0])?;
                     }
                     _ => return Err(self.illegal()),
                 },

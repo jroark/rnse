@@ -208,6 +208,15 @@ impl Machine {
         }
     }
 
+    /// Model the CPU's caches from here on (see `sh4/cache.rs`), with
+    /// the cache control register as the stock operating system of
+    /// either unit leaves it, which is what a loader finds.
+    pub fn cache_model(&mut self) {
+        let ccr = crate::sh4::cache::STOCK_CCR;
+        self.cpu.mmu.ccr = ccr;
+        self.cpu.cache.enable(ccr);
+    }
+
     /// Fill RAM with arbitrary data, as it is after power-up on real
     /// hardware (and with the last run's leftovers after a reset).  To
     /// be called before anything is loaded.  Software that only works
@@ -1053,8 +1062,7 @@ impl Machine {
         let o = (addr & 0x1fff_ffff).wrapping_sub(self.board.ram_base) as usize;
         if o < self.board.ram.len() {
             self.board.ram[o] = v;
-            // The CPU may hold a translation for the page it runs in;
-            // the bytes themselves are read afresh each time.
+            self.cpu.cache.host_write(addr & 0x1fff_ffff, v);
             true
         } else {
             false
@@ -1158,6 +1166,7 @@ impl Machine {
                 self.board.step_display((self.frame_cycles / self.cycles_per_ms()) as u32);
             }
             if stop == Stop::Hypercall {
+                self.cpu.cache.sync(&mut self.board);
                 if !self.hypercall() {
                     return Stop::Fault;
                 }
@@ -1232,6 +1241,13 @@ impl Machine {
     /// devices (RAM and flash only).
     pub fn peek8(&self, addr: u32) -> Option<u8> {
         let pa = addr & 0x1fff_ffff;
+        // As the CPU would read it: what its data cache holds comes
+        // first (only when the caches are modelled).
+        if crate::sh4::cache::cacheable(addr) {
+            if let Some(b) = self.cpu.cache.peek(pa) {
+                return Some(b);
+            }
+        }
         let o = pa.wrapping_sub(self.board.ram_base) as usize;
         if o < self.board.ram.len() {
             Some(self.board.ram[o])

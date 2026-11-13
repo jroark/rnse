@@ -606,6 +606,11 @@ impl Board {
 
 impl Bus for Board {
     #[inline(always)]
+    fn is_ram(&self, addr: u32) -> bool {
+        (addr.wrapping_sub(self.ram_base) as usize) < self.ram.len()
+    }
+
+    #[inline(always)]
     fn read8(&mut self, addr: u32) -> u8 {
         let o = addr.wrapping_sub(self.ram_base) as usize;
         if o < self.ram.len() {

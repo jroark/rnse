@@ -4,6 +4,7 @@
 //! [`Bus`] trait using 29-bit physical addresses; the P4 control region
 //! (0xE000_0000 and up) is handled inside the core by [`onchip`].
 
+pub mod cache;
 pub mod cpu;
 mod fpu;
 mod interp;
@@ -33,6 +34,13 @@ pub trait Bus {
     /// logging.  Optional.
     #[inline(always)]
     fn set_pc(&mut self, _pc: u32, _pr: u32) {}
+
+    /// Is this physical address RAM?  Only RAM goes through the cache
+    /// model ([`cache`]).
+    #[inline(always)]
+    fn is_ram(&self, _addr: u32) -> bool {
+        false
+    }
 
     /// Level currently encoded on the IRL3-0 pins (0 = none, 15 = highest).
     #[inline(always)]

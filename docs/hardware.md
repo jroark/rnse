@@ -21,6 +21,14 @@ SH7751R but not on the original SH7750.
 * FPSCR is 0x00040001 in every task: round to zero, denormals as zero.
 * The MMU is not enabled by anything run so far.
 
+Caches: the OS writes 0x80008181 to CCR (0xff00001c): both caches on in
+the SH7750R's two-way mode with the index bits from the address, stores
+through P1 written through to memory, stores through P0, U0 and P3
+copy-back.  The update loader never writes CCR and runs with that.  The
+application copies the loader to RAM through a P0 address and then uses
+`ocbwb` over the range.  `--strict` models the caches
+(`src/sh4/cache.rs`).
+
 ## Memory map
 
 Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2

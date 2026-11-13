@@ -17,6 +17,11 @@ North American software (index 0320) for the same hardware.
 
 ![The 193's main software (V574) in the emulator: radio set-up](os-193.png)
 
+Caches: the OS writes 0x80008181 to CCR (0xff00001c) like the 192's,
+the update loader 0x00000101; either way both caches are on, stores
+through P1 are written through and stores through P0 are copy-back.
+The loader, linked at 0x09b60000, runs in P0.
+
 ## Memory map
 
 | range                 | device |

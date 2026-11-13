@@ -318,6 +318,7 @@ fn sdk_example(image: &[u8], model: rnse::board::Model, example: &str) -> Option
     // As unforgiving as the emulator gets (`--strict`).
     m.busy_start();
     m.watchdog_always = true;
+    m.cache_model();
     Some((m, v.name.clone(), custom))
 }
 
@@ -464,6 +465,10 @@ fn started_by_stock_software(image: &[u8], model: rnse::board::Model, example: &
 
     let mut m = Machine::for_model(model);
     m.echo_console = false;
+    // The CPU's caches are modelled all the way: the stock software has
+    // to live with them as on a real unit, and so has the program.
+    m.scramble_ram();
+    m.cache_model();
     m.install_boot_stub(&v.name);
     m.install(v, &index);
     m.atapi().load(custom.clone());
@@ -606,6 +611,8 @@ fn custom_program_hands_back_to_the_stock_loader() {
         assert!(!text.contains("did not unpack") && !text.contains("unexpected"), "{}: {:?}", name, tail);
         assert_eq!(stop, Stop::Fault, "{}: the stock loader ends with a reset: {:?}", name, tail);
         assert!(m.reset_requested, "{}: {:?}", name, m.cpu.fault);
+        let cache = &m.cpu.cache.trouble;
+        assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
         // What the stock loader installed: the disc's modules, and a
         // directory with the disc's (raised) index.
         let v = variants.iter().find(|v| v.name == name).unwrap();

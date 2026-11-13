@@ -99,6 +99,8 @@ pub struct Cpu {
     pub fr: [u32; 32],
 
     pub mmu: Mmu,
+    /// The caches, when they are being modelled (see [`super::cache`]).
+    pub cache: super::cache::Cache,
     pub io: OnChip,
 
     /// Instructions executed (also the emulated time base).
@@ -174,6 +176,7 @@ impl Cpu {
             fpul: 0,
             fr: [0; 32],
             mmu: Mmu::new(),
+            cache: Default::default(),
             io: OnChip::new(),
             cycles: 0,
             sleeping: false,
@@ -308,6 +311,9 @@ impl Cpu {
             return self.p4_read(bus, addr, 1).map(|v| v as u8);
         }
         let pa = self.translate(addr, Access::Read)?;
+        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+            return Ok(self.cache.read(bus, pa, 1) as u8);
+        }
         Ok(bus.read8(pa))
     }
 
@@ -320,6 +326,9 @@ impl Cpu {
             return self.p4_read(bus, addr, 2).map(|v| v as u16);
         }
         let pa = self.translate(addr, Access::Read)?;
+        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+            return Ok(self.cache.read(bus, pa, 2) as u16);
+        }
         Ok(bus.read16(pa))
     }
 
@@ -332,6 +341,9 @@ impl Cpu {
             return self.p4_read(bus, addr, 4);
         }
         let pa = self.translate(addr, Access::Read)?;
+        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+            return Ok(self.cache.read(bus, pa, 4) as u32);
+        }
         Ok(bus.read32(pa))
     }
 
@@ -341,6 +353,10 @@ impl Cpu {
             return self.p4_write(bus, addr, 1, v as u32);
         }
         let pa = self.translate(addr, Access::Write)?;
+        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+            self.cache.write(bus, pa, 1, v as u32, addr);
+            return Ok(());
+        }
         bus.write8(pa, v);
         Ok(())
     }
@@ -354,6 +370,10 @@ impl Cpu {
             return self.p4_write(bus, addr, 2, v as u32);
         }
         let pa = self.translate(addr, Access::Write)?;
+        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+            self.cache.write(bus, pa, 2, v as u32, addr);
+            return Ok(());
+        }
         bus.write16(pa, v);
         Ok(())
     }
@@ -367,6 +387,10 @@ impl Cpu {
             return self.p4_write(bus, addr, 4, v);
         }
         let pa = self.translate(addr, Access::Write)?;
+        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+            self.cache.write(bus, pa, 4, v as u32, addr);
+            return Ok(());
+        }
         bus.write32(pa, v);
         Ok(())
     }
@@ -381,6 +405,11 @@ impl Cpu {
             return Err(Exc::mem(ExcKind::AddrErrRead, addr));
         }
         let pa = self.translate(addr, Access::Exec)?;
+        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+            // Through the instruction cache, every time: no page is
+            // remembered.
+            return Ok(self.cache.fetch(bus, pa, addr));
+        }
         self.fetch_page = addr & 0xffff_f000;
         self.fetch_phys = pa & 0xffff_f000;
         Ok(bus.read16(pa))
@@ -435,11 +464,43 @@ impl Cpu {
             self.mmu.array_write(addr, v);
             return Ok(());
         }
+        if addr == 0xff00_001c && self.cache.enabled {
+            self.cache.ccr_write(v);
+        }
         if self.mmu.reg_write(addr, v) {
             return Ok(());
         }
         self.io.write(bus, addr, size, v, self.cycles, self.insn_pc);
         Ok(())
+    }
+
+    /// OCBI, OCBP, OCBWB, ICBI and MOVCA.L when the caches are modelled.
+    /// `what`: 9 = OCBI, 0xa = OCBP, 0xb = OCBWB, 0xe = ICBI.
+    pub(super) fn cache_op<B: Bus>(&mut self, bus: &mut B, addr: u32, what: u16) -> Result<(), Exc> {
+        if !self.cache.enabled || !super::cache::cacheable(addr) {
+            return Ok(());
+        }
+        let pa = self.translate(addr, if what == 9 { Access::Write } else { Access::Read })?;
+        if bus.is_ram(pa) {
+            match what {
+                9 => self.cache.ocb(bus, pa, false, true),
+                0xa => self.cache.ocb(bus, pa, true, true),
+                0xb => self.cache.ocb(bus, pa, true, false),
+                _ => self.cache.icbi(pa),
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn movca<B: Bus>(&mut self, bus: &mut B, addr: u32, v: u32) -> Result<(), Exc> {
+        if self.cache.enabled && addr & 3 == 0 && super::cache::cacheable(addr) {
+            let pa = self.translate(addr, Access::Write)?;
+            if bus.is_ram(pa) {
+                self.cache.movca(bus, pa, v);
+                return Ok(());
+            }
+        }
+        self.write32(bus, addr, v)
     }
 
     /// PREF on a store-queue address: flush 32 bytes to memory.
@@ -656,8 +717,8 @@ impl Cpu {
             s += &format!("r{:<2}={:08x}{}", i, self.r[i], if i % 4 == 3 { "\n" } else { " " });
         }
         s += &format!(
-            "pc={:08x} pr={:08x} sr={:08x} gbr={:08x} vbr={:08x}\nssr={:08x} spc={:08x} mach={:08x} macl={:08x} fpscr={:08x} fpul={:08x}\n",
-            self.pc, self.pr, self.sr, self.gbr, self.vbr, self.ssr, self.spc, self.mach, self.macl, self.fpscr, self.fpul
+            "pc={:08x} pr={:08x} sr={:08x} gbr={:08x} vbr={:08x}\nssr={:08x} spc={:08x} mach={:08x} macl={:08x} fpscr={:08x} fpul={:08x} ccr={:08x}\n",
+            self.pc, self.pr, self.sr, self.gbr, self.vbr, self.ssr, self.spc, self.mach, self.macl, self.fpscr, self.fpul, self.mmu.ccr
         );
         s
     }
