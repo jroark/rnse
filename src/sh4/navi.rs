@@ -102,7 +102,8 @@ pub struct Navi {
     pub can: Hcan,
     pub sdhi: Sdhi,
     /// Cycle of the last watchdog strobe edge, once there has been one.
-    pub watchdog_strobe: Option<u64>,
+    /// Edges seen on the watchdog strobe (bit 0 of [`WATCHDOG_PORT`]).
+    pub watchdog_edges: u64,
     pub adc: Adc,
     /// Link to the radio/audio processor.
     pub radio_uart: Uart,
@@ -156,7 +157,7 @@ impl Navi {
         let mut atapi = Atapi::new();
         atapi.packet_irq = true;
         // A/D inputs: the display closed (4) and 25 degrees (5).
-        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), debug_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() }
+        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), watchdog_edges: 0, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), debug_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() }
     }
 
     /// Whether this module, rather than the SH-4 model, owns `addr`.
@@ -206,6 +207,29 @@ impl Navi {
     /// The faceplate controller's reset line is low.
     pub fn panel_reset(&self) -> bool {
         self.raw_read(PORT_FP + 4, 4) & 2 == 0
+    }
+
+    /// A register of the port blocks at 0xffc40000 and 0xffc44000.  An
+    /// access of any size at the register's address gets its low bits:
+    /// the loader toggles the watchdog strobe with 32-bit accesses and
+    /// the OS toggles the same line by reading 32 bits and writing a
+    /// byte to the same address.  (Memory would put that byte in bits
+    /// 31..24.)
+    fn port_read(&self, addr: u32, size: u32) -> u32 {
+        if addr & 3 != 0 {
+            return self.raw_read(addr, size);
+        }
+        let v = self.raw_read(addr, 4);
+        if size >= 4 { v } else { v & ((1 << (size * 8)) - 1) }
+    }
+
+    fn port_write(&mut self, addr: u32, size: u32, v: u32) {
+        if addr & 3 != 0 || size >= 4 {
+            return self.raw_write(addr, size, v);
+        }
+        let mask = (1u32 << (size * 8)) - 1;
+        let old = self.raw_read(addr, 4);
+        self.raw_write(addr, 4, old & !mask | v & mask);
     }
 
     fn raw_read(&self, addr: u32, size: u32) -> u32 {
@@ -294,7 +318,8 @@ impl Navi {
             SCIF_DEBUG..=0xffe4_003f => self.debug_scif.read(addr - SCIF_DEBUG) as u32,
             // Port blocks: direction, output and the rest hold what is
             // written (the input register is handled above where known).
-            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f | PORT_FP..=0xff90_9007 => self.raw_read(addr, size),
+            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.port_read(addr, size),
+            PORT_FP..=0xff90_9007 => self.raw_read(addr, size),
             _ => {
                 self.unmodelled.note(addr, false, pc);
                 self.raw_read(addr, size)
@@ -304,7 +329,7 @@ impl Navi {
         v
     }
 
-    pub fn write(&mut self, addr: u32, size: u32, v: u32, now: u64, pc: u32, intc: &mut Intc) {
+    pub fn write(&mut self, addr: u32, size: u32, v: u32, _now: u64, pc: u32, intc: &mut Intc) {
         self.log.log("soc", true, addr, size, v, pc);
         match addr {
             SDHI..=0xff90_a0ff if size == 2 => {
@@ -332,13 +357,12 @@ impl Navi {
                 intc.set_int2(INT2_ATAPI, self.atapi_request());
             }
             WATCHDOG_PORT => {
-                // Only the loader is known to strobe this way (a 32-bit
-                // read-modify-write); how the OS serves the watchdog is
-                // not known, so it is left unwatched.
-                if size == 4 && (self.raw_read(addr, size) ^ v) & 1 != 0 {
-                    self.watchdog_strobe = Some(now);
+                // The loader toggles bit 0 with 32-bit accesses, the OS
+                // with byte accesses to the same address.
+                if (self.port_read(addr, size) ^ v) & 1 != 0 {
+                    self.watchdog_edges += 1;
                 }
-                self.raw_write(addr, size, v);
+                self.port_write(addr, size, v);
             }
             CAN..=0xffdf_0fff => {
                 self.can.write(addr - CAN, size, v, pc);
@@ -373,7 +397,8 @@ impl Navi {
                 let mut sent = std::mem::take(&mut self.debug_scif.tx);
                 self.console.append(&mut sent);
             }
-            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f | PORT_FP..=0xff90_9007 => self.raw_write(addr, size, v),
+            0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.port_write(addr, size, v),
+            PORT_FP..=0xff90_9007 => self.raw_write(addr, size, v),
             _ => {
                 self.unmodelled.note(addr, true, pc);
                 self.raw_write(addr, size, v)
@@ -594,5 +619,32 @@ impl Navi {
         s.push_str(&self.ge.describe());
         s.push('\n');
         s
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The watchdog strobe as the loader and as the OS toggle it.
+    #[test]
+    fn port_registers_take_any_access_size() {
+        let mut navi = Navi::new();
+        let mut io = crate::sh4::onchip::OnChip::new();
+        let intc = &mut io.intc;
+        // The loader: 32-bit read, flip bit 0, 32-bit write.
+        let v = navi.read(WATCHDOG_PORT, 4, 0, 0, intc);
+        navi.write(WATCHDOG_PORT, 4, v ^ 1, 0, 0, intc);
+        assert_eq!(navi.watchdog_edges, 1);
+        // The OS: 32-bit read, flip bit 0, write the low byte to the
+        // same address.
+        for _ in 0..3 {
+            let v = navi.read(WATCHDOG_PORT, 4, 0, 0, intc);
+            let b = navi.read(WATCHDOG_PORT, 1, 0, 0, intc);
+            assert_eq!(b, v & 0xff);
+            navi.write(WATCHDOG_PORT, 1, (b & !1) | ((v ^ 1) & 1), 0, 0, intc);
+        }
+        assert_eq!(navi.watchdog_edges, 4);
+        assert_eq!(navi.read(WATCHDOG_PORT, 4, 0, 0, intc), 0);
     }
 }

@@ -292,9 +292,19 @@ watchdog: presumably the supply voltage monitor.
 ## Watchdog
 
 External, strobed through bit 0 of the port at 0xffc44008 from the
-tick.  The loader ends an update by printing `*** WDT Reset ***` and no
-longer strobing; when it gets impatient it jumps to address 0 itself.
-The emulator resets after 1.5 s without a strobe.
+tick, every 20 ms; the longest pause the OS leaves while it starts is
+about 150 ms.  The loader ends an update by printing `*** WDT Reset ***`
+and no longer strobing; when it gets impatient it jumps to address 0
+itself.  The emulator resets after 1.5 s without an edge (the real
+limit is not known).
+
+The loader toggles the bit with 32-bit accesses.  The OS reads the
+register as 32 bits, flips bit 0 and writes the result back as a *byte*
+at the same address, through a routine it uses for all its ports.  In
+memory that byte would be bits 31..24 and the strobe would never move;
+since the OS evidently keeps a real unit alive, the registers of the
+port blocks at 0xffc40000 and 0xffc44000 must give an access of any
+size their low bits, and they are emulated so.
 
 ## Debug serial port
 
@@ -537,8 +547,6 @@ writing that block before the start.
   from; the SD card processors; route guidance has not been tried.
 * The second interrupt register block at 0xff902000, the I2C masters,
   the remaining serial ports, DMA for the drive.
-* How the OS serves the watchdog.  The emulator only watches the
-  loader's strobe.
 * Interrupt sources the OS registers handlers for and that have no
   model: 0x480, 0x760, 0x7a0, 0x940-0x980, 0xc00, 0xca0-0xce0, 0xde0,
   0xe20, 0xea0, 0xfa0.

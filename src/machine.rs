@@ -57,6 +57,17 @@ const PULSES_PER_METRE: f64 = 2.5;
 const GYRO_REST: f64 = 418.0;
 const GYRO_PER_DPS: f64 = 5.12;
 
+/// What the machine keeps about the external watchdog.
+#[derive(Default, Clone, Copy)]
+pub struct Watchdog {
+    /// Strobe edges counted so far.
+    pub edges: u64,
+    /// Cycle count at the last edge (or at the start).
+    pub last: u64,
+    /// Longest time between two edges, in cycles.
+    pub longest: u64,
+}
+
 pub struct Machine {
     pub cpu: Cpu,
     pub board: Board,
@@ -65,9 +76,11 @@ pub struct Machine {
     pub echo_console: bool,
     /// CPU cycles per display frame.
     pub frame_cycles: u64,
-    /// The 192's watchdog: strobe edges counted at the last frame and
-    /// when the count last moved.
-    watchdog_192: (u64, Option<u64>),
+    /// The external watchdog as last looked at.
+    pub watchdog: Watchdog,
+    /// The watchdog bites from the start, not only once the software
+    /// has begun to strobe it.
+    pub watchdog_always: bool,
     next_frame: u64,
     /// Module entry points still to be called by the boot stand-in.
     boot_calls: VecDeque<(String, u32)>,
@@ -109,6 +122,7 @@ pub struct Machine {
     pub panel_present: bool,
     /// What the faceplate controller has answered and when it arrives.
     panel_replies: VecDeque<(u64, Vec<u8>)>,
+    radio_replies: VecDeque<(u64, Vec<u8>)>,
     /// Scripted faceplate input: (time in ms, action), any order.
     pub panel_script: Vec<(u64, PanelAction)>,
 }
@@ -159,7 +173,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog_192: (0, None), next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Fill RAM with arbitrary data, as it is after power-up on real
@@ -553,24 +567,39 @@ impl Machine {
     /// Exchange bytes with the radio processor.
     fn radio_link(&mut self) {
         let ms = self.cpu.cycles / self.cycles_per_ms();
+        let now = self.cpu.cycles;
+        let char_time = self.cycles_per_ms() * 10 / 96 * 10;
         let uart: &mut dyn SerialPort = match self.cpu.io.navi.as_mut() {
             Some(navi) => &mut navi.radio_uart,
             None => &mut self.board.uart[1],
         };
+        let mut changed = false;
         let bytes = uart.take_tx();
-        if bytes.is_empty() {
-            return;
-        }
-        if self.trace_serial {
-            eprintln!("[radio] {:>7} ms  unit -> {}", ms, hex(&bytes));
-        }
-        if self.radio_present {
-            let reply = self.radio.from_unit(&bytes);
-            if !reply.is_empty() {
-                uart.feed(&reply);
+        if !bytes.is_empty() {
+            if self.trace_serial {
+                eprintln!("[radio] {:>7} ms  unit -> {}", ms, hex(&bytes));
             }
+            if self.radio_present {
+                let reply = self.radio.from_unit(&bytes);
+                if !reply.is_empty() {
+                    // As with the faceplate: an answer takes at least
+                    // the time of the bytes on the line.
+                    self.radio_replies.push_back((now + (bytes.len() as u64 + 1) * char_time, reply));
+                }
+            }
+            changed = true;
         }
-        self.update_irqs();
+        while self.radio_replies.front().is_some_and(|r| r.0 <= now) {
+            let reply = self.radio_replies.pop_front().unwrap().1;
+            if self.trace_serial {
+                eprintln!("[radio] {:>7} ms  unit <- {}", ms, hex(&reply));
+            }
+            uart.feed(&reply);
+            changed = true;
+        }
+        if changed {
+            self.update_irqs();
+        }
     }
 
     /// Bring the interrupt lines up to date after a device changed state.
@@ -823,16 +852,8 @@ impl Machine {
                     0x8000_0000 + base + 0x1c
                 }
             }
-            // Called from the tick: on the 193 this is what serves the
-            // watchdog once the OS runs (the OS never touches the strobe
-            // itself).
+            // Called from the tick.
             (0x3e, 7) => {
-                let now = self.cpu.cycles;
-                if let Some(navi) = self.cpu.io.navi.as_mut() {
-                    if navi.watchdog_strobe.is_some() {
-                        navi.watchdog_strobe = Some(now);
-                    }
-                }
                 0
             }
             // Hand-over of the boot ROM's CAN state.  r4 points at two
@@ -1014,31 +1035,32 @@ impl Machine {
                 let frame_ms = self.frame_cycles / self.cycles_per_ms();
                 self.atapi().tick(frame_ms);
                 self.board.vsync();
-                let watchdog_ms = 1500 * self.cycles_per_ms();
                 if let Some(navi) = self.cpu.io.navi.as_mut() {
                     navi.vsync(&mut self.cpu.io.intc);
-                    // The external watchdog: once the firmware has
-                    // started strobing it, a pause this long resets the
-                    // unit.  (The update loader ends that way on purpose.)
-                    if navi.watchdog_strobe.is_some_and(|t| self.cpu.cycles - t > watchdog_ms) {
-                        navi.watchdog_strobe = None;
-                        eprintln!("[boot] the watchdog was not served: reset");
-                        self.reset_requested = true;
-                        self.cpu.fault = Some("reset requested".into());
-                        return Stop::Fault;
+                }
+                // The external watchdog wants an edge on its strobe
+                // (192: port 0 bit 0; 193: 0xffc44008 bit 0) regularly.
+                // It is taken to be armed by the first two edges, or
+                // from the start when `watchdog_always` is set; the real
+                // period is not known, 1.5 s is assumed.  (The 193's
+                // update loader ends by letting it expire on purpose.)
+                let edges = match self.cpu.io.navi.as_ref() {
+                    Some(navi) => navi.watchdog_edges,
+                    None => self.board.watchdog_edges,
+                };
+                let now = self.cpu.cycles;
+                if edges != self.watchdog.edges {
+                    if self.watchdog.edges != 0 || self.watchdog_always {
+                        self.watchdog.longest = self.watchdog.longest.max(now - self.watchdog.last);
                     }
-                } else {
-                    // The 192's: the same rule, on port 0's bit 0 (0x12300001).  The
-                    // real period is not known for either unit.
-                    if self.board.watchdog_edges != self.watchdog_192.0 {
-                        self.watchdog_192 = (self.board.watchdog_edges, Some(self.cpu.cycles));
-                    } else if self.board.watchdog_edges >= 2 && self.watchdog_192.1.is_some_and(|t| self.cpu.cycles - t > watchdog_ms) {
-                        self.watchdog_192.1 = None;
-                        eprintln!("[boot] the watchdog was not served: reset");
-                        self.reset_requested = true;
-                        self.cpu.fault = Some("reset requested".into());
-                        return Stop::Fault;
-                    }
+                    self.watchdog.edges = edges;
+                    self.watchdog.last = now;
+                } else if (edges >= 2 || self.watchdog_always) && now - self.watchdog.last > 1500 * self.cycles_per_ms() {
+                    self.watchdog.last = now;
+                    eprintln!("[boot] the watchdog was not served: reset");
+                    self.reset_requested = true;
+                    self.cpu.fault = Some("reset requested".into());
+                    return Stop::Fault;
                 }
                 self.board.step_display((self.frame_cycles / self.cycles_per_ms()) as u32);
             }
