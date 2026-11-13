@@ -187,8 +187,9 @@ fn os_reaches_idle() {
 fn keys_reach_the_user_interface() {
     let Some(image) = disc() else { return };
     let variants = fw::load_variants(&image).unwrap();
-    // Only the European 192 software gets this far.
-    let Some(v) = variants.iter().find(|v| v.name == "V220") else { return };
+    // The 192 software on this disc: V220 (Europe) or V222 (North
+    // America).
+    let Some(v) = variants.iter().find(|v| rnse::board::Model::for_variant(&v.name) == Some(rnse::board::Model::Rnse192)) else { return };
     let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
     let mut m = Machine::new();
     m.echo_console = false;

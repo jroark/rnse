@@ -392,12 +392,13 @@ impl Machine {
         // handles interrupts but never takes the chip out of reset.
         self.can().start();
         self.boot_calls.clear();
-        if self.board.model == crate::board::Model::Rnse193 {
-            // On this model the boot ROM calls the entry points of every
-            // module, stage by stage, in directory order (the 192's OS
-            // does that for the other modules itself; the same code is
-            // present but unreachable in the 193's OS).  The OS's third
-            // entry does not return, so it has to come last.
+        if v.name != "V220" {
+            // The boot ROM calls the entry points of every module, stage
+            // by stage, in directory order.  Only the oldest software
+            // (V220) has its OS do that for the other modules itself; the
+            // same code is still present in the later OS builds but is
+            // not reached.  The OS's third entry does not return, so it
+            // has to come last.
             let order = ["OSM", "APM", "APFM", "AUM", "FONT", "VRM", "DIG"];
             let modules: Vec<&Module> = order.iter().filter_map(|n| v.module(n)).collect();
             for (i, name) in ["init1", "init2", "start"].iter().enumerate() {

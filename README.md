@@ -14,7 +14,7 @@ image.
 Work in progress.  The update discs carry software for two generations
 of the unit, which are different computers, each in a European and a
 North American version.  What runs today on the older one (part number
-8P0 035 192, firmware variant `V220`; see below for `V222`):
+8P0 035 192, firmware variants `V220` and `V222`):
 
 | | |
 |---|---|
@@ -30,8 +30,8 @@ which is built around an SH7770-family system-on-chip:
 | Update loader | Boots, shows its screen on the 800 x 480 display, reads the CD and writes the flash; the result is byte-for-byte the modules on the disc.  `rnse loader disc.iso --variant V574` |
 | Main software | Boots into its user interface: start-up picture, then the screens (radio, set-up and the others) drawn through the chip's 2D graphics engine onto the display unit's blended planes, with the car (ignition), the radio processor, the faceplate and the drive answered as on the 192.  Function keys, soft keys and the main knob work, also in the browser front end.  A freshly installed unit asks for the navigation disc first; the keys work regardless.  `rnse ui disc.iso --variant V574` |
 
-The North American 192 software (`V222`) is installed by its loader and
-starts, but stays on a dark screen where `V220` shows its first picture.
+The North American 192 software (`V222`) runs like `V220`, in English:
+`rnse ui disc.iso --variant V222`.
 
 Not done yet: the power button, opening the display, CD playback, the
 GPS and SD card processors, sound, the 3D half of the graphics chip.

@@ -28,8 +28,16 @@ context and never returns.  Evidence: entries 1 and 2 are functions that
 return with `rts`; entry 2 installs the OS's vector base; entry 3 ends in
 `rte`.
 
-The OS itself walks the module directory and calls the same three entry
-points of every other module at the matching stage.
+In the oldest software (V220) the OS itself walks the module directory
+and calls the same three entry points of every other module at the
+matching stage.  Every later software, including the North American one
+for the same hardware (V222), expects the boot ROM to do that: stage 1
+of every module in directory order, then stage 2, then stage 3, with the
+OS's third entry last.  The routine that did it is still in those OS
+builds but is not reached.  Without the calls the OS runs alone: its
+tasks start and it talks to the radio processor and the faceplate, but
+the application never asks it to draw anything and the screen stays
+dark.
 
 State the OS inherits:
 

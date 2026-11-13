@@ -254,9 +254,10 @@ the debug log), with two differences in how they are started:
 
 * The boot ROM, not the OS, calls every module's entry points: stage 1
   of each module in directory order, then stage 2, then stage 3, with
-  the OS's third entry (which never returns) last.  The 192's OS does
-  this for the other modules itself; the same routine is still in the
-  193's OS but nothing calls it.  The order matters: the application's
+  the OS's third entry (which never returns) last.  The 192's first OS
+  (V220) does this for the other modules itself; the same routine is
+  still in the 193's OS but nothing calls it (V222, the later 192
+  software, already works the new way).  The order matters: the application's
   first entry moves the memory break (boot ROM service 5) from the end
   of the OS's data down to the end of its own, at 0x0ca57004, and the
   heap the OS creates later runs from the final break up to 0x0e8cfff0,
