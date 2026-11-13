@@ -47,9 +47,10 @@ In the browser front end the 193 has a fix in San Francisco unless
 
 Audio CDs play on both units (`--audio-cd 12x200` for a disc of test
 tones, `--audio-cd a.wav,b.wav` for recordings), and `--wav out.wav`
-writes what the drive plays: its output before the unit's volume
-control and amplifier, which belong to the radio processor and are not
-emulated. The 192's installed software reads data discs (it takes an
+writes what the unit plays: the drive's output through the amplifier
+as far as the radio processor's side of it is understood, silent
+unless the CD is the selected source and at the volume the unit has
+set with its knob. The 192's installed software reads data discs (it takes an
 update disc with a higher software index for an update and runs the
 whole update itself). The 192's SD/MP3 processor stand-ins complete
 their boot handshake and startup commands; both card slots report

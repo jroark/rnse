@@ -269,8 +269,14 @@ fn cd_audio_plays() {
         assert_eq!(m.run(10_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
         assert_eq!(m.atapi().audio_status, AudioStatus::Playing, "{}: the OS did not start the player", v.name);
         let before = m.atapi().audio_frame();
-        // Listen to the drive from here on.
+        // The unit has told the amplifier: the CD drive is the source,
+        // at some volume.
+        assert_eq!(m.radio.source, rnse::dev::radio::Radio::SOURCE_CD, "{}: source", v.name);
+        assert!((1..=30).contains(&m.radio.volume), "{}: volume {}", v.name, m.radio.volume);
+        // Listen to the drive, and to what comes out of the amplifier,
+        // from here on.
         m.sound = Some(Vec::new());
+        m.speaker = Some(Vec::new());
         assert_eq!(m.run(10_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
         let played = m.atapi().audio_frame() - before;
         assert!((745..=755).contains(&played), "{}: ten seconds should be 750 frames, not {}", v.name, played);
@@ -285,6 +291,26 @@ fn cd_audio_plays() {
         let hz = crossings / 2.0 / seconds;
         let want = AudioDisc::tone_hz(track) as f64;
         assert!((hz - want).abs() < 2.0, "{}: track {} should sound at {} Hz, not {:.1}", v.name, track, want, hz);
+        // Through the amplifier: the same, quieter by the volume.
+        let speaker = m.speaker.take().unwrap();
+        let peak = |s: &[i16]| s.iter().map(|x| x.unsigned_abs() as f32).fold(0.0, f32::max);
+        let ratio = peak(&speaker) / peak(&sound);
+        assert!((ratio - m.radio.cd_gain()).abs() < 0.01 && ratio > 0.0, "{}: gain {} at volume {}", v.name, ratio, m.radio.volume);
+        // Louder when the volume knob is turned up, and silent when the
+        // unit goes to another source.
+        let quiet = m.radio.volume;
+        m.speaker = Some(Vec::new());
+        assert!(m.panel_knob("volume", 4));
+        assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        assert_eq!(m.radio.volume, quiet + 4, "{}: four steps up", v.name);
+        assert!(m.panel_key("RADIO", true));
+        m.run(200 * ms);
+        assert!(m.panel_key("RADIO", false));
+        assert_eq!(m.run(4_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        assert_ne!(m.radio.source, rnse::dev::radio::Radio::SOURCE_CD, "{}: the tuner is the source again", v.name);
+        m.speaker = Some(Vec::new());
+        m.run(1_000 * ms);
+        assert!(m.speaker.take().unwrap().iter().all(|s| *s == 0), "{}: nothing of the CD comes through", v.name);
     }
 }
 

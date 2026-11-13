@@ -15,23 +15,23 @@
 //! check   one's complement of the sum of all preceding bytes
 //! ```
 //!
-//! What is known of the amplifier's part (192, software 0815), none of
-//! it acted on here:
+//! The amplifier's part (192, software 0815):
 //!
 //! * `19 [01 v]` sets the volume, v from 0 to 30 (7 after a first
 //!   start).  The main unit keeps the level itself and sends the new
 //!   one for every movement of the volume knob.
-//! * `81 [08 s ..]` selects the source: 3 the tuner, 1 the CD drive.
-//! * The answer to request 0x88 is a status block.  The main unit takes
-//!   four fields from its first eight bytes and the amplifier's source
-//!   and volume from bytes 33 and 34 (it logs them: `AMP SOURCE = %d
-//!   VOL = %d`), and it lets its own volume rise at most five steps
-//!   above the volume reported there.  The same block is accepted
-//!   unasked, at any time.  Answered with an empty block, as here, the
-//!   unit reads zeroes and volume changes above 5 are held back; with a
-//!   block of 40 zero bytes (and the volume, or the source, filled in)
-//!   it stops sending volume changes at all, so the first bytes carry
-//!   state that has to be right.  They are not understood yet.
+//! * `81 [08 s v ..]` selects the source, 3 the tuner and 1 the CD
+//!   drive, and gives the volume for it.
+//! * The answer to request 0x88 is a status block, which the main unit
+//!   also accepts unasked at any time.  It takes four fields from the
+//!   first eight bytes (not understood; zero here) and sixteen bytes of
+//!   amplifier state from offset 33: the source, the volume (it logs
+//!   these two: `AMP SOURCE = %d VOL = %d`), and fourteen more of which
+//!   only this is known: while the eighth is not zero the volume knob
+//!   does nothing.  The main unit lets its own volume rise at most five
+//!   steps above the volume reported here, so an amplifier that never
+//!   reports keeps the unit quiet.  This stand-in reports source and
+//!   volume as it was last told them, at once.
 //!
 //! The main unit knows two kinds of command.  A request is answered by a
 //! frame with the same command number carrying the data asked for.  A
@@ -123,6 +123,10 @@ pub struct Radio {
     /// installed software set (the main unit compares the two).
     pub version: [u8; 8],
     pub trace: bool,
+    /// The amplifier as the main unit has set it: the source it plays
+    /// (1 the CD drive, 3 the tuner) and the volume, 0 to 30.
+    pub source: u8,
+    pub volume: u8,
     /// Commands seen, for statistics: (command, first data byte or 0xff).
     pub seen: std::collections::BTreeMap<(u8, u8), u32>,
 }
@@ -135,7 +139,7 @@ impl Default for Radio {
 
 impl Radio {
     pub fn new() -> Self {
-        Radio { parser: Parser::new(0x01), version: *b"A0000000", trace: false, seen: Default::default() }
+        Radio { parser: Parser::new(0x01), version: *b"A0000000", trace: false, source: 0, volume: 0, seen: Default::default() }
     }
 
     /// Bytes from the main unit; returns the bytes the radio sends back.
@@ -155,6 +159,31 @@ impl Radio {
         out
     }
 
+    /// Source number of the CD drive's audio.
+    pub const SOURCE_CD: u8 = 1;
+
+    /// What the amplifier does to the CD drive's signal: nothing gets
+    /// through unless the drive is the selected source, and the volume
+    /// scales it.  The steps' size is not known; 2 dB a step is assumed,
+    /// full scale at 30, silence at 0.
+    pub fn cd_gain(&self) -> f32 {
+        if self.source != Self::SOURCE_CD || self.volume == 0 {
+            return 0.0;
+        }
+        10f32.powf(-((30 - self.volume.min(30)) as f32) * 2.0 / 20.0)
+    }
+
+    /// The status block (see the module's notes): 33 bytes of which
+    /// the first eight are four fields, then sixteen of amplifier
+    /// state.  Its real length is not known; this is as far as the
+    /// main unit reads.
+    fn status(&self) -> Frame {
+        let mut d = [0u8; 49];
+        d[33] = self.source;
+        d[34] = self.volume;
+        Frame::new(0x88, &d)
+    }
+
     fn answer(&mut self, f: &Frame) -> Vec<Frame> {
         match f.cmd {
             // Version request: 16 bytes, the first eight are the version
@@ -164,7 +193,20 @@ impl Radio {
                 id[..8].copy_from_slice(&self.version);
                 vec![Frame::new(0x0b, &id)]
             }
-            // Settings the main software has been seen to send:
+            0x88 => vec![self.status()],
+            // Volume and source: acknowledged, and reported back as
+            // taken.
+            0x19 if f.data.len() == 2 && f.data[0] == 1 => {
+                self.volume = f.data[1];
+                vec![Frame::new(ACK, &[0]), self.status()]
+            }
+            0x81 if f.data.len() >= 3 && f.data[0] == 8 => {
+                // The source, and the volume to play it at.
+                self.source = f.data[1];
+                self.volume = f.data[2];
+                vec![Frame::new(ACK, &[0]), self.status()]
+            }
+            // Other settings the main software has been seen to send:
             // acknowledged.
             0x17 | 0x19 | 0x80 | 0x81 => vec![Frame::new(ACK, &[0])],
             // Everything else is taken for a request and answered with
@@ -178,6 +220,34 @@ impl Radio {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn amplifier_state_is_reported_back() {
+        let mut r = Radio::new();
+        let say = |r: &mut Radio, f: Frame| -> Vec<Frame> {
+            let mut p = Parser::new(0x00);
+            r.from_unit(&f.encode(0x01)).into_iter().filter_map(|b| p.push(b)).collect()
+        };
+        assert_eq!(r.cd_gain(), 0.0);
+        let got = say(&mut r, Frame::new(0x19, &[1, 12]));
+        assert_eq!(got[0], Frame::new(ACK, &[0]));
+        assert_eq!((got[1].cmd, got[1].data.len(), got[1].data[33], got[1].data[34]), (0x88, 49, 0, 12));
+        assert!(got[1].data[35..].iter().all(|b| *b == 0), "the rest of the amplifier's state is zero");
+        assert_eq!(r.cd_gain(), 0.0, "the tuner is not the CD drive");
+        let got = say(&mut r, Frame::new(0x81, &[8, 1, 12, 0, 0, 0, 0, 1, 3]));
+        assert_eq!((got[1].data[33], got[1].data[34]), (1, 12));
+        say(&mut r, Frame::new(0x81, &[8, 1, 9, 0, 0, 0, 0, 1, 3]));
+        assert_eq!(r.volume, 9, "the source message carries the volume");
+        say(&mut r, Frame::new(0x19, &[1, 12]));
+        assert!((r.cd_gain() - 10f32.powf(-36.0 / 20.0)).abs() < 1e-6);
+        say(&mut r, Frame::new(0x19, &[1, 30]));
+        assert_eq!(r.cd_gain(), 1.0);
+        // Asked for, the same block.
+        let got = say(&mut r, Frame::new(0x88, &[]));
+        assert_eq!((got.len(), got[0].data[33], got[0].data[34]), (1, 1, 30));
+        // Other settings are acknowledged and nothing more.
+        assert_eq!(say(&mut r, Frame::new(0x19, &[7, 0, 0x0c])), [Frame::new(ACK, &[0])]);
+    }
 
     #[test]
     fn frames_as_seen_on_the_wire() {

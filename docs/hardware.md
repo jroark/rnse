@@ -209,15 +209,19 @@ with an echo instead, as it first did, made the unit repeat each of
 them five times and stretched the start-up by most of a minute.  The firmware also contains a second, FT1.2-style parser
 (`68 L L 68 ... CS 16`) for this processor's boot loader.
 
-Volume and source go to this processor too (`19 [01 level]`, level 0
-to 30; `81 [08 source ..]`, 3 the tuner and 1 the CD drive), and its
-status block, the answer to request 0x88, reports the amplifier's
-source and volume back in bytes 33 and 34; the OS will not raise its
-own volume more than five steps above the volume reported there.  The
-stand-in does not play the amplifier yet: a status block with those
-two bytes filled in and the rest zero makes the OS stop sending volume
-changes, so the block's first bytes matter and are not understood
-(`src/dev/radio.rs`).  The volume knob's direction bit means "quieter".
+Volume and source go to this processor too: `19 [01 level]`, level 0
+to 30, and `81 [08 source level ..]`, 3 the tuner and 1 the CD drive.
+Its status block, the answer to request 0x88 and also sent unasked,
+carries four fields in its first eight bytes (not understood) and
+sixteen bytes of amplifier state from offset 33: source, volume, and
+fourteen more of which the eighth, while not zero, makes the OS ignore
+the volume knob.  The OS will not raise its own volume more than five
+steps above the volume reported there, so the volume climbs in steps
+of at most five per report.  The stand-in keeps source and volume and
+reports them back at once; `--wav` gives the CD drive's sound through
+that: silent unless the CD is the source, 2 dB a volume step (the
+step is an assumption).  The volume knob's direction bit means
+"quieter".  The 193 does all of this the same way.
 
 ### Faceplate (channel 3)
 

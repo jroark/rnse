@@ -212,9 +212,9 @@ reads the full table of contents (READ TOC format 2), starts the player
 with PLAY CD (0xbc, addresses in minutes, seconds and frames, from the
 first track to the lead-out) and then polls READ SUB-CHANNEL for the
 position it shows.  The emulated drive keeps time for that to the
-sample, and what it plays can be had as sound (`--wav`): the drive's
-analogue output, that is, before the radio processor's volume control
-and amplifier.
+sample, and what it plays can be had as sound (`--wav`), through the
+amplifier as the radio processor's stand-in models it (source and
+volume, see the 192's notes on the radio processor).
 
 ## CAN
 
