@@ -124,6 +124,8 @@ pub struct Machine {
     /// cluster, the telephone module), and how many of the unit's frames
     /// they have seen.
     pub can_peers: Vec<crate::dev::tp20::Peer>,
+    /// Blocks for the peers to send: (time in ms, peer, block).
+    pub can_says: Vec<(u64, usize, Vec<u8>)>,
     can_seen: u64,
     /// Frames due and waiting for the bus, and when it is free again.
     can_waiting: VecDeque<Frame>,
@@ -191,7 +193,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -703,6 +705,23 @@ impl Machine {
     /// Show the transport peers what the unit has sent since they last
     /// looked, and put their answers on the bus.
     fn can_peers_tick(&mut self) {
+        if !self.can_says.is_empty() {
+            let ms = self.cpu.cycles / self.cycles_per_ms();
+            let mut i = 0;
+            while i < self.can_says.len() {
+                if self.can_says[i].0 <= ms {
+                    let (_, peer, block) = self.can_says.remove(i);
+                    if let Some(p) = self.can_peers.get_mut(peer) {
+                        if p.open {
+                            let frames = p.send(&block);
+                            self.can_waiting.extend(frames);
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
         let seen = self.can_seen;
         let (count, new): (u64, Vec<Frame>) = {
             let can = self.can();

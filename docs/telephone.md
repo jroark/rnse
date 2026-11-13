@@ -120,6 +120,35 @@ the channel opens and nothing is said on it; which bits make the unit
 start its dialogue (`^CTEL?` is the likely opening) is the next thing
 to find.
 
+## What holds the dialogue back
+
+Tried in the emulator against V2200815, with both channels answered
+(`--can-peers`):
+
+* No single bit of the seven-byte status frame (665) makes the unit
+  send anything on the telephone's channel, or changes the TEL screen
+  from "Telefon nicht vorhanden".  Bit 2 of the first byte puts the
+  mute symbol into the status line and nothing else.
+* Lines from the module (`--tel-say '^CTEL: 1@28000'`, `OK`, `^BTON:
+  1`) are acknowledged by the transport and not answered.
+* The telephone code decides how to start by the unit's network
+  management state: `8011a86c` and `8011a52c` fetch a byte through
+  `801d42b8` (RAM 0x8c197f46) and test bit 0x10.  That byte belongs to
+  the network management state machine, which is in the OS
+  (`801d372e` on; the other state is around 0x8c197f40).  In the
+  emulator it never changes: the bytes at 0x8c197f40 read `16 04 00 00
+  00 00 0c ..` whether or not network management frames from another
+  node (tried: 43a and 42b, alive and ring, addressed to 0x36 and to
+  the sender) arrive, although those frames do land in the unit's
+  mailbox for 0x400-0x43f, and the unit sends no network management
+  frame of its own.
+
+So the next step is not the AT dialogue but the unit's network
+management: getting its state machine to see the ring and reach the
+state in which bit 0x10 is set.  How received frames get from the
+mailbox to that state machine goes through the receive table the boot
+ROM hands over (`boot-rom.md`), which is where to look.
+
 ## Remaining protocol prerequisite
 
 Before exposing `--phone` or browser controls, establish how the real
