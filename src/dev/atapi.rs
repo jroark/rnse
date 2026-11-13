@@ -56,6 +56,10 @@ pub struct Atapi {
     dma: bool,
     sense: (u8, u8, u8),
     unit_attention: bool,
+    /// The drive raises its interrupt when it is ready to take the
+    /// twelve bytes of a packet command (the older of the two behaviours
+    /// ATAPI allows; the 193's software waits for it).
+    pub packet_irq: bool,
     pub log: IoLog,
     pub trace: bool,
     /// Count of sectors read, for statistics.
@@ -92,6 +96,7 @@ impl Atapi {
             dma: false,
             sense: (0, 0, 0),
             unit_attention: false,
+            packet_irq: false,
             log: IoLog::new(false, 4),
             trace: false,
             sectors_read: 0,
@@ -277,6 +282,7 @@ impl Atapi {
                 self.pkt_pos = 0;
                 self.count = IR_COD;
                 self.status = ST_DRDY | ST_DSC | ST_DRQ;
+                self.irq_line = self.packet_irq;
             }
             0xa1 => {
                 // IDENTIFY PACKET DEVICE

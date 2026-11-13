@@ -232,6 +232,14 @@ impl Machine {
         }
     }
 
+    /// Position of the motorised display, 0 (open) to 1023 (closed).
+    pub fn display_pos(&self) -> u16 {
+        match self.cpu.io.navi.as_ref() {
+            Some(navi) => navi.display_pos,
+            None => self.board.display_pos,
+        }
+    }
+
     /// Summary of the display hardware's state, for diagnostics.
     pub fn describe_display(&self) -> String {
         match self.cpu.io.navi.as_ref() {
@@ -636,6 +644,7 @@ impl Machine {
                     navi.ge.run(&mut self.board.ram, self.board.ram_base);
                     navi.update_irqs(&mut self.cpu.io.intc);
                 }
+                navi.atapi_dma(&mut self.board.ram, self.board.ram_base, &mut self.cpu.io.intc);
             }
             self.panel_link();
             if self.cpu.cycles >= self.next_frame {

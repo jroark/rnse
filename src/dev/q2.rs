@@ -34,6 +34,9 @@
 //! | 0x10000000  | no operand; meaning unknown, skipped                  |
 //! | 0x18000000  | WPR: (count - 1) << 16 | register, then the values    |
 //! | 0x40000000  | LCOFS: new coordinate offset                          |
+//! | 0x82......  | source point, source size (both x << 16 | y), a zero  |
+//! |             | word, four corners: stretch that part of the source   |
+//! |             | surface over the rectangle between the corners        |
 //! | 0xa0......  | BITBLTC: raster operation, colour, width - 1,         |
 //! |             | height - 1, destination (x << 16 | y): fill           |
 //! | 0xa2......  | BITBLTA: raster operation, byte offset into the       |
@@ -282,6 +285,48 @@ impl Q2 {
                         }
                     }
                     pc += 24;
+                }
+                // Stretch a rectangle of the source surface over a
+                // rectangle of the target.  The command gives four
+                // corners; only upright rectangles are handled.
+                0x82 => {
+                    let (sx, sy) = xy(arg(1));
+                    let (sw, sh) = xy(arg(2));
+                    let (ox, oy) = xy(self.reg(LCOR));
+                    let corners: Vec<(i32, i32)> = (4..8).map(|i| xy(arg(i))).collect();
+                    let (left, top) = (corners.iter().map(|c| c.0).min().unwrap() + ox, corners.iter().map(|c| c.1).min().unwrap() + oy);
+                    let (right, bottom) = (corners.iter().map(|c| c.0).max().unwrap() + ox, corners.iter().map(|c| c.1).max().unwrap() + oy);
+                    let (w, h) = (right - left + 1, bottom - top + 1);
+                    let (x0, y0, x1, y1) = self.clip(op);
+                    let dst = self.reg(RSAR);
+                    let dstride = self.reg(DSTRR) as i32;
+                    let size = self.pixel_size();
+                    let src = self.reg(SSAR);
+                    let sstride = self.reg(SSTRR) as i32;
+                    let key = (op & MODE_TRANSPARENT != 0).then_some(self.reg(STCR) as u16 & if size == 1 { 0xff } else { 0xffff });
+                    if self.trace {
+                        eprintln!("[q2] stretch {}x{} from {},{} to {}x{} at {},{} mode {:06x} to {:08x}/{} RCLR {:08x} from {:08x}/{}", sw, sh, sx, sy, w, h, left, top, op & 0xff_ffff, dst, dstride, self.reg(RCLR), src, sstride);
+                    }
+                    if sw > 0 && sh > 0 {
+                        for y in 0..h.min(4096) {
+                            let ty = top + y;
+                            if ty < y0 || ty > y1 {
+                                continue;
+                            }
+                            let v = sy + y * sh / h;
+                            for x in 0..w.min(4096) {
+                                let tx = left + x;
+                                if tx < x0 || tx > x1 {
+                                    continue;
+                                }
+                                let p = mem.pixel(src, v * sstride + sx + x * sw / w, size);
+                                if key != Some(p) {
+                                    mem.set_pixel(dst, ty * dstride + tx, size, p);
+                                }
+                            }
+                        }
+                    }
+                    pc += 32;
                 }
                 // Names the 8-bit surface holding the alpha values of the
                 // surface drawn to, for the rectangle about to be drawn.

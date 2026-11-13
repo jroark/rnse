@@ -120,8 +120,9 @@ fn os_runs_193() {
     }
 }
 
-/// With the ignition on, the 193's OS draws its start-up picture through
-/// the graphics engine and shows it on the display unit's planes.
+/// With the ignition on, the 193's OS draws its screens through the
+/// graphics engine, shows them on the display unit's planes and takes a
+/// key from the faceplate.
 #[test]
 fn os_draws_193() {
     let Some(image) = disc() else { return };
@@ -142,8 +143,21 @@ fn os_draws_193() {
         assert!(navi.ge.unknown.is_empty(), "{}: display list commands not understood: {:x?}", v.name, navi.ge.unknown);
         let (w, h, picture) = m.render();
         assert_eq!((w, h), (800, 480));
+        // By now the start-up picture has given way to a screen of text.
         let lit = picture.chunks(3).filter(|p| p.iter().any(|&c| c > 0x40)).count();
-        assert!(lit > 10_000, "{}: only {} pixels of the start-up picture are lit", v.name, lit);
+        assert!(lit > 3_000, "{}: only {} pixels of the screen are lit", v.name, lit);
+
+        // A function key from the faceplate brings up another screen.
+        assert!(m.panel.online, "{}: the OS never acknowledged the faceplate controller", v.name);
+        assert_eq!(m.run(25_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        let before = m.render().2;
+        assert!(m.panel_key("SETUP", true));
+        m.run(200 * ms);
+        assert!(m.panel_key("SETUP", false));
+        assert_eq!(m.run(4_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        assert_ne!(before, m.render().2, "{}: the screen did not change for SETUP", v.name);
+        let navi = m.cpu.io.navi.as_ref().unwrap();
+        assert!(navi.ge.unknown.is_empty(), "{}: display list commands not understood: {:x?}", v.name, navi.ge.unknown);
     }
 }
 

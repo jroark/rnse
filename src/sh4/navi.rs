@@ -48,7 +48,11 @@ const DU: u32 = 0xfff8_0000;
 const DU_END: u32 = 0xfffa_0000;
 const SCIF_DEBUG: u32 = 0xffe4_0000;
 const ATAPI: u32 = 0xffc6_2100;
+const ATAPI_CONTROL: u32 = 0xffc6_2180;
 const ATAPI_STATUS: u32 = 0xffc6_2184;
+const ATAPI_DMA_ADDR: u32 = 0xffc6_219c;
+const ATAPI_DMA_COUNT: u32 = 0xffc6_21a0;
+const ATAPI_SIGNALS: u32 = 0xffc6_21b0;
 const CAN: u32 = 0xffdf_0000;
 const WATCHDOG_PORT: u32 = 0xffc4_4008;
 const GE: u32 = 0xffe8_0000;
@@ -128,15 +132,21 @@ pub struct Plane {
     pub src_y: u32,
     /// Colour not drawn (PnTC1R for 8-bit planes, PnTC2R otherwise).
     pub transparent: u32,
-    /// PnALPHAR, used in the alpha blending mode: the blending ratio in
-    /// the low byte or, with bits 9..8 set, the number (from 0) of the
-    /// 8-bit plane whose pixels are the ratios.
+    /// PnALPHAR, used in the alpha blending mode.  Bits 10..8 choose
+    /// where the blending ratio comes from: 0 = the low byte, 3 = the
+    /// pixels of the 8-bit plane whose number (from 0) is in the low
+    /// bits.  The firmware also uses 7, with 0 or 1 in the low bits;
+    /// what that selects is not known (the A bit of the pixels would be
+    /// a candidate) and such planes are shown without blending.
     pub alpha: u32,
 }
 
 impl Navi {
     pub fn new() -> Navi {
-        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi: Atapi::new(), can: Hcan::rcan_et(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 0, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4) }
+        let mut atapi = Atapi::new();
+        atapi.packet_irq = true;
+        // A/D inputs: the display closed (4) and 25 degrees (5).
+        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), watchdog_strobe: None, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4) }
     }
 
     /// Whether this module, rather than the SH-4 model, owns `addr`.
@@ -144,6 +154,43 @@ impl Navi {
     pub fn owns(addr: u32) -> bool {
         // CCN and the first timer unit stay with the core model.
         !(0xff00_0000..0xff00_0100).contains(&addr) && !(0xffd8_0000..0xffd8_0030).contains(&addr)
+    }
+
+    /// Status of the ATAPI interface: bit 4 is the drive's interrupt
+    /// line, the others (transfer end, error) are written by software
+    /// only, as long as the interface's DMA is not modelled.
+    fn atapi_status(&self) -> u32 {
+        (self.raw_read(ATAPI_STATUS, 4) & !0x10) | (self.atapi.irq() as u32) << 4
+    }
+
+    /// Software has started the interface's DMA (control bit 0) and the
+    /// drive has data: move it to memory.  `ram` begins at physical
+    /// address `base`.  The end of the count sets status bit 1.
+    pub fn atapi_dma(&mut self, ram: &mut [u8], base: u32, intc: &mut Intc) {
+        if self.raw_read(ATAPI_CONTROL, 4) & 1 == 0 || !self.atapi.dma_request() {
+            return;
+        }
+        let addr = self.raw_read(ATAPI_DMA_ADDR, 4) & 0x1fff_ffff;
+        let count = self.raw_read(ATAPI_DMA_COUNT, 4);
+        let mut done = 0;
+        while done < count && self.atapi.dma_request() {
+            let byte = self.atapi.dma_read(1) as u8;
+            if let Some(b) = ram.get_mut(addr.wrapping_add(done).wrapping_sub(base) as usize) {
+                *b = byte;
+            }
+            done += 1;
+        }
+        let control = self.raw_read(ATAPI_CONTROL, 4) & !1;
+        self.raw_write(ATAPI_CONTROL, 4, control);
+        let status = self.raw_read(ATAPI_STATUS, 4) | 2;
+        self.raw_write(ATAPI_STATUS, 4, status);
+        intc.set_int2(INT2_ATAPI, self.atapi_request());
+    }
+
+    /// The interface requests an interrupt for the status bits enabled
+    /// in the register after the status.
+    fn atapi_request(&self) -> bool {
+        self.atapi_status() & self.raw_read(ATAPI_STATUS + 4, 4) != 0
     }
 
     fn raw_read(&self, addr: u32, size: u32) -> u32 {
@@ -205,15 +252,19 @@ impl Navi {
                 let v = match (addr - ATAPI) >> 2 {
                     // Data: the first byte of each pair in the low half.
                     0 => (self.atapi.read(0, 2, pc) as u16).swap_bytes() as u32,
-                    n @ 1..=7 => self.atapi.read(n, 1, pc),
-                    14 => self.atapi.read(8, 1, pc),
+                    // The OS wants to see DRQ before it starts a DMA
+                    // transfer.
+                    7 => self.atapi.read(7, 1, pc) | (self.atapi.dma_request() as u32) << 3,
+                    n @ 1..=6 => self.atapi.read(n, 1, pc),
+                    14 => self.atapi.read(8, 1, pc) | (self.atapi.dma_request() as u32) << 3,
                     _ => self.raw_read(addr, size),
                 };
-                intc.set_int2(INT2_ATAPI, self.atapi.irq());
+                intc.set_int2(INT2_ATAPI, self.atapi_request());
                 v
             }
-            // Interface status: bit 4 is the drive's interrupt line.
-            ATAPI_STATUS => (self.raw_read(addr, size) & !0x10) | (self.atapi.irq() as u32) << 4,
+            ATAPI_STATUS => self.atapi_status(),
+            // Signal levels: bit 0 is the drive's DMA request.
+            ATAPI_SIGNALS => self.atapi.dma_request() as u32,
             DU..=0xfff9_ffff if size == 4 => self.du32((addr - DU) & !3),
             // Debug console status: transmitter empty, FIFO has room.
             a if a == SCIF_DEBUG + 0x10 => 0x0060,
@@ -242,6 +293,10 @@ impl Navi {
                 self.ge.write(addr - GE, v);
                 intc.set_int2(INT2_GE, self.ge.irq());
             }
+            ATAPI_CONTROL..=0xffc6_218b => {
+                self.raw_write(addr, size, v);
+                intc.set_int2(INT2_ATAPI, self.atapi_request());
+            }
             WATCHDOG_PORT => {
                 // Only the loader is known to strobe this way (a 32-bit
                 // read-modify-write); how the OS serves the watchdog is
@@ -262,7 +317,7 @@ impl Navi {
                     14 => self.atapi.write(8, 1, v & 0xff, pc),
                     _ => self.raw_write(addr, size, v),
                 }
-                intc.set_int2(INT2_ATAPI, self.atapi.irq());
+                intc.set_int2(INT2_ATAPI, self.atapi_request());
             }
             DU..=0xfff9_ffff if size == 4 => {
                 let off = (addr - DU) & !3;
@@ -288,7 +343,7 @@ impl Navi {
         let s = self.du32(DSSR) | DSSR_VBK | DSSR_FRM;
         self.set_du32(DSSR, s);
         self.du_irq(intc);
-        intc.set_int2(INT2_ATAPI, self.atapi.irq());
+        intc.set_int2(INT2_ATAPI, self.atapi_request());
         intc.set_int2(INT2_CAN, self.can.irq());
         self.step_display(16);
     }
@@ -311,7 +366,7 @@ impl Navi {
     /// Recompute the request lines of the devices the host can poke
     /// between instructions (frames arriving on the CAN bus).
     pub fn update_irqs(&mut self, intc: &mut Intc) {
-        intc.set_int2(INT2_ATAPI, self.atapi.irq());
+        intc.set_int2(INT2_ATAPI, self.atapi_request());
         intc.set_int2(INT2_CAN, self.can.irq());
         intc.set_int2(INT2_RADIO, self.radio_uart.irq());
         intc.set_int2(INT2_PANEL, self.panel_scif.irq());
@@ -334,7 +389,7 @@ impl Navi {
             src_x: self.du32(b + 0x30) & 0xfff,
             src_y: self.du32(b + 0x34) & 0xfff,
             transparent: self.du32(if self.du32(b) & 3 == 0 { b + 0x44 } else { b + 0x48 }),
-            alpha: self.du32(b + 0x08) & 0x3ff,
+            alpha: self.du32(b + 0x08) & 0x7ff,
         }
     }
 
@@ -377,7 +432,8 @@ impl Navi {
         let y_off = self.y_offset();
         let order = self.plane_order();
         // Planes that only supply alpha values are not pictures.
-        let alpha_plane = |p: &Plane| (p.mode >> 12 & 3 == 1 && p.alpha >> 8 == 3).then_some((p.alpha & 7) + 1);
+        let blended = |p: &Plane| p.mode >> 12 & 3 == 1;
+        let alpha_plane = |p: &Plane| (blended(p) && p.alpha >> 8 == 3).then_some((p.alpha & 7) + 1);
         let alpha_planes: Vec<u32> = order.iter().filter_map(|&n| alpha_plane(&self.plane(n))).collect();
         for n in order {
             let p = self.plane(n);
@@ -394,7 +450,7 @@ impl Navi {
             // with what is behind it.
             let spim = p.mode >> 12 & 7;
             let keyed = spim & 4 == 0;
-            let blend = (spim & 3 == 1).then_some(p.alpha & 0xff);
+            let blend = (blended(&p) && p.alpha >> 8 == 0).then_some(p.alpha & 0xff);
             for py in 0..p.height {
                 let sy = (p.y + py) as usize;
                 if sy < y_off {

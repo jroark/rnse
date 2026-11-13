@@ -15,7 +15,7 @@ North American software (index 0320) for the same hardware.
 
 ![The 193's update loader in the emulator](loader-193.png)
 
-![The 193's main software (V575) in the emulator](os-193.png)
+![The 193's main software (V574) in the emulator: radio set-up](os-193.png)
 
 ## Memory map
 
@@ -101,13 +101,15 @@ driver.
   address +0x20 (repeated at +0x24 and +0x28), start position in the
   surface +0x30/+0x34, transparent colour +0x44 (8 bpp) and +0x48 (16
   bpp), memory length +0x50.  Surfaces are ordinary RAM.
-* Alpha: the low byte of the alpha register is the blending ratio.
-  With bits 9:8 set the ratio comes per pixel from another plane, whose
+* Alpha: bits 10:8 of the alpha register say where the blending ratio
+  comes from.  0: the low byte.  3: per pixel from another plane, whose
   number (from 0) is in the low bits: an 8 bpp plane that is enabled
-  like the others but is not a picture.  The OS's blended planes all
-  work this way, each with its alpha plane's surface directly behind its
-  own in memory.  The A bit of ARGB 1555 pixels is not interpreted by
-  the emulator.
+  like the others but is not a picture.  The OS's frame and note
+  overlays work this way, each with its alpha plane's surface directly
+  behind its own in memory.  7 (with 0 or 1 in the low bits) is used
+  for the main picture and its pop-up lists while menus are shown; what
+  it selects is not known, and the emulator shows such planes without
+  blending.  The A bit of ARGB 1555 pixels is not interpreted.
 * Plane priority register (+0x18): eight nibbles, each naming a plane
   and enabling it with bit 3; the lowest nibble is the front.  (The OS
   puts its blended overlays in the low nibbles and the alpha planes in
@@ -129,9 +131,9 @@ display lists from RAM; the firmware's messages call it "Q2", and the
 register layout is that of the engine Renesas later named M2DG.  The
 commands are not those of the 192's Coral chip.  [src/dev/q2.rs](../src/dev/q2.rs)
 describes registers and commands as far as they are known: register
-writes, rectangle fills, copies with a transparent colour, and blending
-a colour through an 8-bit coverage map, which is how text is drawn (the
-OS rasterises antialiased glyphs itself).  Surfaces are 16 bits per
+writes, rectangle fills, copies with a transparent colour, stretched
+copies, and blending a colour through an 8-bit coverage map, which is
+how text is drawn (the OS rasterises antialiased glyphs itself).  Surfaces are 16 bits per
 pixel, or 8 for alpha.
 
 The OS starts a list, waits for the interrupt its end raises (status bit
@@ -148,9 +150,19 @@ device control at +0x38, one register per 32-bit word.  Data words carry
 the first byte of each pair in the low half.  Interface control,
 status, interrupt enable and timing registers follow from +0x80 (the
 layout of the later R-Car ATAPI block); the loader sets them up once and
-then works by programmed I/O.  The OS polls bit 4 of the status register
-(+0x84), the drive's interrupt line, after each command.  It also uses
-the block's DMA registers, which are not emulated yet.
+then works by programmed I/O.
+
+The OS works by interrupt.  The status register (+0x84) has the drive's
+interrupt line in bit 4, the end of a DMA transfer in bit 1 and an error
+in bit 2; +0x88 enables each as an interrupt, and the handler switches
+them off again until the driver is ready for the next.  The driver
+expects the drive to interrupt when it is ready for the twelve bytes of
+a packet command, which newer ATAPI drives do not do.  Disc reads go by
+DMA: bit 2 of the control register (+0x80), the memory address in +0x9c
+and the byte count in +0xa0 are set before the command; once the status
+shows DRQ and the signal register (+0xb0) bit 0 shows the drive's DMA
+request, control bit 0 starts the transfer.  Bytes land in memory in
+the order the drive delivers them.
 
 ## CAN
 
@@ -264,19 +276,21 @@ going by the tick's reload value.
 In the emulator the OS starts all its tasks, checks its flash file
 system, sees the ignition, talks to the radio processor and the
 faceplate, shows its start-up picture after about half a minute and
-then its user interface, on all three variants.  What it shows there is
-a note that the CD/DVD drive is not working: its drive task sends one
-ATAPI packet command and gets no further (see below).  `printf` is at
+then its user interface, on all three variants.  It reads the disc in
+the drive, takes keys from the faceplate and changes screens (radio,
+set-up and so on).  A freshly installed unit first asks for the
+navigation disc to load a language from ("Bitte Navigations-Medium
+einlegen"), or says that the disc in the drive is not the right one; the
+function keys work regardless.  `printf` is at
 0x80688afe in V5741040, 0x80688146 in VB481000 and 0x8067b886 in
 V57510AA.
 
 ## Not done
 
-* The drive: after SET FEATURES (transfer mode) the OS issues a packet
-  command and never writes the packet.  Until that works the OS shows
-  its drive-fault note instead of the radio screen.
-* Keys do not do anything visible yet, though the faceplate link is up;
-  `rnse ui` is still for the 192 only.
+* The selection mark left of a list is drawn as a white box: the
+  copies the engine does between its alpha commands (drawing mode bit
+  0x400, another value in the rendering control register) are done as
+  plain copies.
 * The graphics engine's alpha commands, the A bit of ARGB pixels, and
   any drawing command the screens seen so far did not use (lines and
   polygons surely exist).
