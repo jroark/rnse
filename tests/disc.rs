@@ -315,6 +315,9 @@ fn sdk_example(image: &[u8], model: rnse::board::Model, example: &str) -> Option
     m.install_boot_stub(&v.name);
     m.atapi().load(custom.clone());
     m.start_loader(ldm, [0; 3]);
+    // As unforgiving as the emulator gets (`--strict`).
+    m.busy_start();
+    m.watchdog_always = true;
     Some((m, v.name.clone()))
 }
 

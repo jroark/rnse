@@ -176,6 +176,35 @@ impl Machine {
         Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
+    /// Leave the timers running with their interrupts enabled and open
+    /// in the interrupt controller, as a boot ROM that used them before
+    /// it started the software may.  (Both stock loaders begin by
+    /// stopping the timers and clearing the controller, the 193's nine
+    /// timers one by one; nothing says what the boot ROM really leaves.)
+    /// Software that enables interrupts without doing the same gets
+    /// interrupts it did not ask for.
+    pub fn busy_start(&mut self) {
+        let is_193 = self.cpu.io.navi.is_some();
+        let mut writes: Vec<(u32, u32, u32)> = Vec::new();
+        for ch in 0..3u32 {
+            let base = 0xffd8_0008 + ch * 12;
+            writes.push((base, 4, 0x0000_4000)); // TCOR
+            writes.push((base + 4, 4, 0x0000_4000)); // TCNT
+            writes.push((base + 8, 2, 0x0020)); // TCR: underflow interrupt
+        }
+        if is_193 {
+            writes.push((0xff80_4000, 4, 0x1f1f_1f00)); // INT2PRI0: the timers
+            writes.push((0xff80_403c, 4, 0x0000_0001)); // their mask cleared
+        } else {
+            writes.push((0xffd0_0004, 2, 0xfff0)); // IPRA: the timers at level 15
+        }
+        writes.push((0xffd8_0004, 1, 0x07)); // TSTR: all three count
+        let now = self.cpu.cycles;
+        for (addr, size, v) in writes {
+            self.cpu.io.write(&mut self.board, addr, size, v, now, 0);
+        }
+    }
+
     /// Fill RAM with arbitrary data, as it is after power-up on real
     /// hardware (and with the last run's leftovers after a reset).  To
     /// be called before anything is loaded.  Software that only works
