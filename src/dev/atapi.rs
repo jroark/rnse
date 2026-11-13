@@ -61,8 +61,91 @@ pub enum AudioStatus {
     Completed,
 }
 
+/// A data disc: an image in memory, or a (possibly very large) file read
+/// on demand, such as a navigation DVD.
+#[derive(Clone)]
+pub enum Disc {
+    Mem(std::sync::Arc<Vec<u8>>),
+    File { file: std::sync::Arc<std::sync::Mutex<std::fs::File>>, offset: u64, sectors: u32 },
+}
+
+impl Disc {
+    /// Open an image file.  Besides a plain ISO image this accepts the
+    /// image of an SD card prepared for the 193 unit, which carries the
+    /// navigation DVD's volume in a partition of type 0x96; the disc is
+    /// then that partition.
+    pub fn open(path: &str) -> std::io::Result<Disc> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = std::fs::File::open(path)?;
+        let len = file.seek(SeekFrom::End(0))?;
+        let mut mbr = [0u8; 512];
+        file.seek(SeekFrom::Start(0))?;
+        let (mut offset, mut bytes) = (0u64, len);
+        if len >= 512 && file.read_exact(&mut mbr).is_ok() && mbr[510] == 0x55 && mbr[511] == 0xaa {
+            for e in mbr[446..510].chunks(16) {
+                let start = u32::from_le_bytes([e[8], e[9], e[10], e[11]]) as u64 * 512;
+                let size = u32::from_le_bytes([e[12], e[13], e[14], e[15]]) as u64 * 512;
+                if e[4] == 0x96 && start < len {
+                    offset = start;
+                    bytes = size.min(len - start);
+                    break;
+                }
+            }
+        }
+        // The volume descriptor knows the real size.
+        let mut pvd = [0u8; 2048];
+        file.seek(SeekFrom::Start(offset + 16 * 2048))?;
+        if file.read_exact(&mut pvd).is_ok() && &pvd[1..6] == b"CD001" {
+            let n = u32::from_le_bytes([pvd[80], pvd[81], pvd[82], pvd[83]]) as u64 * 2048;
+            if n != 0 && n <= bytes {
+                bytes = n;
+            }
+        }
+        Ok(Disc::File { file: std::sync::Arc::new(std::sync::Mutex::new(file)), offset, sectors: (bytes / 2048) as u32 })
+    }
+
+    pub fn sectors(&self) -> u32 {
+        match self {
+            Disc::Mem(v) => (v.len() / 2048) as u32,
+            Disc::File { sectors, .. } => *sectors,
+        }
+    }
+
+    /// `n` sectors from `lba` (zeros where the image ends early).
+    pub fn read(&self, lba: u32, n: u32) -> Vec<u8> {
+        let mut out = vec![0u8; n as usize * 2048];
+        match self {
+            Disc::Mem(v) => {
+                let s = (lba as usize * 2048).min(v.len());
+                let e = (s + out.len()).min(v.len());
+                out[..e - s].copy_from_slice(&v[s..e]);
+            }
+            Disc::File { file, offset, .. } => {
+                use std::io::{Read, Seek, SeekFrom};
+                let mut f = file.lock().unwrap();
+                if f.seek(SeekFrom::Start(offset + lba as u64 * 2048)).is_ok() {
+                    let mut got = 0;
+                    while got < out.len() {
+                        match f.read(&mut out[got..]) {
+                            Ok(0) | Err(_) => break,
+                            Ok(k) => got += k,
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+impl From<Vec<u8>> for Disc {
+    fn from(v: Vec<u8>) -> Disc {
+        Disc::Mem(std::sync::Arc::new(v))
+    }
+}
+
 pub struct Atapi {
-    pub image: Option<Vec<u8>>,
+    pub image: Option<Disc>,
     /// An audio disc in the drive instead of a data disc.
     pub audio: Option<AudioDisc>,
     pub audio_status: AudioStatus,
@@ -101,6 +184,9 @@ pub struct Atapi {
     pub packet_irq: bool,
     pub log: IoLog,
     pub trace: bool,
+    /// Set when a traced packet command starts, for the machine to add
+    /// where the firmware was (see `Machine::run`).
+    pub trace_mark: bool,
     /// Count of sectors read, for statistics.
     pub sectors_read: u64,
 }
@@ -142,6 +228,7 @@ impl Atapi {
             audio_end: 0,
             log: IoLog::new(false, 4),
             trace: false,
+            trace_mark: false,
             sectors_read: 0,
         };
         a.signature();
@@ -151,6 +238,11 @@ impl Atapi {
     /// Change the disc while running (or remove it with `None`); the
     /// next command reports a unit attention, as after a real swap.
     pub fn insert(&mut self, image: Option<Vec<u8>>) {
+        self.insert_disc(image.map(Disc::from));
+    }
+
+    /// Like [`insert`](Self::insert), for any kind of data disc.
+    pub fn insert_disc(&mut self, image: Option<Disc>) {
         self.image = image;
         self.audio = None;
         self.audio_status = AudioStatus::None;
@@ -165,6 +257,11 @@ impl Atapi {
         self.audio_status = AudioStatus::None;
         self.audio_pos = 0;
         self.unit_attention = running;
+    }
+
+    /// The data disc is a DVD: it holds more than fits on a CD.
+    fn is_dvd(&self) -> bool {
+        self.image.as_ref().is_some_and(|d| d.sectors() > 450_000)
     }
 
     fn has_disc(&self) -> bool {
@@ -205,6 +302,11 @@ impl Atapi {
 
     /// Put a disc in the drive before power-on.
     pub fn load(&mut self, image: Vec<u8>) {
+        self.load_disc(image.into());
+    }
+
+    /// Like [`load`](Self::load), for any kind of data disc.
+    pub fn load_disc(&mut self, image: Disc) {
         self.image = Some(image);
         self.unit_attention = false;
     }
@@ -228,7 +330,7 @@ impl Atapi {
     fn sectors(&self) -> u32 {
         match self.audio.as_ref() {
             Some(disc) => disc.lead_out,
-            None => self.image.as_ref().map(|i| (i.len() / 2048) as u32).unwrap_or(0),
+            None => self.image.as_ref().map(|i| i.sectors()).unwrap_or(0),
         }
     }
 
@@ -494,8 +596,7 @@ impl Atapi {
             self.fail(5, 0x64, 0); // an audio track cannot be read as data
             return;
         };
-        let s = lba as usize * 2048;
-        self.buf = img[s..s + n as usize * 2048].to_vec();
+        self.buf = img.read(lba, n);
         self.pos = 0;
         self.sectors_read += n as u64;
         self.next_chunk();
@@ -505,6 +606,7 @@ impl Atapi {
         let p = self.packet;
         if self.trace {
             eprintln!("[atapi] packet {:02x?}", p);
+            self.trace_mark = !matches!(p[0], 0x00 | 0x42);
         }
         let be16 = |i: usize| ((p[i] as usize) << 8) | p[i + 1] as usize;
         let be32 = |i: usize| ((p[i] as u32) << 24) | ((p[i + 1] as u32) << 16) | ((p[i + 2] as u32) << 8) | p[i + 3] as u32;
@@ -632,6 +734,26 @@ impl Atapi {
                 d[0..2].copy_from_slice(&len.to_be_bytes());
                 self.data_in(d, be16(7));
             }
+            // READ SUB-CHANNEL is a CD command: a DVD has no sub-channel.
+            // The 193's software tells a DVD from a CD by this refusal.
+            0x42 if self.is_dvd() => self.fail(5, 0x64, 0),
+            0xad => {
+                // READ DVD STRUCTURE, format 0: physical format of layer 0
+                if !self.is_dvd() || p[7] != 0 {
+                    self.fail(5, 0x24, 0);
+                    return;
+                }
+                let mut d = vec![0u8; 21];
+                d[1] = 19;
+                d[4] = 0x01; // DVD-ROM, version 1
+                d[5] = 0x02; // 120 mm, 10.08 Mbit/s
+                d[6] = 0x01; // one layer, read-only
+                let first = 0x30000u32;
+                let last = first + self.sectors() - 1;
+                d[8..12].copy_from_slice(&first.to_be_bytes());
+                d[12..16].copy_from_slice(&last.to_be_bytes());
+                self.data_in(d, be16(8));
+            }
             0x42 => {
                 // READ SUB-CHANNEL, current position
                 let msf = p[1] & 2 != 0;
@@ -723,7 +845,13 @@ impl Atapi {
                 // GET CONFIGURATION: feature header only, current profile
                 let mut d = vec![0u8; 8];
                 d[3] = 4;
-                d[7] = if self.has_disc() { 0x08 } else { 0 }; // CD-ROM
+                d[7] = if self.is_dvd() {
+                    0x10 // DVD-ROM
+                } else if self.has_disc() {
+                    0x08 // CD-ROM
+                } else {
+                    0
+                };
                 self.data_in(d, be16(7));
             }
             0x4a => {
@@ -863,5 +991,63 @@ mod tests {
         a.tick(200_000);
         assert_eq!(packet(&mut a, [0x42, 2, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0])[1], 0x13);
         assert_eq!(packet(&mut a, [0x42, 2, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0])[1], 0x15);
+    }
+
+    /// The image of an SD card with the navigation DVD's volume in a
+    /// partition of type 0x96: the disc is that partition, it is a DVD
+    /// by its size, and the drive says so the way the 193 asks.
+    #[test]
+    fn dvd_in_a_partition() {
+        use std::io::{Seek, SeekFrom, Write};
+        let path = std::env::temp_dir().join(format!("rnse-dvd-test-{}.img", std::process::id()));
+        let (start, sectors) = (2048u64 * 512, 500_000u32);
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            let mut mbr = [0u8; 512];
+            mbr[446 + 4] = 0x0c; // a FAT partition first, as on the cards
+            mbr[446 + 8..446 + 12].copy_from_slice(&63u32.to_le_bytes());
+            mbr[446 + 12..446 + 16].copy_from_slice(&1000u32.to_le_bytes());
+            mbr[462 + 4] = 0x96;
+            mbr[462 + 8..462 + 12].copy_from_slice(&2048u32.to_le_bytes());
+            mbr[462 + 12..462 + 16].copy_from_slice(&(sectors * 4 + 800).to_le_bytes());
+            mbr[510..].copy_from_slice(&[0x55, 0xaa]);
+            f.write_all(&mbr).unwrap();
+            // Primary volume descriptor, and a sector to recognise.
+            let mut pvd = [0u8; 2048];
+            pvd[0] = 1;
+            pvd[1..6].copy_from_slice(b"CD001");
+            pvd[80..84].copy_from_slice(&sectors.to_le_bytes());
+            f.seek(SeekFrom::Start(start + 16 * 2048)).unwrap();
+            f.write_all(&pvd).unwrap();
+            f.seek(SeekFrom::Start(start + 499_999 * 2048)).unwrap();
+            f.write_all(b"last sector").unwrap();
+            // Sparse: a gigabyte that takes no room.
+            f.set_len(start + (sectors as u64 * 4 + 800) * 512).unwrap();
+        }
+        let disc = Disc::open(path.to_str().unwrap()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(disc.sectors(), sectors, "the volume's own size, not the partition's");
+        assert_eq!(&disc.read(16, 1)[1..6], b"CD001");
+
+        let mut a = Atapi::new();
+        a.load_disc(disc);
+        let last = packet(&mut a, [0x28, 0, 0, 0x07, 0xa1, 0x1f, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(&last[..11], b"last sector");
+        assert_eq!(packet(&mut a, [0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])[..4], (sectors - 1).to_be_bytes());
+        // No sub-channel on a DVD: illegal mode for this track.
+        packet(&mut a, [0x42, 2, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0]);
+        assert_ne!(a.read(7, 1, 0) & 1, 0);
+        let sense = packet(&mut a, [0x03, 0, 0, 0, 18, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!((sense[2], sense[12]), (5, 0x64));
+        // Physical format: a DVD-ROM with one read-only layer.
+        let pfi = packet(&mut a, [0xad, 0, 0, 0, 0, 0, 0, 0, 0, 0x14, 0, 0]);
+        assert_eq!((pfi[4] & 0xf0, pfi[6] & 0x0f), (0, 1));
+
+        // A CD-sized data disc is still a CD.
+        let mut a = Atapi::new();
+        a.load(vec![0; 64 * 2048]);
+        assert_eq!(packet(&mut a, [0x42, 2, 0x40, 1, 0, 0, 0, 0, 16, 0, 0, 0])[1], 0x15);
+        packet(&mut a, [0xad, 0, 0, 0, 0, 0, 0, 0, 0, 0x14, 0, 0]);
+        assert_ne!(a.read(7, 1, 0) & 1, 0);
     }
 }

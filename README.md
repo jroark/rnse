@@ -33,6 +33,14 @@ which is built around an SH7770-family system-on-chip:
 The North American 192 software (`V222`) runs like `V220`, in English:
 `rnse ui disc.iso --variant V222`.
 
+With a navigation DVD in the 193's drive (`--nav-disc`: an ISO image, or
+the image of an SD card prepared for the unit) the navigation software
+reads it, shows its destination menus and draws the map, which can be
+zoomed and scrolled.  There is no GPS, so the position does not move.
+`rnse ui disc.iso --variant V575 --nav-disc card.img`
+
+![The 193's navigation map in the emulator](docs/nav-193.png)
+
 Audio CDs play on both units, silently (`--audio-cd 12x200`).  Not done
 yet: the power button, any sound, the GPS receiver and the SD card
 processors, the 3D half of the 192's graphics chip.
@@ -113,7 +121,12 @@ full list):
     --trace-calls A:B  list the subroutines called in a time window
     --trace-coral      display lists sent to the graphics chip
     --surface ...      save an off-screen drawing surface as a PNG
-    --trace-atapi      CD drive commands
+    --nav-disc FILE    a navigation DVD in the drive instead (an ISO image,
+                       or an SD card image with the DVD in a partition
+                       of type 0x96); read as needed, not loaded
+    --serial AUZ...    the unit's serial number (193), for map data made
+                       for one unit; see docs/hardware-193.md
+    --trace-atapi      CD drive commands, with where the firmware was
     --trace-bios       calls into the boot ROM
     --trace-exc        every exception and interrupt
     --tp ADDR          print the registers whenever PC reaches ADDR
@@ -130,7 +143,9 @@ runs the unit tests.  With a disc image available,
 additionally runs the whole update in the emulator and checks that the
 flash contents each variant's loader produces are byte-for-byte the
 modules from the disc, that the installed OS reaches its idle loop, and that it brings up
-its user interface and reacts to a faceplate key.
+its user interface and reacts to a faceplate key.  With
+`RNSE_NAV_DISC` set as well (see the head of `tests/disc.rs`), one more
+test has the 193 read a navigation disc and draw the map.
 
 The CPU core is also checked against QEMU with randomly generated
 programs:

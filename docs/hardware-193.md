@@ -136,6 +136,26 @@ copies, and blending a colour through an 8-bit coverage map, which is
 how text is drawn (the OS rasterises antialiased glyphs itself).  Surfaces are 16 bits per
 pixel, or 8 for alpha.
 
+The map is not a picture from the disc but drawn from its vectors with
+further commands: polylines of a given width (roads; one variant takes
+two colours and a bit pattern, for railways), and filled areas.  An
+area is done in two steps, as on Hitachi's Q2 chips of the 1990s from
+which the engine evidently descends: the polygon is rasterised into a
+one-bit work buffer, then a quadrangle over its bounding box paints the
+colour where the work buffer is set.  The round ends and joints of roads
+are small octagons drawn the same way.  The navigation application
+draws the map into a surface of 928 x 608 pixels and copies the middle
+800 x 480 to the screen's plane, so that the map can be moved a little
+without drawing it again.
+
+Pictures that are laid over others (the panel at the right of the map,
+the mark left of a list) come with an alpha map, named by the registers
+at +0x64/+0x68.  The software first has command 0xab combine that map
+with the alpha values of the plane drawn to and then copies with mode
+bit 0x400, which blends; text goes the same way with its coverage map
+as the alpha map.  The 0xab commands of several pieces can be in one
+list and the drawing in the next.
+
 The OS starts a list, waits for the interrupt its end raises (status bit
 2, INTEVT 0x780) for up to four seconds and logs `Q2 TIME OUT` if it
 does not come.
@@ -163,6 +183,14 @@ and the byte count in +0xa0 are set before the command; once the status
 shows DRQ and the signal register (+0xb0) bit 0 shows the drive's DMA
 request, control bit 0 starts the transfer.  Bytes land in memory in
 the order the drive delivers them.
+
+What kind of disc is in the drive the OS finds out with READ
+SUB-CHANNEL: a CD answers, a DVD refuses with "illegal mode for this
+track" (sense 5/64), and that refusal is the OS's test for a DVD (its
+log then says `media judge = 1`; 2 is an audio CD, 3 a data CD).  For a
+DVD it goes on to READ DVD STRUCTURE and wants a DVD-ROM with one
+read-only layer.  The emulated drive reports any data disc larger than
+a CD as such a DVD.
 
 Audio CDs are played by the drive itself.  For the MEDIA source the OS
 reads the full table of contents (READ TOC format 2), starts the player
@@ -293,15 +321,94 @@ function keys work regardless.  `printf` is at
 0x80688afe in V5741040, 0x80688146 in VB481000 and 0x8067b886 in
 V57510AA.
 
+## Navigation
+
+The map comes from a DVD (ISO 9660): `ALLDATA.KWI` with the map in
+Aisin's KIWI format, index files for destination entry under `IDX`,
+`VOICEDAT.KWI`, and a copy of the unit's software for updating older
+units from.  The unit's SD card slots take the same thing: a card with
+the DVD's volume in a second partition of type 0x96, behind a FAT
+partition.  The SD card processors are not emulated, so the emulator
+puts that partition into the DVD drive instead (`--nav-disc card.img`).
+
+![The map (V575) in the emulator](nav-193.png)
+
+The navigation application (module `APM`, running from flash at
+0x01c00000) has its own copy of the debug `printf`, at 0x021a2b16 in
+V57510AA, hooked like the OS's; most of what is known about its disc
+handling comes from that log.  When a disc arrives:
+
+1. The OS reads the volume descriptor and the directory (its `CDSFS`).
+   A second reader, in module `AUM`, looks for update files and
+   addresses the disc by byte offsets of 32 bits, so on a DVD whose
+   directory lies beyond 4 GB it reads the wrong sectors (0x0da35e for
+   0x2da35e) and finds nothing.  That is the firmware's doing, not the
+   emulator's, and harmless.
+2. The application (`DVC`) reads `05.CMP`, a table of the disc's files,
+   and the first 15 sectors of `ALLDATA.KWI`, whose header it unpacks
+   and checks: the system identifiers (`dvc_chksysmid`), the format
+   version (`dvc_chkafmtver`) and the metadata (`dvc_chkmetadata`).  If
+   all three pass the disc is a map disc (`DISCTYPE:CDDISC_MAP`),
+   otherwise at best a program disc.
+3. It compares the software index on the disc (`575INDEX.TXT`) with its
+   own and would offer an update if the disc's were newer.
+4. Then it reads map data as it needs it (`CDREAD:` lines).
+
+### Map data made for one unit
+
+Map updates are also sold for a single unit, as an SD card image that
+goes with a modified version of the unit's software.  On such a card
+the identifiers in the header of `ALLDATA.KWI` begin with the unit's
+serial number, fourteen characters and a comma, before the format
+identifier (`AFUS:2.45` on a North American disc).  The modified
+software (index 0320, V57510AA) has a matching addition in
+`dvc_chkafmtver`, a jump out of the routine to hand-written code at
+0x023468a8: if a comma follows fourteen characters, they are compared
+with the fourteen bytes at 0x03ff401f in flash, the unit's own serial
+number, and the check goes on behind the comma only if they are the
+same.  Otherwise it fails, and a second hook replaces the text of the
+resulting note with "Navigation media not authorised for use on this
+unit."  A disc without the prefix, such as an original DVD, is checked
+as before.
+
+The serial number is in a parameter block of the flash (0x03ff4000,
+0x4000 bytes, which the OS reads and writes by offset) that is written
+at the factory and is on no update disc.  An emulated unit therefore
+has none, and refuses such a card as any other unit would.  To emulate
+the unit a card was made for, give the emulator that unit's serial
+number with `--serial` (`Machine::set_serial`); the emulator does not
+take it from the card.  The card's licence file (`licence.key` in its
+FAT partition) plays no part in this check and has not been looked
+into.
+
+### What works
+
+With a map disc accepted, NAV shows the destination menu with the
+disc's regions, the entry screens with their letter wheel come up, and
+the map is drawn at every scale, with street names, the scroll mode
+with its cross hairs and coordinates, and the panel at the right.
+The position is wherever the unit thinks it was last: there is no GPS
+(see hardware.md for what the receiver is) and no speed signal, so the
+map stays at the place the software starts with.
+
 ## Not done
 
-* The selection mark left of a list is drawn as a white box: the
-  copies the engine does between its alpha commands (drawing mode bit
-  0x400, another value in the rendering control register) are done as
-  plain copies.
-* The graphics engine's alpha commands, the A bit of ARGB pixels, and
-  any drawing command the screens seen so far did not use (lines and
-  polygons surely exist).
+* Antialiasing of the map's lines (drawing mode bit 2), the A bit of
+  ARGB pixels, and any drawing command the screens seen so far did not
+  use.
+* Where a text field lies over the frame at the screen's edge (the
+  entry screens of the navigation), every other line of the frame shows
+  through.
+* The pictures on the map (road number shields, symbols for points of
+  interest): only their shadows appear, blended through an alpha map;
+  no command that would draw the picture itself is in the lists, so the
+  software probably fails to load it.
+* The last blocks of the voice data are asked for beyond the end of
+  the disc's table of compressed blocks (`exp_read ERR`) on the 2010
+  disc.
+* GPS, the gyroscope and the speed signal, and with them a position
+  that moves; the SD card processors; route guidance has not been
+  tried.
 * The second interrupt register block at 0xff902000, the I2C masters,
   the remaining serial ports, DMA for the drive.
 * How the OS serves the watchdog.  The emulator only watches the

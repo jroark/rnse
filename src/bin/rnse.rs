@@ -4,8 +4,8 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n  rnse ui <disc.iso> [ui options]      run it with the faceplate in a browser\n\nui options:\n  --port N           port to serve on (default 8080)\n  --bind ADDR        address to listen on (default 127.0.0.1)\n  --loader           run the update loader instead of the installed firmware\n  --no-ignition      start with the ignition off\n  --no-disc          start with an empty CD drive\n  --variant NAME     hardware variant (default V220, or the disc's first)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-serial     log the serial links (radio processor, faceplate)
-  --trace-ge         log what the 193's graphics engine draws\n  --no-radio         leave the radio processor's link unanswered\n  --no-panel         leave the faceplate controller's link unanswered\n  --key KEY@MS[+HOLD]  press a faceplate key at MS milliseconds for HOLD ms\n                     (default 200).  KEY is RADIO, MEDIA, NAME, TEL, NAV,\n                     INFO, CAR, SETUP, RETURN, PREV, NEXT, SELECT, EJECT,\n                     SOFT_TL, SOFT_TR, SOFT_BL, SOFT_BR, CD_EJECT, or a\n                     key state bit number (0-47)\n  --knob K:N@MS      turn knob K (0 volume, 1 select) by N detents at MS\n                     milliseconds, positive = clockwise\n  --shot MS:FILE     also write a screenshot at MS milliseconds\n  --peek ADDR[,LEN]  hex dump of LEN bytes of memory (default 16) at the end\n  --trace-calls A:B  list the subroutines called between A and B ms\n  --trace-coral      dump the display lists sent to the graphics chip\n  --only-layer N     screenshot shows display layer N (0-5) alone\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --audio-cd NxS     start with an audio CD of N tracks of S seconds each\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse loader <disc.iso> [options]     run the update loader (LDM)\n  rnse boot <disc.iso> [options]       install the firmware and start it\n  rnse ui <disc.iso> [ui options]      run it with the faceplate in a browser\n\nui options:\n  --port N           port to serve on (default 8080)\n  --bind ADDR        address to listen on (default 127.0.0.1)\n  --loader           run the update loader instead of the installed firmware\n  --no-ignition      start with the ignition off\n  --no-disc          start with an empty CD drive\n  --variant NAME     hardware variant (default V220, or the disc's first)\n  --nav-disc FILE    put a navigation disc in the drive (see below)\n  --serial AUZ...    the unit's serial number (see below)\n\noptions:\n  --variant NAME     hardware variant (default V220)\n  --cycles N         stop after N CPU cycles (default 200000000)\n  --io-log [N]       log device accesses (first N per address, default 4)\n  --onchip-log       include SH-4 on-chip registers in the log\n  --log-after N      start the device log only after N cycles\n  --gpio PORT=HEX    level on input port 2, 3 or 4 (experimental)\n  --screenshot FILE  write the display contents as a PNG when stopping\n  --save-flash FILE  write the flash contents to FILE when stopping\n  --trace-exc        log every exception and interrupt\n  --ignition         send the ignition lock status frame (271: key in, ignition on)\n  --can ID:HEX[@MS]  send a CAN frame every MS milliseconds (default 100),\n                     e.g. --can 635:6400@200\n  --trace-can        log CAN frames in both directions\n  --trace-serial     log the serial links (radio processor, faceplate)
+  --trace-ge         log what the 193's graphics engine draws\n  --no-radio         leave the radio processor's link unanswered\n  --no-panel         leave the faceplate controller's link unanswered\n  --key KEY@MS[+HOLD]  press a faceplate key at MS milliseconds for HOLD ms\n                     (default 200).  KEY is RADIO, MEDIA, NAME, TEL, NAV,\n                     INFO, CAR, SETUP, RETURN, PREV, NEXT, SELECT, EJECT,\n                     SOFT_TL, SOFT_TR, SOFT_BL, SOFT_BR, CD_EJECT, or a\n                     key state bit number (0-47)\n  --knob K:N@MS      turn knob K (0 volume, 1 select) by N detents at MS\n                     milliseconds, positive = clockwise\n  --shot MS:FILE     also write a screenshot at MS milliseconds\n  --peek ADDR[,LEN]  hex dump of LEN bytes of memory (default 16) at the end\n  --trace-calls A:B  list the subroutines called between A and B ms\n  --trace-coral      dump the display lists sent to the graphics chip\n  --only-layer N     screenshot shows display layer N (0-5) alone\n  --surface A,S,W,H,FILE  save a 16 bpp off-screen surface at video memory\n                     address A (hex), S pixels per line, as a PNG\n  --trace-atapi      log CD drive commands\n  --trace-bios       log boot ROM service calls (boot only)\n  --flash FILE       boot from a flash image saved by `loader --save-flash`\n  --no-disc          start with an empty CD drive\n  --nav-disc FILE    start with a navigation disc in the drive: an ISO image,\n                     or the image of an SD card that has the disc's volume\n                     in a partition of type 0x96\n  --serial AUZ...    the unit's serial number (14 characters; 193 only).  A\n                     navigation disc can be tied to one unit's number\n  --audio-cd NxS     start with an audio CD of N tracks of S seconds each\n  --break ADDR       stop when PC reaches ADDR (hex)\n  --printf ADDR      address of the OS's printf; its messages are printed as\n                     \"[fw] ...\".  Known for V220 software 0815 and then on\n                     by default; --no-printf turns it off\n  --tp ADDR          print registers each time PC reaches ADDR, and continue\n  --args A,B,C       r4,r5,r6 passed to the loader (default 0,0,0)"
     );
     std::process::exit(2);
 }
@@ -83,6 +83,8 @@ struct Opts {
     trace_atapi: bool,
     no_disc: bool,
     audio_cd: Option<(u32, u32)>,
+    nav_disc: Option<String>,
+    serial: Option<String>,
     tracepoints: Vec<u32>,
     save_flash: Option<String>,
     flash: Option<String>,
@@ -108,7 +110,7 @@ struct Opts {
 }
 
 fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
-    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, audio_cd: None, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false, trace_serial: false, trace_ge: false, no_radio: false, only_layer: None, no_panel: false, panel_script: vec![], shots: vec![], call_windows: vec![], peeks: vec![] };
+    let mut o = Opts { variant: "V220".into(), cycles: 200_000_000, io_log: None, onchip_log: false, trace_exc: false, breaks: vec![], args: [0; 3], screenshot: None, trace_atapi: false, no_disc: false, audio_cd: None, nav_disc: None, serial: None, tracepoints: vec![], save_flash: None, flash: None, trace_bios: false, log_after: 0, gpio: vec![], printf_hook: None, no_printf: false, can: vec![], trace_can: false, trace_coral: false, surfaces: vec![], ignition: false, trace_serial: false, trace_ge: false, no_radio: false, only_layer: None, no_panel: false, panel_script: vec![], shots: vec![], call_windows: vec![], peeks: vec![] };
     let mut i = 0;
     while i < args.len() {
         let next = |i: &mut usize| -> Result<&String, Box<dyn std::error::Error>> {
@@ -134,6 +136,8 @@ fn parse_opts(args: &[String]) -> Result<Opts, Box<dyn std::error::Error>> {
             "--log-after" => o.log_after = next(&mut i)?.replace('_', "").parse()?,
             "--trace-atapi" => o.trace_atapi = true,
             "--no-disc" => o.no_disc = true,
+            "--nav-disc" => o.nav_disc = Some(next(&mut i)?.clone()),
+            "--serial" => o.serial = Some(next(&mut i)?.to_uppercase()),
             "--audio-cd" => {
                 let spec = next(&mut i)?;
                 let (tracks, seconds) = spec.split_once('x').ok_or("--audio-cd wants TRACKSxSECONDS, e.g. 12x200")?;
@@ -273,6 +277,11 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     if let Some(a) = printf {
         m.hook_printf(a);
     }
+    if !loader && !o.no_printf {
+        if let Some(a) = v.module("APM").and_then(|m| Machine::known_app_printf(&m.version)) {
+            m.hook_printf_also(a);
+        }
+    }
     m.atapi().trace = o.trace_atapi;
     m.can().trace = o.trace_can;
     m.board.coral.trace = o.trace_coral;
@@ -288,6 +297,8 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     m.panel_script = o.panel_script.clone();
     if let Some((tracks, seconds)) = o.audio_cd {
         m.atapi().insert_audio(rnse::dev::atapi::AudioDisc::uniform(tracks, seconds), false);
+    } else if let Some(path) = &o.nav_disc {
+        m.atapi().load_disc(rnse::dev::atapi::Disc::open(path)?);
     } else if !o.no_disc {
         m.atapi().load(image.clone());
     }
@@ -304,6 +315,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         } else {
             let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap_or_default();
             m.install(v, &index);
+        }
+        if let Some(serial) = &o.serial {
+            m.set_serial(serial)?;
         }
         m.start_os(v)?;
     }
@@ -475,6 +489,7 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     use std::time::{Duration, Instant};
 
     let (mut port, mut bind, mut loader, mut ignition, mut disc, mut variant) = (8080u16, "127.0.0.1".to_string(), false, true, true, None::<String>);
+    let (mut nav_disc, mut serial) = (None::<String>, None::<String>);
     let mut i = 0;
     while i < rest.len() {
         let opt = rest[i].as_str();
@@ -489,6 +504,8 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             "--loader" => loader = true,
             "--no-ignition" => ignition = false,
             "--no-disc" => disc = false,
+            "--nav-disc" => nav_disc = Some(value()?),
+            "--serial" => serial = Some(value()?.to_uppercase()),
             other => return Err(format!("unknown option {}", other).into()),
         }
         i += 1;
@@ -504,12 +521,18 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let model = rnse::board::Model::for_variant(&v.name).ok_or_else(|| format!("variant {} is for hardware this emulator does not know", v.name))?;
     let what = if loader { format!("{} update loader", v.name) } else { format!("{} software {}", v.name, v.version) };
 
+    // The disc in the drive: the navigation disc if one was given, else
+    // the firmware disc itself.
+    let drive_disc: rnse::dev::atapi::Disc = match &nav_disc {
+        Some(path) => rnse::dev::atapi::Disc::open(path)?,
+        None => image.clone().into(),
+    };
     let build = |ignition: bool, disc: bool| -> Result<Machine, Box<dyn std::error::Error>> {
         let mut m = Machine::for_model(model);
         m.echo_console = false;
         m.install_boot_stub(&v.name);
         if disc {
-            m.atapi().load(image.clone());
+            m.atapi().load_disc(drive_disc.clone());
         }
         if loader {
             let ldm = v.module("LDM").ok_or("variant has no LDM module")?;
@@ -525,6 +548,12 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             m.install(v, &index);
             if let Some(a) = v.module("OSM").and_then(|os| Machine::known_printf(&os.version)) {
                 m.hook_printf(a);
+            }
+            if let Some(a) = v.module("APM").and_then(|m| Machine::known_app_printf(&m.version)) {
+                m.hook_printf_also(a);
+            }
+            if let Some(serial) = &serial {
+                m.set_serial(serial)?;
             }
             m.start_os(v)?;
             m.set_ignition(ignition);
@@ -573,7 +602,7 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 UiEvent::Disc(present) => {
                     disc_in = present;
-                    m.atapi().insert(if present { Some(image.clone()) } else { None });
+                    m.atapi().insert_disc(present.then(|| drive_disc.clone()));
                     note = if present { "disc inserted".into() } else { "disc removed".into() };
                 }
                 UiEvent::Reset => {

@@ -31,6 +31,9 @@ pub struct Machine {
     /// formats debug messages but does not send them to a serial port;
     /// with this set the emulator prints them itself.
     pub printf_hook: Option<u32>,
+    /// Further routines of the same kind: the navigation application
+    /// has its own copy of `printf` for its debug messages.
+    pub printf_hooks: Vec<u32>,
     /// Frames sent to the unit periodically, standing in for the rest
     /// of the car: (frame, period in cycles, next due).
     can_cyclic: Vec<(Frame, u64, u64)>,
@@ -83,7 +86,7 @@ impl Machine {
             cpu.io.navi = Some(Box::default());
             cpu.io.intc.int2 = Some(Default::default());
         }
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: 2_200_000, next_frame: 2_200_000, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), can_cyclic: Vec::new(), ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_script: Vec::new() }
     }
 
     /// Place every module of a variant at its load address, the way the
@@ -103,6 +106,23 @@ impl Machine {
             let dir = crate::fw::module_directory_for(v, index);
             self.board.load(os.phys_addr() - dir.len() as u32, &dir);
         }
+    }
+
+    /// Give the unit its serial number (fourteen characters, "AUZ..." on
+    /// an Audi unit).  The 193 keeps it in the parameter block of its
+    /// flash, at 0x3ff401f; that block is written at the factory and is
+    /// never on an update disc, so an emulated unit has none unless it
+    /// is given one.  Navigation discs can be tied to one unit's serial
+    /// number, see docs/hardware-193.md.
+    pub fn set_serial(&mut self, serial: &str) -> Result<(), String> {
+        if self.board.model != crate::board::Model::Rnse193 {
+            return Err("where the 192 keeps its serial number is not known".into());
+        }
+        if serial.len() != 14 || !serial.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err("a serial number is 14 letters and digits".into());
+        }
+        self.board.load(0x03ff_401f, serial.as_bytes());
+        Ok(())
     }
 
     /// Write the boot ROM stand-in (see `bootrom.rs`).
@@ -143,6 +163,24 @@ impl Machine {
             "VB481000" => Some(0x8068_8146),
             "V57510AA" => Some(0x8067_b886),
             _ => None,
+        }
+    }
+
+    /// The debug `printf` of the navigation application (module `APM`),
+    /// by its version.
+    pub fn known_app_printf(apm_version: &str) -> Option<u32> {
+        match apm_version {
+            "V57510AA" => Some(0x021a_2b16),
+            _ => None,
+        }
+    }
+
+    /// Print what a further `printf` of the firmware is given, like
+    /// [`hook_printf`](Self::hook_printf).
+    pub fn hook_printf_also(&mut self, addr: u32) {
+        self.printf_hooks.push(addr);
+        if !self.cpu.breakpoints.contains(&addr) {
+            self.cpu.breakpoints.push(addr);
         }
     }
 
@@ -648,6 +686,10 @@ impl Machine {
                 navi.atapi_dma(&mut self.board.ram, self.board.ram_base, &mut self.cpu.io.intc);
             }
             self.panel_link();
+            if self.atapi().trace_mark {
+                self.atapi().trace_mark = false;
+                eprintln!("[atapi]   at {} ms, {}", self.cpu.cycles / self.cycles_per_ms(), self.stack_trace(24));
+            }
             if self.cpu.cycles >= self.next_frame {
                 self.next_frame += self.frame_cycles;
                 let frame_ms = self.frame_cycles / self.cycles_per_ms();
@@ -673,7 +715,7 @@ impl Machine {
                 if !self.hypercall() {
                     return Stop::Fault;
                 }
-            } else if stop == Stop::Breakpoint && Some(self.cpu.pc) == self.printf_hook {
+            } else if stop == Stop::Breakpoint && (Some(self.cpu.pc) == self.printf_hook || self.printf_hooks.contains(&self.cpu.pc)) {
                 if let Some(text) = self.format_printf(self.cpu.r[15]) {
                     let line = format!("[fw] {}\n", text.trim_end_matches(['\n', '\r']));
                     let bytes: Vec<u8> = line.chars().map(|c| c as u8).collect();
@@ -695,6 +737,25 @@ impl Machine {
                 return Stop::Budget;
             }
         }
+    }
+
+    /// A rough call chain: the return address and every word on the
+    /// stack that points into flash, nearest first.
+    pub fn stack_trace(&self, max: usize) -> String {
+        let mut out = format!("pc {:08x} pr {:08x} stack", self.cpu.pc, self.cpu.pr);
+        let flash = self.board.flash.len() as u32;
+        let mut n = 0;
+        for i in 0..1024u32 {
+            let Some(w) = self.peek32(self.cpu.r[15].wrapping_add(i * 4)) else { break };
+            if w & 1 == 0 && (w >> 29 == 4 || w >> 29 == 0) && (w & 0x1fff_ffff) < flash && (w & 0x1fff_ffff) >= 0xc000 {
+                out.push_str(&format!(" {:08x}", w));
+                n += 1;
+                if n == max {
+                    break;
+                }
+            }
+        }
+        out
     }
 
     /// Read memory through a P1/P2/P0 address without side effects on
