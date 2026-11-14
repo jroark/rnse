@@ -85,68 +85,74 @@ risk: it is in the stock software, before the program runs.
 
 ### A disc that goes in while the unit runs
 
-That is how an update normally starts.  In the emulator it depends on
-how the drive is taken to behave while it loads the disc, and with
-most choices it does not work: the disc is mounted and listed as
-media, and the application never looks whether it is an update.
+That is how an update normally starts, and it works in the emulator
+for all the software seen (`rnse boot disc.iso --installed-index 0640
+--disc-in 9000` runs the whole update on the European 192;
+`tests/disc.rs` `a_disc_put_in_while_the_unit_runs_starts_the_update`
+has both units of both discs start their loader that way).  It did not
+for a long time, and why is worth keeping, because it rests on an
+assumption about the drive that only a real drive can confirm.
 
-| software | drive says "becoming ready" for | taken for an update |
-|----------|--------------------------------|---------------------|
-| European 192 (V220) | 5 to 8 seconds (the default is 6) | yes: `rnse boot disc.iso --installed-index 0640 --disc-in 9000` runs the whole update |
-| European 192 | 4 seconds or less, 9 or more | no |
-| North American 192 (V222) | anything from 1.5 to 14 seconds | no |
-| North American 192, "the medium may have changed" reported at insertion rather than when ready (`--attention-first`) | 14 seconds | yes |
-| the same | 1.5 to 10 seconds | no |
-
-Why (European 192, application at 0x00281168 and 0x002812e2, its
-request at 0x0071392a, OS at 0x800a8a36):
+How the software sees a disc arrive (European 192: application at
+0x00281168 and 0x002812e2, its request at 0x0071392a; OS at 0x800a8a36,
+its table of the drive's answers at 0x800aaa56):
 
 * A task of the application asks for the drive's state once a second
   and turns changes into events for its disc task.  Its states are 2
-  (no disc), 0 (a disc, ready), 6 (a disc, not yet known), 3 and -1.
+  (no disc), 0 (a disc, ready), 6 (a disc, not ready yet), 3 and -1.
   "Ready" becomes the event the disc task acts on (0x88000007, logged
   as `DVCEV_DISKOK(DISKIN)`) **only coming from 6, or from 1, the state
   the task starts in**; straight from "no disc" it is no event at all.
   With a disc in the drive from the start the task's first look gives
-  the event, which is the case the tests use.
+  the event.
 * State 6 is what the application makes of a request to the OS that
-  either fails eight times in a row with "becoming ready" or "other
-  error", or succeeds while the OS's record of the kind of disc (a byte
-  of its answer; 1 and 2 are the kinds it knows) is still 0.
-* The request does not come back while the drive says "becoming
-  ready": the OS keeps asking the drive, every 100 ms, for up to eight
-  seconds, and only then gives up with "other error" (once, which is
-  one failure of eight; the next request waits again).  So the
-  application's eight failures never happen, and all that is left is
-  the request succeeding at the very moment the OS has not yet settled
-  what kind of disc it is.  Whether that moment is caught depends on
-  the order of things inside the OS in the tenth of a second in which
-  the drive turns ready, and that order comes out differently after
-  different waits.  This is the whole of the timing dependence; there
-  is nothing in it that looks meant.
+  fails eight times in a row with the OS's codes -8 or -9, or that
+  succeeds while the OS's record of the kind of disc is still empty.
+* The OS makes its codes from the drive's sense data: no medium
+  (2/3A/00) is -5, "becoming ready" (2/04/01, and 2/04/04) is -8, "not
+  ready, cause not reportable" (2/04/00) is -9, "the medium may have
+  changed" (key 6) is -6.  And it treats them differently: **on -8 it
+  does not answer the application at all**, it goes on asking the drive
+  itself, every 100 ms, for up to eight seconds (then four at a time);
+  **-9 goes straight back**.
 
-So the stock software plainly expects something else from its drive
-than the emulator gives it: answers during loading that make the
-request return (a failure the OS does not wait on, eight of which give
-state 6 at once), or a pause between "ready" and the kind of disc being
-known.  What the real drive (an Alpine DV35M110 in the 192) answers,
-and for how long, is not known, and cannot be found out from the
-software.  It can be read off a unit: `sdk/examples/drive` logs every
-change in the drive's answer, with times, while a disc is ejected and
-pushed back in (`docs/custom-firmware.md`).  Until then the emulator
-keeps the common behaviour of such drives and the switches to vary it:
-`--spin-up MS`, `--attention-first`.
+So what the drive says while it loads a disc decides everything:
 
-Two things about the drive were wrong and are fixed, because drives do
-it that way: a disc that goes in is "becoming ready" for a while
-(`--spin-up`, 6 s by default; the real mechanism pulls the disc in by
-motor), and "the medium may have changed" is reported once at the end
-of that, not at the moment of insertion.  And reading can be given its
+| while loading the drive says | European 192 (V220) | North American 192 (V222) | 193 (V574) |
+|---|---|---|---|
+| 2/04/00, not ready | taken, for any loading time from 4 s | taken, from 2 s (shorter not tried) | taken, from 2 s |
+| 2/04/01, becoming ready | only for 5 to 8 s | never (1.5 to 14 s tried) | only for 8.5 to 12 s |
+| 2/3A/00, still no medium | never | for 6 s and 11 s, not 2 s | not tried |
+
+With 2/04/00 the application's eight failures come at once, it is in
+state 6 for as long as the drive loads, and "ready" is the event.  With
+2/04/01 the OS swallows the wait, and the disc is taken only if the
+application's request happens to return in the tenth of a second in
+which the OS has seen the drive ready and not yet settled the kind of
+disc: a different range of loading times for each software, with no
+loading time that suits them all.  A drive that these softwares all
+work with says 2/04/00, then; that is what the emulator's drive now
+says (`Atapi::loading_sense`), followed as before by one "the medium
+may have changed" when the disc is ready.
+
+It is an inference, not a measurement.  What the real drive (an
+Alpine DV35M110 in the 192) answers, in which order and for how long,
+can be read off a unit: `sdk/examples/drive` logs every change in the
+drive's answer, with times, while a disc is ejected and pushed back in
+(`docs/custom-firmware.md`).  The switches to try other drives are
+`--loading-sense K/CC/QQ`, `--spin-up MS`, `--attention-first` and
+`--attention-both` ("the medium may have changed" at insertion instead
+of, or as well as, when the disc is ready).
+
+Other things about the drive that were wrong and are fixed: a disc that
+goes in is not ready for a while (`--spin-up`, 6 s by default; the
+real mechanism pulls the disc in by motor), and "the medium may have
+changed" is reported once at the end of that, not at the moment of
+insertion.  And reading can be given its
 time (`--drive-times`, part of `--strict`: 120 ms for a seek, 1.5 ms a
 sector).  The drive also obeys the eject and load commands now (START
 STOP UNIT: the disc comes out and waits in the slot; `--disc-back MS`
-or the load command puts it back).  None of this has made the other
-cases work.
+or the load command puts it back).
 
 ### Only from the CD drive
 

@@ -672,21 +672,21 @@ fn drive_program_logs_the_drive() {
         assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let ejects = m.atapi().ejects;
         assert_eq!(ejects, 1, "{}: {:?}", name, String::from_utf8_lossy(&m.console));
-        // Back in: becoming ready for the model's six seconds, the
-        // notice that the medium may have changed, ready.
+        // Back in: not ready for the model's six seconds, the notice
+        // that the medium may have changed, ready.
         assert!(m.atapi().reinsert());
         assert_eq!(m.run(8_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
         let lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| l.len() > 8 && l.as_bytes()[7] == b' ' && l[..7].bytes().all(|b| b.is_ascii_digit())).collect();
         let states: Vec<&str> = lines.iter().map(|l| &l[8..]).collect();
-        assert_eq!(states, ["READY", "2/3A/00", "2/04/01", "6/28/00", "READY"], "{}: {:?}", name, text);
+        assert_eq!(states, ["READY", "2/3A/00", "2/04/00", "6/28/00", "READY"], "{}: {:?}", name, text);
         let time = |i: usize| lines[i][..7].parse::<u64>().unwrap();
-        assert!((5_900..=6_200).contains(&(time(3) - time(2))), "{}: becoming ready from {} to {}", name, time(2), time(3));
+        assert!((5_900..=6_200).contains(&(time(3) - time(2))), "{}: not ready from {} to {}", name, time(2), time(3));
         assert!(!text.contains("unexpected"), "{}: {:?}", name, text);
         // The line went out on the bus as well.
         let frames: Vec<_> = m.can().tx.iter().filter(|f| f.id == 0x7f5).cloned().collect();
         assert_eq!(frames.len(), 5, "{}", name);
-        assert_eq!(&frames[2].data[4..8], &[2, 4, 1, 0], "{}", name);
+        assert_eq!(&frames[2].data[4..8], &[2, 4, 0, 0], "{}", name);
         press(&mut m, "SETUP");
         m.run(1_000 * ms);
         let text = String::from_utf8_lossy(&m.console).into_owned();
@@ -809,6 +809,12 @@ fn report_program_sends_the_boot_rom() {
 /// come to run it.  None when there is no cross compiler or the disc
 /// has no software for the unit.
 fn started_by_stock_software(image: &[u8], model: rnse::board::Model, example: &str) -> Option<(Machine, String, Vec<u8>)> {
+    started_by_stock_software_with(image, model, example, None)
+}
+
+/// The same, with the disc in the drive from the start (None) or put
+/// in after so many milliseconds, as someone would do it.
+fn started_by_stock_software_with(image: &[u8], model: rnse::board::Model, example: &str, insert_at: Option<u64>) -> Option<(Machine, String, Vec<u8>)> {
     use rnse::board::Model;
     let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
     let variants = fw::load_variants(image).unwrap();
@@ -846,18 +852,25 @@ fn started_by_stock_software(image: &[u8], model: rnse::board::Model, example: &
         m.cache_model();
         m.install_boot_stub(&v.name);
         m.install(v, &index);
-        m.atapi().load(custom.clone());
+        if insert_at.is_none() {
+            m.atapi().load(custom.clone());
+        }
         m.start_os(v).unwrap();
         m.set_ignition(true);
         let ms = m.cycles_per_ms();
         let entry = fw::load_variants(&custom).unwrap().iter().find(|x| x.name == v.name).unwrap().module("LDM").unwrap().entries[0];
         m.cpu.breakpoints.push(entry);
         let mut stop = Stop::Budget;
+        if let Some(at) = insert_at {
+            stop = m.run(at * ms);
+            assert_eq!(stop, Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+            m.atapi().insert(Some(custom.clone()));
+        }
         for _ in 0..40 {
-            stop = m.run(1_000 * ms);
             if stop != Stop::Budget {
                 break;
             }
+            stop = m.run(1_000 * ms);
         }
         let collision = stop == Stop::Fault && m.cpu.fault.as_deref().is_some_and(|f| {
             let spc = f.split("SPC=").nth(1).and_then(|t| u32::from_str_radix(&t[..8.min(t.len())], 16).ok());
@@ -874,6 +887,24 @@ fn started_by_stock_software(image: &[u8], model: rnse::board::Model, example: &
     let mut m = started.unwrap_or_else(|| panic!("{}: the stock software's start of the loader failed at every speed tried", v.name));
     m.cpu.breakpoints.clear();
     Some((m, v.name.clone(), custom))
+}
+
+/// A disc put into the drive while the unit runs, which is how an
+/// update is normally begun: the stock software of each unit notices
+/// it, takes it for an update and starts its loader (here the SDK's
+/// first example in the loader's place).  This depends on what the
+/// drive says while it loads the disc (docs/boot-rom.md).
+#[test]
+fn a_disc_put_in_while_the_unit_runs_starts_the_update() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    for (model, at) in [(Model::Rnse192, 10_000), (Model::Rnse193, 20_000)] {
+        let Some((mut m, name, _)) = started_by_stock_software_with(&image, model, "hello", Some(at)) else { continue };
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        assert!(text.contains("rnse sdk: hello"), "{}: console: {:?}", name, text);
+    }
 }
 
 /// The stock software of each unit takes a disc from `rnse custom` for

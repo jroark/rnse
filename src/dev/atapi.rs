@@ -224,6 +224,20 @@ impl From<Vec<u8>> for Disc {
     }
 }
 
+/// What the drive answers while it loads a disc: "not ready, cause not
+/// reportable" (2/04/00), not "in process of becoming ready" (2/04/01).
+///
+/// This is inferred from the stock software, not measured on a drive
+/// (`docs/boot-rom.md`, "A disc that goes in while the unit runs"): its
+/// operating system waits by itself, for up to eight seconds, on a
+/// drive that says 2/04/01, and hands 2/04/00 straight back to the
+/// application, whose "a disc is in, not ready yet" state comes from
+/// just that; with 2/04/00 all three softwares take a disc that goes
+/// in while they run, whatever the loading time, and with 2/04/01 each
+/// does so only in a narrow range of loading times of its own.
+/// `sdk/examples/drive` shows what a real drive says.
+pub const LOADING_SENSE: (u8, u8, u8) = (2, 0x04, 0x00);
+
 pub struct Atapi {
     pub image: Option<Disc>,
     /// An audio disc in the drive instead of a data disc.
@@ -273,6 +287,11 @@ pub struct Atapi {
     /// The drive says that the medium may have changed as soon as a disc
     /// goes in, before it is ready, instead of when it is.
     pub attention_first: bool,
+    /// With `attention_first`: and says so again when the disc is ready.
+    pub attention_again: bool,
+    /// What the drive answers while a disc is being loaded: sense key,
+    /// code and qualifier.
+    pub loading_sense: (u8, u8, u8),
     /// Reading takes time: [`SEEK_MICROS`] to get somewhere else on the
     /// disc and [`SECTOR_MICROS`] for every sector, during which the
     /// drive is busy.  Off, the data is there at once.
@@ -347,6 +366,8 @@ impl Atapi {
             ejected: (None, None),
             ejects: 0,
             attention_first: false,
+            attention_again: false,
+            loading_sense: LOADING_SENSE,
             times: false,
             busy: 0,
             head: 0,
@@ -501,7 +522,7 @@ impl Atapi {
             self.spin_up = self.spin_up.saturating_sub(micros);
             // Ready: the next command hears that the medium may have
             // changed, once.
-            if !self.attention_first {
+            if !self.attention_first || self.attention_again {
                 self.unit_attention = self.spin_up == 0;
             }
         }
@@ -809,7 +830,8 @@ impl Atapi {
                 return;
             }
             if needs_medium && self.has_disc() && self.spin_up > 0 {
-                self.fail(2, 0x04, 0x01); // becoming ready
+                let (key, code, qualifier) = self.loading_sense;
+                self.fail(key, code, qualifier);
                 return;
             }
             if self.unit_attention {
