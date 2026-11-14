@@ -537,9 +537,12 @@ which bytes of the card to play.
 ### In the emulator
 
 `rnse boot --sd-card FILE` puts an image (see `rnse card`) into the
-first slot, a second `--sd-card` into the other.  The unit sees the
-card by the slot's switch, starts it, reads it, offers "MP3" in the
-media sources, and plays: `tests/disc.rs`
+first slot, a second `--sd-card` into the other; `--sd-in MS` and
+`--sd-out MS` put the cards in and take them out while the unit runs.
+The unit sees the card by the slot's switch, starts it, reads it,
+offers "MP3" in the media sources, and plays; a card pulled out while
+it plays stops the processor (by its INT4 pin) and the main software
+(by the switch), which then stops the card interface's clock: `tests/disc.rs`
 `mp3_from_a_card_plays_on_the_192` goes from the card image to a tone
 of the right pitch on the right channel, on both the European and the
 North American software.  `--trace-sd` shows the card commands and the

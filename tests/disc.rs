@@ -82,14 +82,20 @@ fn mp3_from_a_card_plays_on_the_192() {
     m.echo_console = false;
     m.install_boot_stub(&v.name);
     m.install(v, &index);
-    m.board.media.insert(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap());
     m.set_ignition(true);
     let printf = Machine::known_printf(&v.module("OSM").unwrap().version);
     if let Some(address) = printf { m.hook_printf(address); }
     m.start_os(v).unwrap();
     let ms = m.cycles_per_ms();
-    // (The unit takes the MEDIA key only some 14 s after its start.)
-    assert_eq!(m.run(16_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    // The card goes in while the unit runs.  (And the unit takes the
+    // MEDIA key only some 14 s after its start.)
+    assert_eq!(m.run(9_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    assert_eq!(m.run(7_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    if printf.is_some() {
+        let log = String::from_utf8_lossy(&m.console);
+        assert!(log.contains("SDC0-CARD_INSERT"), "{}: the card was not noticed:\n{}", v.name, log);
+    }
     {
         let dsp = &m.board.media.dsps[0];
         assert!(dsp.fault.is_none(), "{}: {:?}", v.name, dsp.fault);
@@ -143,6 +149,20 @@ fn mp3_from_a_card_plays_on_the_192() {
         let peak = side.iter().map(|x| x.unsigned_abs() as f32).fold(0.0, f32::max);
         let full = 0.25 * 32768.0 * m.radio.gain(Radio::SOURCE_DECODER);
         assert!(peak > 0.7 * full && peak < 1.3 * full, "{}: channel {} peak {} at volume {} (expected about {})", v.name, channel, peak, m.radio.volume, full);
+    }
+    // The card is pulled out: the processor hears of it by its
+    // interrupt pin, the main software by the slot's switch, and it is
+    // quiet.
+    let mark = m.console.len();
+    m.eject_card(0);
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    let loud = m.board.media.dsps[0].loud_frames;
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    assert_eq!(m.board.media.dsps[0].loud_frames, loud, "{}: still playing without a card", v.name);
+    assert!(m.board.media.dsps[0].fault.is_none(), "{}: {:?}", v.name, m.board.media.dsps[0].fault);
+    if printf.is_some() {
+        let log = String::from_utf8_lossy(&m.console[mark..]).into_owned();
+        assert!(log.contains("SDC0-CARD_EJECT"), "{}: the removal was not noticed:\n{}", v.name, log);
     }
 }
 

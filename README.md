@@ -184,6 +184,8 @@ full list):
     --spin-up MS       how long the drive takes over a disc that goes in
     --drive-times      seeks and reads take time (also with --strict)
     --sd-card FILE     an SD card in a slot (see `rnse card`)
+    --sd-in MS         the card goes in at MS milliseconds, not at the start
+    --sd-out MS        the card is taken out at MS milliseconds
     --trace-sd         SD card commands
     --trace-sound      the blocks of samples the 193's software sends out
     --cpu-ratio N      CPU clock as a multiple of the peripheral clock
