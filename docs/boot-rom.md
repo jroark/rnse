@@ -83,6 +83,27 @@ Nothing of the kind happens with the North American 192 software or
 on the 193.  A program of one's own started this way inherits the
 risk: it is in the stock software, before the program runs.
 
+### A disc that goes in while the unit runs
+
+That is how an update normally starts, and the emulator does not get
+there yet: with `--disc-in MS` the drive reports a changed disc and a
+few seconds of "becoming ready", the OS mounts the disc and lists it
+as media, and the application never looks whether it is an update.
+
+Why, as far as it has been followed (European 192, application at
+0x00280ef0-0x00281400): a task polls the drive's state every 100 ms and
+turns changes into events for the disc task.  Its states are 2 (no
+disc, from the OS's state -5), 0 (ready, from 0 or 1), 6 (from the
+OS's -8 or -9), 3 (from 2) and -1 (errors).  "Ready" becomes the event
+the disc task acts on (0x88000007, logged as `DVCEV_DISKOK(DISKIN)`)
+only coming from 6, or from the state the task starts in; coming from
+"no disc" it is no event at all.  The emulated drive goes from "no
+disc" to "ready" without the OS ever reporting -8 or -9, whatever
+those stand for (the drive's own loading of a disc, perhaps: the real
+drive pulls the disc in).  With a disc in the drive from the start the
+task's first look gives the event, which is the case the emulator and
+its tests use.
+
 ### Only from the CD drive
 
 Nothing in the stock software updates from an SD card.  The loaders

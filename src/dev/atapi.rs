@@ -261,6 +261,9 @@ pub struct Atapi {
     dma: bool,
     sense: (u8, u8, u8),
     unit_attention: bool,
+    /// Microseconds the drive still needs to read a disc that has just
+    /// gone in: until then it is "becoming ready".
+    spin_up: u64,
     /// The drive raises its interrupt when it is ready to take the
     /// twelve bytes of a packet command (the older of the two behaviours
     /// ATAPI allows; the 193's software waits for it).
@@ -279,6 +282,14 @@ impl Default for Atapi {
         Self::new()
     }
 }
+
+/// How long the drive takes over a disc that has just gone in before
+/// it is ready: it answers "not ready, becoming ready" (sense 2/04/01)
+/// in between.  The real drives' time is not known; a few seconds is
+/// usual.  (This alone does not make the 192's application look at a
+/// disc that goes in while it runs: see "Starting the loader" in
+/// docs/boot-rom.md.)
+pub const SPIN_UP_MICROS: u64 = 2_500_000;
 
 impl Atapi {
     pub fn new() -> Self {
@@ -304,6 +315,7 @@ impl Atapi {
             dma: false,
             sense: (0, 0, 0),
             unit_attention: false,
+            spin_up: 0,
             packet_irq: false,
             audio: None,
             audio_status: AudioStatus::None,
@@ -327,6 +339,7 @@ impl Atapi {
 
     /// Like [`insert`](Self::insert), for any kind of data disc.
     pub fn insert_disc(&mut self, image: Option<Disc>) {
+        self.spin_up = if image.is_some() { SPIN_UP_MICROS } else { 0 };
         self.image = image;
         self.audio = None;
         self.audio_status = AudioStatus::None;
@@ -341,6 +354,7 @@ impl Atapi {
         self.audio_status = AudioStatus::None;
         self.audio_sample = 0;
         self.unit_attention = running;
+        self.spin_up = if running { SPIN_UP_MICROS } else { 0 };
     }
 
     /// The data disc is a DVD: it holds more than fits on a CD.
@@ -366,6 +380,7 @@ impl Atapi {
     /// out of the drive's audio output in that time, 44.1 kHz stereo, is
     /// added to `out`: the disc while it plays, silence otherwise.
     pub fn play_out(&mut self, micros: u64, mut out: Option<&mut Vec<i16>>) {
+        self.spin_up = self.spin_up.saturating_sub(micros);
         // Whole samples in this much time, the remainder carried over.
         self.audio_micros += micros * 441;
         let mut n = self.audio_micros / 10_000;
@@ -730,6 +745,10 @@ impl Atapi {
             let needs_medium = needs_medium || matches!(op, 0x45 | 0x47 | 0x48 | 0x4b | 0x4e | 0xa5 | 0xbc);
             if needs_medium && !self.has_disc() {
                 self.fail(2, 0x3a, 0); // medium not present
+                return;
+            }
+            if needs_medium && self.spin_up > 0 {
+                self.fail(2, 0x04, 0x01); // becoming ready
                 return;
             }
         }

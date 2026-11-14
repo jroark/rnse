@@ -638,6 +638,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
             eprintln!("strict: CAN frames were sent with the bit timing registers at {:04x}/{:04x}; the stock software", t.0, t.1);
             eprintln!("        has {:04x}/{:04x} (100 kbit/s).  The emulated bus does not care; a real one does.", stock.0, stock.1);
         }
+        if m.board.nvram_top != 0 {
+            eprintln!("strict: battery-backed memory used up to offset {:#x}", m.board.nvram_top);
+        }
         let unmodelled = m.unmodelled();
         if unmodelled.is_empty() {
             eprintln!("strict: every device register the software used has a model");

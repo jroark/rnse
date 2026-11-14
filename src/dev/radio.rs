@@ -1,7 +1,9 @@
 //! The radio/audio processor on the other end of serial channel 1.
 //!
 //! The real one is a separate microcontroller with its own firmware (the
-//! `A*.MOT` files on an update disc).  Only its side of the serial
+//! `A*.MOT` files on an update disc): on the 192 an NEC V850
+//! (`D70F3079AY`) on a board made by Grundig, with a Philips SAA7709H
+//! signal processor doing the sound.  Only its side of the serial
 //! protocol is imitated here, and only as far as the main software has
 //! been seen to need it.
 //!

@@ -5,6 +5,51 @@ from watching what the firmware does in the emulator and from reading its
 code, so each item says how sure it is.  "Loader" is the update loader
 (`LDM`), "OS" the main software.
 
+## The boards
+
+From photographs of an opened unit (a European 192 built in 2007; the
+parts carry date codes from late 2006 to mid 2007).  Three boards
+matter here.
+
+**Main board** (Aisin AW; silk-screen names in brackets):
+
+| part | marking | what it is |
+|------|---------|------------|
+| IC1 | `76C401AH03BT`, `AISIN AW 0707`, `EB28120 JAPAN` | the processor: a lidded ball-grid package with Aisin AW's own number, some 29 balls a side by the silk screen, which is not one of the SH7750R's catalogue packages.  No separate companion chip appears in the photographs, so the companion functions (serial channels, CAN controller, ports) are probably in the same package; not established |
+| X1 | `19600` | 19.6 MHz crystal next to IC1.  Twelve times that is the 235.2 MHz taken for the CPU clock, and 58.8 MHz is three times it |
+| IC6, IC7 | Fujitsu `29XL12DF-70PFV` | two NOR flash chips of 128 Mbit: the 32 MiB at address 0.  IC6 has a paper label (`00347E`), as parts programmed before assembly do: it is the one at address 0, with the boot ROM in its first 48 KiB |
+| IC2-IC5 | Elpida `D45128163G5-A75` | four SDRAMs of 128 Mbit, 16 bits wide: the 64 MiB of RAM |
+| IC8 | NEC `D442000AGU` | static RAM, 256 KiB: the battery-backed memory |
+| IC9 | Fujitsu `MB86293` | the graphics controller, "Coral LQ" |
+| IC10 | Hynix `HY57V643220D` | SDRAM of 64 Mbit, 32 bits wide: 8 MiB of video memory |
+| IC38, IC40 | Toshiba `LCX16245A` | 16-bit bus transceivers; IC38 sits at the drive's connector |
+| IC48 | `TJA1054T` (as far as it can be read) | fault-tolerant low-speed CAN transceiver |
+| SY1 | `CMA-814A` | the GPS receiver, a shielded module with the aerial's coaxial cable beside it |
+| X2 | `32.768k` | clock crystal |
+| X4 | `18.273` (not clearly legible) | a second crystal, on the graphics chip's side of the board |
+
+Connectors are marked `DVD`, `DISP`, `SD`, `GYRO`, `SW` and `POWER`.
+
+**Card board**, on the `SD` connector (50 pins, marked `NAVI` at its
+own end): the two card slots, two NEC `D77115A` (IC2002, IC2003), a
+22.5792 MHz crystal (512 x 44.1 kHz) and three multiplexers (two
+74VHC153, one 74VHC157).  These are the "SD card processors" below.
+
+**Radio board**, made by Grundig (labelled "Aisin RNS-E EU"): the two
+tuner modules, an NEC `D70F3079AY` (a V850 microcontroller with flash:
+the radio processor the main software talks to on channel 1), a
+Philips `SAA7709H` car radio signal processor, which is where source
+selection and volume happen, and an ISD `4003-04M` voice recorder chip
+(for recorded traffic announcements, presumably).
+
+What this settles in the emulator: the flash is two chips with a
+command state each and small sectors at the bottom of both (the stock
+loader does erase 8 KiB sectors from 0x01000000, as from 0x0000c000);
+the battery-backed memory is 256 KiB (and the stock software uses it
+up to offset 0x3f630, no further); the CPU clock estimate has a
+crystal behind it.  What it opens: the card processors are a known
+part, see "SD card processors".
+
 ## CPU
 
 Hitachi/Renesas SH-4, big-endian.  The firmware uses DMAC channels 4-7
@@ -43,7 +88,7 @@ Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2
 
 | range                 | device | confidence |
 |-----------------------|--------|------------|
-| 0x00000000-0x01ffffff | NOR flash, 32 MiB, 32-bit data bus, AMD command set | certain (loader programs it) |
+| 0x00000000-0x01ffffff | NOR flash, 32 MiB in two chips of 16 MiB, 32-bit data bus, AMD command set | certain (loader programs it; the chips are on the board) |
 | 0x07800000            | ATAPI drive, command block (register n at +2n+1, data at +0) | certain |
 | 0x07880000            | ATAPI drive, DMA data port | certain |
 | 0x07900000            | ATAPI drive, control block (alternate status at +0x0d) | certain |
@@ -54,7 +99,7 @@ Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2
 | 0x07d00000, 0x07d80000 | A/D converter (results at +0..+6, control at +8) | certain |
 | 0x07e00000            | unknown | - |
 | 0x0c000000-0x0fffffff | SDRAM, 64 MiB | certain (loader heap ends at 0x8fffffff) |
-| 0x10000000-           | battery-backed SRAM for settings | likely (OS reads and writes it heavily; loader reads a "slot number" with complement check at +0, +1) |
+| 0x10000000-0x1003ffff | battery-backed SRAM for settings, 256 KiB | likely (OS reads and writes it heavily; loader reads a "slot number" with complement check at +0, +1) |
 | 0x12N00000, 0x12N00001 | byte-wide ports, N = 3..a: direction register (1 = output) and data | see "Ports" |
 | 0x12d00000-6          | output latches | bits unknown; 0x12d00001 is driven around CD DMA transfers |
 | 0x15000002, 0x1500004a | 16-bit host ports of the two SD card/MP3 processors | see "SD card processors" |
@@ -121,7 +166,8 @@ boot ROM), TMU2, DMAC channels 2, 3, 4 and 7.
 
 ## Display
 
-Fujitsu Coral graphics controller (MB8629x family) on chip select 6.  The
+Fujitsu Coral graphics controller on chip select 6: an MB86293 ("Coral
+LQ") by the marking on the board, with 8 MiB of video memory.  The
 firmware's own strings name it ("wait_coral_draw_begin").
 
 * Panel timing as programmed: 400 visible pixels of 508 per line, 235
@@ -193,7 +239,10 @@ faceplate.  The others presumably serve GPS and diagnostics.
 
 ### Radio/audio processor (channel 1)
 
-A second processor handles tuner, amplifier and power.  The OS will not
+A second processor handles tuner, amplifier and power: an NEC V850
+microcontroller (`D70F3079AY`) on a board of its own, made by Grundig,
+with a Philips SAA7709H signal processor for the sound (see "The
+boards").  The OS will not
 leave its "system software is being checked" notice until this
 processor has reported a software version that matches the `AUDVER`
 entry of the installed set.
@@ -423,14 +472,24 @@ implemented. The firmware regression test `media_dsps_boot` checks both
 downloads, the initialization replies, and the switch to DMA without
 `BOOT ERROR` or `ERR_cmd_dma` messages.
 
-The processor type is not known: the program is 16-bit words with what
-looks like a table of eight-word interrupt vectors at its start and no
-readable text.  Emulating SD card access and MP3 playback the way the
-unit does it means either running that program (which needs the
-processor identified) or extending the host command stand-in. The next
-missing pieces are card/image access and file commands, followed by MP3
-decoding and an audio output path. The 193 uses a different media
-interface; this device is only mapped on the 192.
+The processors are two NEC µPD77115A (the marking on the card board,
+see "The boards"): 16-bit fixed-point signal processors of NEC's
+µPD77016 family, which have instructions of 32 bits and two data
+memories of 16-bit words.  That is what the download looks like: two
+sections counted in pairs of 16-bit words (instructions) and two
+counted in single words (the two data memories), and at the start of
+the program a table of entries eight 16-bit words long, four
+instructions each, as that family's interrupt vectors are.  The clock
+is a 22.5792 MHz crystal on the card board, 512 times 44.1 kHz.
+
+Emulating SD card access and MP3 playback the way the unit does it now
+has a way forward that does not involve guessing a protocol: run the
+downloaded program on a model of that processor, with its host port,
+its card interface and its audio output.  The family's instruction set
+and the part's peripherals are documented by NEC; neither has been
+worked through here, and until then the host command stand-in is all
+there is: both slots report empty, and nothing plays.  The 193 uses a
+different media interface; this device is only mapped on the 192.
 
 ## GPS
 

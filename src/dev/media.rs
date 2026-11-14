@@ -1,4 +1,6 @@
-//! Host interface to the 192's two SD/MP3 coprocessors.
+//! Host interface to the 192's two SD/MP3 coprocessors: NEC uPD77115A
+//! signal processors on the card board (`docs/hardware.md`, "The
+//! boards" and "SD card processors").
 //!
 //! This models the boot downloader and the runtime commands identified so
 //! far, not the DSP instruction set. Cards and audio decoding are not yet

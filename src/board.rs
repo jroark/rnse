@@ -118,6 +118,10 @@ pub struct Board {
     /// Battery-backed SRAM holding settings; survives power-off on the
     /// real unit, so front ends may want to save and restore it.
     pub nvram: Vec<u8>,
+    /// Address bits the battery-backed memory decodes: its size less one.
+    nvram_mask: usize,
+    /// The highest offset into it the software has used (192).
+    pub nvram_top: usize,
     /// Backing store for address space without a device model.
     pub unmapped: HashMap<u32, Box<[u8; 4096]>>,
     pub coral: Coral,
@@ -173,10 +177,14 @@ impl Board {
             ram_base: model.ram_base(),
             coral_base: if model == Model::Rnse192 { CORAL_BASE } else { 0xf000_0000 },
             flash: vec![0xff; model.flash_size()],
-            flash_ctl: Flash::new(),
+            flash_ctl: if model == Model::Rnse192 { Flash::chips(0x0100_0000) } else { Flash::new() },
             flash_special: false,
             ram: vec![0; model.ram_size()],
             nvram: vec![0; NVRAM_SIZE],
+            // The 192's is one SRAM of 256 KiB (NEC uPD442000A on the
+            // board), and its software uses offsets up to 0x3f630.
+            nvram_mask: if model == Model::Rnse192 { 0x3_ffff } else { NVRAM_SIZE - 1 },
+            nvram_top: 0,
             unmapped: HashMap::new(),
             coral: Coral::new(),
             atapi: Atapi::new(),
@@ -439,9 +447,10 @@ impl Board {
             }
             NVRAM_BASE => {
                 let o = (addr - NVRAM_BASE) as usize;
+                self.nvram_top = self.nvram_top.max(o);
                 let mut v = 0;
                 for i in 0..size as usize {
-                    v = (v << 8) | self.nvram[(o + i) & (NVRAM_SIZE - 1)] as u32;
+                    v = (v << 8) | self.nvram[(o + i) & self.nvram_mask] as u32;
                 }
                 return v;
             }
@@ -495,8 +504,9 @@ impl Board {
         match addr & 0xfff0_0000 {
             NVRAM_BASE => {
                 let o = (addr - NVRAM_BASE) as usize;
+                self.nvram_top = self.nvram_top.max(o);
                 for i in 0..size as usize {
-                    self.nvram[(o + i) & (NVRAM_SIZE - 1)] = (v >> ((size as usize - 1 - i) * 8)) as u8;
+                    self.nvram[(o + i) & self.nvram_mask] = (v >> ((size as usize - 1 - i) * 8)) as u8;
                 }
                 return;
             }
@@ -555,7 +565,7 @@ impl Board {
         if let Some(o) = self.nvram_offset(addr) {
             let mut v = 0;
             for i in 0..size as usize {
-                v = (v << 8) | self.nvram[(o + i) & (NVRAM_SIZE - 1)] as u32;
+                v = (v << 8) | self.nvram[(o + i) & self.nvram_mask] as u32;
             }
             return v;
         }
@@ -578,7 +588,7 @@ impl Board {
         }
         if let Some(o) = self.nvram_offset(addr) {
             for i in 0..size as usize {
-                self.nvram[(o + i) & (NVRAM_SIZE - 1)] = (v >> ((size as usize - 1 - i) * 8)) as u8;
+                self.nvram[(o + i) & self.nvram_mask] = (v >> ((size as usize - 1 - i) * 8)) as u8;
             }
             return;
         }
