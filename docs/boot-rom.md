@@ -62,6 +62,36 @@ data there.  And step 3's cache flush is `ocbwb` over the copied range
 only: the data cache is written back, the instruction cache is not
 touched.
 
+### Only from the CD drive
+
+Nothing in the stock software updates from an SD card.  The loaders
+(`LDM`) carry a driver for the drive and nothing for the cards: the
+193's has the drive's registers (0xffc62100) in its literal pools and
+no address of the SD host interface (0xff90a000); the 192's has the
+drive's data port (0xa7880000) and neither port of the SD card
+processors (0xb5000002, 0xb500004a), nor their program to download; no
+FAT code and no card messages in either.  On the application's side
+the check is part of the disc task (`dvccd_tsk`, `dvccd_dsklblread`),
+and `LOADING.KWI` is opened through a "CD data handle"
+(`CDデータハンドル作成エラー` is its failure message).  The loader does
+have a message `Loading from Multi-Changer` next to `Slotno Error`,
+so a slot number is among what it is handed; that is a disc changer,
+not a card.
+
+This is from reading the modules, not from a run: a card with the
+update disc's volume in a type-0x96 partition (the layout the 193
+takes map data from) was tried in the emulator with an empty drive and
+a lower installed index, but there the 193's software never sends the
+card a command (`--sd-card`; 96 register reads, no command), so the
+attempt says nothing either way.
+
+A program of one's own is not bound by this on the 193, where the SD
+host interface belongs to the main processor and the stock OS drives
+it directly; such a program would bring its own card driver, and would
+itself still have to arrive on a disc.  On the 192 the cards are behind
+the two SD card processors (`docs/hardware.md`), whose program and
+host protocol would be needed first.
+
 Whether the boot ROM can also start a loader from a disc by itself, as
 it would have to after an update that was cut short, is not known.
 `rnse loader` starts one directly, with interrupts masked and zeroes in
