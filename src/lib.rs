@@ -9,6 +9,7 @@ pub mod gdb;
 pub mod iolog;
 pub mod machine;
 pub mod png;
+pub mod report;
 pub mod sh4;
 pub mod ui;
 pub mod wav;

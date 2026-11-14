@@ -573,6 +573,60 @@ fn custom_program_talks_on_the_can_bus() {
     }
 }
 
+/// The SDK's report (sdk/examples/report): the program reads the
+/// processor's registers before it sets anything up and sends them,
+/// the state it was started in and the boot ROM out on the CAN bus;
+/// `rnse report` puts the log of frames back together.  Here the boot
+/// ROM is the emulator's stand-in, and what comes back is that, byte
+/// for byte.
+#[test]
+fn report_program_sends_the_boot_rom() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some((mut m, name, _)) = sdk_example(&image, model, "report") else { continue };
+        let ms = m.cycles_per_ms();
+        // A frame takes its time on the bus: one round of the 192's
+        // 48 KiB is some 15 seconds.
+        let mut frames = Vec::new();
+        let mut report = rnse::report::Report::default();
+        for _ in 0..600 {
+            assert_eq!(m.run(100 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+            frames.extend(m.can().tx.drain(..));
+            if frames.len() % 500 < 70 {
+                report = rnse::report::Report::from_frames(&frames);
+                if report.complete() {
+                    break;
+                }
+            }
+        }
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        assert!(text.contains("rnse sdk: report"), "{}: console: {:?}", name, text);
+        assert!(report.complete(), "{}: after {} frames: {}", name, frames.len(), report.describe());
+        let rom = report.rom_bytes().unwrap();
+        assert_eq!(report.unit, if model == Model::Rnse192 { 0x92 } else { 0x93 }, "{}", name);
+        if model == Model::Rnse192 {
+            assert_eq!(rom.len(), 0xc000, "{}", name);
+            // The clock register, as the emulator has it, and what the
+            // report makes of it.
+            assert_eq!(report.value(0xffc0_0000), Some(0x0e0a), "{}", name);
+            assert!(report.describe().contains("peripherals 1/4"), "{}: {}", name, report.describe());
+        }
+        assert_eq!(rom[..], m.board.flash[..rom.len()], "{}: the ROM that arrived", name);
+        // Not much slower than the bus allows: at least 500 frames a
+        // second, and never faster than a frame's 1.2 ms.
+        let seconds = m.cpu.cycles as f64 / ms as f64 / 1000.0;
+        let rate = frames.len() as f64 / seconds;
+        assert!((400.0..850.0).contains(&rate), "{}: {} frames in {:.1} s", name, frames.len(), seconds);
+        // As text, the way a log would have them.
+        let log: String = frames.iter().map(|f| format!("[can] tx {}\n", f)).collect();
+        let again = rnse::report::Report::from_frames(&rnse::report::frames(&log));
+        assert_eq!(again.rom_bytes().unwrap(), rom, "{}", name);
+        // The start state: started directly here, with interrupts masked.
+        assert!(report.value(1).is_some() && report.value(5) == Some(0), "{}: {}", name, report.describe());
+    }
+}
+
 /// An SDK example on a disc with a higher software index than the
 /// installed one, and the installed (stock) software run until its
 /// application has checked the disc, copied the program to RAM and is

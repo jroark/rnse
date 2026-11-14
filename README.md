@@ -84,6 +84,10 @@ program can end by handing over to the stock loader, which the image
 carries along, so that the unit is its ordinary self again.  And
 `--strict` lists what a program used that the emulator has no model of.
 `--gdb PORT` puts the machine under GDB's control.
+One example, `report`, is meant for a real unit: it reads the
+processor's registers and the boot ROM (which is on no disc) and gets
+them out, on the screen and over the CAN bus, where `rnse report`
+puts them back together.
 It runs in the emulator on both units; whether a real unit starts it is
 untested.  See [docs/custom-firmware.md](docs/custom-firmware.md).
 

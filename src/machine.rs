@@ -135,6 +135,8 @@ pub struct Machine {
     /// Frames due and waiting for the bus, and when it is free again.
     can_waiting: VecDeque<Frame>,
     can_bus_free: u64,
+    /// The mailbox whose frame the unit has on the bus right now.
+    can_sending: Option<usize>,
     pub ignition: bool,
     /// Print traffic on the radio processor's serial link.
     pub trace_serial: bool,
@@ -201,7 +203,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -791,7 +793,22 @@ impl Machine {
         // takes 47 + 8n bits, a fifth more at worst for stuff bits, and
         // three bits of pause, 10 microseconds each.
         if now >= self.can_bus_free {
-            if let Some(frame) = self.can_waiting.pop_front() {
+            // What the unit was sending has gone out and been
+            // acknowledged.
+            if let Some(n) = self.can_sending.take() {
+                self.can().tx_complete(n);
+                self.board.update_irl();
+                if let Some(navi) = self.cpu.io.navi.as_mut() {
+                    navi.update_irqs(&mut self.cpu.io.intc);
+                }
+            }
+            // The unit's own frame next, if it has one waiting: the
+            // other nodes here are not in a hurry.
+            if let Some((n, len)) = self.can().tx_next() {
+                let bits = 50 + 8 * len as u64 + (34 + 8 * len as u64) / 5;
+                self.can_bus_free = now + bits * self.cycles_per_ms() / 100;
+                self.can_sending = Some(n);
+            } else if let Some(frame) = self.can_waiting.pop_front() {
                 let bits = 50 + 8 * frame.len as u64 + (34 + 8 * frame.len as u64) / 5;
                 self.can_bus_free = now + bits * self.cycles_per_ms() / 100;
                 match self.cpu.io.navi.as_mut() {
@@ -1192,7 +1209,7 @@ impl Machine {
             if !self.can_peers.is_empty() {
                 self.can_peers_tick();
             }
-            if !self.can_cyclic.is_empty() || !self.can_waiting.is_empty() {
+            if !self.can_cyclic.is_empty() || !self.can_waiting.is_empty() || self.can_sending.is_some() || self.can().tx_next().is_some() {
                 self.can_tick();
             }
             if self.drive.is_some() {

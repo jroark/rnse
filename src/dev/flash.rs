@@ -4,8 +4,10 @@
 //! (Fujitsu MBM29XL12DF, by the marking on a unit's board), each with
 //! its own command state and its own eight small sectors at the bottom:
 //! the stock loader erases 8 KiB sectors from 0x01000000 as it does
-//! from 0x0000c000.  The 193's 64 MiB are treated as one chip, its
-//! parts not being known.
+//! from 0x0000c000.  The 193's 64 MiB are treated as one chip with
+//! uniform sectors of 128 KiB, which is how its stock loader erases
+//! them (from 0x00400000 up; below that it erases nothing); its parts
+//! are not known.
 //!
 //! Code executes in place from this memory, so plain reads are served
 //! directly by the board; this module only sees writes (the command
@@ -38,6 +40,9 @@ pub struct Flash {
     state: [State; 4],
     /// Size of a chip in bytes; 0 when the whole memory is one chip.
     chip: u32,
+    /// Size of every sector, or 0 for small sectors at the bottom of a
+    /// chip and 64 KiB above ([`sector`]).
+    uniform: u32,
     /// Statistics, for logs and tests.
     pub erased_sectors: u64,
     pub programmed_words: u64,
@@ -62,7 +67,12 @@ pub fn sector(addr: u32) -> (u32, u32) {
 
 impl Flash {
     pub fn new() -> Self {
-        Flash { state: [State::Read; 4], chip: 0, erased_sectors: 0, programmed_words: 0, trace: false }
+        Flash { state: [State::Read; 4], chip: 0, uniform: 0, erased_sectors: 0, programmed_words: 0, trace: false }
+    }
+
+    /// One chip with sectors of `size` bytes throughout.
+    pub fn uniform(size: u32) -> Self {
+        Flash { uniform: size, ..Self::new() }
     }
 
     /// Chips of `size` bytes each, one after the other.
@@ -153,7 +163,10 @@ impl Flash {
             State::EraseUnlock2 => {
                 match cmd {
                     0x30 => {
-                        let (start, len) = sector(addr - base);
+                        let (start, len) = match self.uniform {
+                            0 => sector(addr - base),
+                            size => ((addr - base) / size * size, size),
+                        };
                         let start = (base + start) as usize;
                         let end = (start + len as usize).min(mem.len());
                         mem[start..end].iter_mut().for_each(|b| *b = 0xff);
@@ -234,6 +247,17 @@ mod tests {
         f.write(&mut mem, CHIP + 0x555 * 4, 4, 0x10);
         assert!(mem[CHIP as usize..].iter().all(|b| *b == 0xff));
         assert!(mem[..CHIP as usize].iter().all(|b| *b == 0x11));
+        // Uniform sectors, as on the 193.
+        let mut f = Flash::uniform(0x2_0000);
+        let mut mem = vec![0x22u8; 0x8_0000];
+        unlock(&mut f, &mut mem, 0, 0x80);
+        f.write(&mut mem, 0x555 * 4, 4, 0xaa);
+        f.write(&mut mem, 0x2aa * 4, 4, 0x55);
+        f.write(&mut mem, 0x2_1000, 4, 0x30);
+        assert!(mem[0x2_0000..0x4_0000].iter().all(|b| *b == 0xff));
+        assert!(mem[..0x2_0000].iter().all(|b| *b == 0x22) && mem[0x4_0000..].iter().all(|b| *b == 0x22));
+        let mut f = Flash::chips(CHIP);
+        let mut mem = vec![0x11u8; 2 * CHIP as usize];
         // Programming clears bits, in the chip addressed.
         unlock(&mut f, &mut mem, 0, 0xa0);
         f.write(&mut mem, 0x100, 4, 0x0101_0101);

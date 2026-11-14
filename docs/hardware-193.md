@@ -26,7 +26,7 @@ The loader, linked at 0x09b60000, runs in P0.
 
 | range                 | device |
 |-----------------------|--------|
-| 0x00000000-0x03ffffff | NOR flash, 64 MiB, same command set as the 192's |
+| 0x00000000-0x03ffffff | NOR flash, 64 MiB, same command set as the 192's, in sectors of 128 KiB (the loader erases 0x00400000-0x02ffffff in such steps and nothing below, where the boot ROM is) |
 | 0x08000000-0x0fffffff | RAM, 128 MiB (the loader's stack starts at 0x8fffdf00) |
 | 0x18000000-           | battery-backed SRAM (the OS has some 1800 references to it) |
 | 0xfe008000, 0xfe800100 | not identified (a few writes at start-up; 0xfe800100 takes the key 0xa55a) |

@@ -4,7 +4,11 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse repack <disc.iso | LOADING.KWI> <dir> <out>   a copy of the disc with the\n                                       modules in <dir> (as extract writes\n                                       them) put in, checksums put right\n  rnse custom <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n                                       a copy of the disc with a program of\n                                       your own as that variant's loader,\n                                       and optionally another software index\n                                       (see docs/custom-firmware.md)\n  rnse card <out.img> <folder> [--disc <disc.iso>]
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse repack <disc.iso | LOADING.KWI> <dir> <out>   a copy of the disc with the\n                                       modules in <dir> (as extract writes\n                                       them) put in, checksums put right\n  rnse custom <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n                                       a copy of the disc with a program of\n                                       your own as that variant's loader,\n                                       and optionally another software index\n                                       (see docs/custom-firmware.md)\n  rnse report <can-log> [--rom <out.bin>]
+                                       what sdk/examples/report sent from a
+                                       unit: its registers, and its boot ROM
+                                       into a file (candump logs and others)
+  rnse card <out.img> <folder> [--disc <disc.iso>]
                                        an SD card image for --sd-card: the
                                        folder's files on a FAT16 partition,
                                        and a disc's volume, if given, in a
@@ -26,6 +30,8 @@ fn main() {
         "repack" if args.len() == 4 => repack(&args[1], &args[2], &args[3]),
         "custom" if args.len() == 5 => custom(&args[1], &args[2], &args[3], &args[4], None),
         "custom" if args.len() == 7 && args[5] == "--index" => custom(&args[1], &args[2], &args[3], &args[4], Some(&args[6])),
+        "report" if args.len() == 2 => report(&args[1], None),
+        "report" if args.len() == 4 && args[2] == "--rom" => report(&args[1], Some(&args[3])),
         "card" if args.len() == 3 => card(&args[1], &args[2], None),
         "card" if args.len() == 5 && args[3] == "--disc" => card(&args[1], &args[2], Some(&args[4])),
         "loader" if args.len() >= 2 => run(&args[1], &args[2..], true),
@@ -89,6 +95,29 @@ fn extract(path: &str, out: &str) -> Result<(), Box<dyn std::error::Error>> {
 /// Write a copy of an update disc with the modules found in `dir` (laid
 /// out as `extract` writes them) in place of the disc's.
 /// Put a program of the user's own in a variant's loader slot.
+/// What `sdk/examples/report` sent from a unit, out of a log of the
+/// CAN frames, and the boot ROM into a file.
+fn report(log: &str, rom: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
+    let text = String::from_utf8_lossy(&std::fs::read(log)?).into_owned();
+    let frames = rnse::report::frames(&text);
+    let r = rnse::report::Report::from_frames(&frames);
+    if r.frames == 0 {
+        return Err(format!("no frames of the report (identifiers 7F0-7F4) among the {} frames in {}", frames.len(), log).into());
+    }
+    print!("{}", r.describe());
+    if let Some(path) = rom {
+        match r.rom_bytes() {
+            Ok(bytes) if r.crc == Some(rnse::report::crc32(&bytes)) => {
+                std::fs::write(path, &bytes)?;
+                println!("{}: written", path);
+            }
+            Ok(_) => return Err("the ROM is all there but does not have the unit's check sum: not written".into()),
+            Err(_) => return Err("the ROM is not all there: not written (log a few more rounds)".into()),
+        }
+    }
+    Ok(())
+}
+
 /// An SD card image with what a folder holds on its FAT partition
 /// and, if given, a disc's volume in a second partition of type 0x96.
 fn card(out: &str, dir: &str, disc: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {

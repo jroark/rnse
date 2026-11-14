@@ -299,38 +299,59 @@ impl Hcan {
         }
     }
 
+    /// A transmission has been asked for.  The frame is not out yet:
+    /// it takes its time on the bus ([`tx_next`](Self::tx_next) and
+    /// [`tx_complete`](Self::tx_complete), driven by the machine).
     fn transmit(&mut self) {
-        let pending = self.r32(TXPR1);
-        if pending == 0 || !self.running() {
+        if self.r32(TXPR1) == 0 || !self.running() {
             return;
         }
         self.tx_timing = Some((self.r16(0x06), self.r16(0x04)));
-        if self.alone {
-            // Sent again and again, never acknowledged.
+    }
+
+    /// The mailbox whose frame goes onto the bus next (the lowest of
+    /// those waiting) with the frame's number of data bytes; none when
+    /// nothing waits, the controller is stopped, or no other node is
+    /// there to acknowledge (the frame is then repeated for ever).
+    pub fn tx_next(&self) -> Option<(usize, u8)> {
+        let pending = self.r32(TXPR1);
+        if pending == 0 || !self.running() || self.alone {
+            return None;
+        }
+        let n = (1..32).find(|n| pending & (1 << n) != 0)?;
+        Some((n, (self.regs[MB + n * 0x20 + self.ctl + 1] & 0xf).min(8)))
+    }
+
+    /// The frame of mailbox `n` has gone out and been acknowledged.
+    pub fn tx_complete(&mut self, n: usize) {
+        let pending = self.r32(TXPR1);
+        if pending & (1 << n) == 0 {
+            // Cancelled in the meantime.
             return;
         }
-        let mut ack = self.r32(TXACK1);
-        for n in 1..32 {
-            if pending & (1 << n) == 0 {
-                continue;
-            }
-            let base = MB + n * 0x20;
-            let len = (self.regs[base + self.ctl + 1] & 0xf).min(8);
-            let mut f = Frame { id: self.mb_id(n), len, data: [0; 8] };
-            f.data[..len as usize].copy_from_slice(&self.regs[base + 8..base + 8 + len as usize]);
-            if self.trace {
-                eprintln!("[can] tx {}", f);
-            }
-            self.tx_count += 1;
-            if self.tx.len() >= 4096 {
-                self.tx.pop_front();
-            }
-            self.tx.push_back(f);
-            ack |= 1 << n;
+        let base = MB + n * 0x20;
+        let len = (self.regs[base + self.ctl + 1] & 0xf).min(8);
+        let mut f = Frame { id: self.mb_id(n), len, data: [0; 8] };
+        f.data[..len as usize].copy_from_slice(&self.regs[base + 8..base + 8 + len as usize]);
+        if self.trace {
+            eprintln!("[can] tx {}", f);
         }
-        self.w32(TXPR1, 0);
-        self.w32(TXACK1, ack);
+        self.tx_count += 1;
+        if self.tx.len() >= 4096 {
+            self.tx.pop_front();
+        }
+        self.tx.push_back(f);
+        self.w32(TXPR1, pending & !(1 << n));
+        self.w32(TXACK1, self.r32(TXACK1) | 1 << n);
         self.update_irr();
+    }
+
+    /// Everything that waits goes out at once (for tests of the
+    /// controller alone, where no time passes).
+    pub fn tx_flush(&mut self) {
+        while let Some((n, _)) = self.tx_next() {
+            self.tx_complete(n);
+        }
     }
 
     /// A frame arrives from the bus.  Returns true if a mailbox took it.
@@ -459,6 +480,11 @@ mod tests {
             h.write(0x100 + 9 * 0x20 + 8 + i as u32, 1, *b, 0);
         }
         h.write(0x22, 2, 1 << 9, 0);
+        // Asked for, and on the bus for a while: not out yet.
+        assert!(h.tx.is_empty());
+        assert_eq!(h.read(0x22, 2, 0), 1 << 9);
+        assert_eq!(h.tx_next(), Some((9, 3)));
+        h.tx_complete(9);
         assert_eq!(h.tx.pop_front(), Some(Frame::new(0x661, &[0x11, 0x22, 0x33])));
         assert_eq!(h.read(0x22, 2, 0), 0);
         assert_eq!(h.read(0x32, 2, 0), 1 << 9);
@@ -488,6 +514,7 @@ mod tests {
         h.write(0x160, 2, 0x271 << 2, 0);
         h.write(0x170, 2, 0x0200, 0);
         h.write(0x20, 4, 1 << 1, 0);
+        h.tx_flush();
         let f = h.tx.pop_front().expect("frame sent");
         assert_eq!((f.id, f.len, &f.data[..2]), (0x436, 6, &[0x16u8, 0x04][..]));
         assert!(h.receive(&Frame::new(0x271, &[3])));

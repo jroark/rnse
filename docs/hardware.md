@@ -8,14 +8,13 @@ code, so each item says how sure it is.  "Loader" is the update loader
 ## The boards
 
 From photographs of an opened unit (a European 192 built in 2007; the
-parts carry date codes from late 2006 to mid 2007).  Three boards
-matter here.
+parts carry date codes from late 2006 to mid 2007).
 
 **Main board** (Aisin AW; silk-screen names in brackets):
 
 | part | marking | what it is |
 |------|---------|------------|
-| IC1 | `76C401AH03BT`, `AISIN AW 0707`, `EB28120 JAPAN` | the processor: a lidded ball-grid package with Aisin AW's own number, some 29 balls a side by the silk screen, which is not one of the SH7750R's catalogue packages.  No separate companion chip appears in the photographs, so the companion functions (serial channels, CAN controller, ports) are probably in the same package; not established |
+| IC1 | `76C401AH03BT`, `AISIN AW 0707`, `EB28120 JAPAN` | the processor: a lidded ball-grid package with Aisin AW's own number, some 29 balls a side by the silk screen, which is not one of the SH7750R's catalogue packages.  No separate companion chip appears in the photographs, so the companion functions (serial channels, CAN controller, ports) are probably in the same package, there being no other large part on either side of the board; not established |
 | X1 | `19600` | 19.6 MHz crystal next to IC1.  Twelve times that is the 235.2 MHz taken for the CPU clock, and 58.8 MHz is three times it |
 | IC6, IC7 | Fujitsu `29XL12DF-70PFV` | two NOR flash chips of 128 Mbit: the 32 MiB at address 0.  IC6 has a paper label (`00347E`), as parts programmed before assembly do: it is the one at address 0, with the boot ROM in its first 48 KiB |
 | IC2-IC5 | Elpida `D45128163G5-A75` | four SDRAMs of 128 Mbit, 16 bits wide: the 64 MiB of RAM |
@@ -26,7 +25,9 @@ matter here.
 | IC48 | `TJA1054T` (as far as it can be read) | fault-tolerant low-speed CAN transceiver |
 | SY1 | `CMA-814A` | the GPS receiver, a shielded module with the aerial's coaxial cable beside it |
 | X2 | `32.768k` | clock crystal |
-| X4 | `18.273` (not clearly legible) | a second crystal, on the graphics chip's side of the board |
+| X4 | `14.27x` (the last digit reads 3 or 9) | a crystal beside the graphics chip: its reference clock.  If the chip's clock generator makes 14 times that and the display divides by 25 (the divider the firmware programs), the 508 x 263 dots of a frame take 1/59.8 s |
+| T426-T431 | | six test pads in two rows right under IC1.  Six signals is what the SH-4's debug port (H-UDI: TCK, TMS, TDI, TDO, TRST, ASEBRK) has; a guess by number and place |
+| T424, T425 | | two test pads with a series resistor each (R89, R90), beside the others.  A candidate for the debug serial port, on which the loader prints its log; to be checked with a logic analyser during a stock update |
 
 Connectors are marked `DVD`, `DISP`, `SD`, `GYRO`, `SW` and `POWER`.
 
@@ -34,6 +35,14 @@ Connectors are marked `DVD`, `DISP`, `SD`, `GYRO`, `SW` and `POWER`.
 own end): the two card slots, two NEC `D77115A` (IC2002, IC2003), a
 22.5792 MHz crystal (512 x 44.1 kHz) and three multiplexers (two
 74VHC153, one 74VHC157).  These are the "SD card processors" below.
+
+**Drive**: an Alpine DV35M110, a DVD mechanism that pulls the disc in
+by motor (its board has test points named `LOADOUT`, `PLAYA`, `PLAYB`),
+with a Panasonic `MN103S26EDC` controller, a Panasonic `AN8703FH` and a
+chip with Alpine's own marking.
+
+**Faceplate**: its controller is a Fujitsu `MB90561A`, a 16-bit
+microcontroller of the F2MC-16LX family with its program in mask ROM.
 
 **Radio board**, made by Grundig (labelled "Aisin RNS-E EU"): the two
 tuner modules, an NEC `D70F3079AY` (a V850 microcontroller with flash:

@@ -1,4 +1,5 @@
-//! Stand-in for the faceplate controller.
+//! Stand-in for the faceplate controller (on the 192 a Fujitsu
+//! MB90561A microcontroller with its program in mask ROM).
 //!
 //! The keys, the two rotary encoders and the key illumination hang off a
 //! small microcontroller in the faceplate.  It talks to the main

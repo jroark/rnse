@@ -177,7 +177,7 @@ impl Board {
             ram_base: model.ram_base(),
             coral_base: if model == Model::Rnse192 { CORAL_BASE } else { 0xf000_0000 },
             flash: vec![0xff; model.flash_size()],
-            flash_ctl: if model == Model::Rnse192 { Flash::chips(0x0100_0000) } else { Flash::new() },
+            flash_ctl: if model == Model::Rnse192 { Flash::chips(0x0100_0000) } else { Flash::uniform(0x2_0000) },
             flash_special: false,
             ram: vec![0; model.ram_size()],
             nvram: vec![0; NVRAM_SIZE],
