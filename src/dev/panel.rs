@@ -43,7 +43,7 @@
 //! low = reset.  Both stock systems start with the line low, switch
 //! their serial port off, raise the line and then turn the receiver on;
 //! the controller's first frame is 0x0F.  When the controller leaves a
-//! command frame unanswered for two seconds the unit pulses the line low
+//! command frame unanswered for a second the unit pulses the line low
 //! ("fpdrv hard reset") and expects the whole start-up again.  How long
 //! the real controller takes to start is not known; this one takes
 //! [`START_MS`].

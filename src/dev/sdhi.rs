@@ -2,6 +2,15 @@
 //!
 //! Cards are read-only sector images. The host command/response and PIO
 //! paths are modelled; the decoder and audio output are separate devices.
+//! Sectors are read by DMA: the driver sets bit 1 of the register at
+//! +0xd8 and has a DMA channel fetch the words from the data port at
+//! +0x30 (`Navi::dma_run`); the short blocks of the card's own registers
+//! (ACMD13, ACMD51) it reads from the data port itself.
+//!
+//! The 193's driver takes a high-capacity card only if it has more than
+//! 0x3f6000 sectors (and at most 0x3fd8000), and a standard-capacity one
+//! only up to that, so an image is the one kind or the other by its
+//! size ([`Card::high_capacity`]).
 
 use std::collections::VecDeque;
 use std::fs::File;
@@ -31,9 +40,36 @@ impl Card {
     fn check_size(bytes: u64) -> io::Result<()> {
         if bytes < 512 * 1024 || bytes % (512 * 1024) != 0 || bytes > 32 * 1024 * 1024 * 1024 {
             return Err(io::Error::new(io::ErrorKind::InvalidInput,
-                "SDHC image must be a multiple of 512 KiB, between 512 KiB and 32 GiB"));
+                "SD card image must be a multiple of 512 KiB, between 512 KiB and 32 GiB"));
         }
         Ok(())
+    }
+
+    /// More sectors than the 193's driver allows a standard-capacity
+    /// card: such an image is a high-capacity card (block addresses,
+    /// version 2 of the card's data register), a smaller one a
+    /// standard-capacity card (byte addresses, version 1).
+    pub fn high_capacity(&self) -> bool { self.sectors > 0x3f_6000 }
+
+    /// The card-specific data register (CSD) with the card's size in it.
+    fn csd(&self) -> [u8; 16] {
+        if self.high_capacity() {
+            let size = (self.sectors / 1024 - 1) as u32;
+            let mut csd = [0x40, 0x0e, 0, 0x32, 0x5b, 0x59, 0, 0, 0, 0, 0x7f, 0x80, 0x0a, 0x40, 0, 1];
+            csd[7] = (size >> 16) as u8 & 0x3f;
+            csd[8] = (size >> 8) as u8;
+            csd[9] = size as u8;
+            return csd;
+        }
+        // Size = (C_SIZE + 1) << (C_SIZE_MULT + 2) blocks of
+        // 1 << READ_BL_LEN bytes, with a 12-bit C_SIZE: blocks of 512
+        // bytes reach 1 GiB, blocks of 1024 bytes 2 GiB.
+        let block: u32 = if self.sectors > 4096 * 512 { 10 } else { 9 };
+        let c_size = (self.sectors >> (block - 9 + 9)) as u32 - 1;
+        let mult = 7u8;
+        [0x00, 0x26, 0, 0x32, 0x5b, 0x50 | block as u8,
+            0x80 | (c_size >> 10) as u8, (c_size >> 2) as u8, ((c_size & 3) << 6) as u8 | 0x2d,
+            0xb4 | mult >> 1, (mult & 1) << 7 | 0x7f, 0x80, 0x0a, 0x40, 0, 1]
     }
 
     fn read(&mut self, sector: u32, bytes: usize) -> io::Result<Vec<u8>> {
@@ -58,12 +94,14 @@ pub struct Sdhi {
     selected: bool,
     pub commands: Vec<(u8, u32)>,
     pub bytes_read: u64,
+    /// Print each command and what it is answered with (`--trace-sd`).
+    pub trace: bool,
 }
 
 impl Default for Sdhi {
     fn default() -> Self {
         let mut host = Self { cards: [None, None], regs: [0; 128], fifo: VecDeque::new(),
-            app: false, selected: false, commands: Vec::new(), bytes_read: 0 };
+            app: false, selected: false, commands: Vec::new(), bytes_read: 0, trace: false };
         host.reset();
         host
     }
@@ -82,6 +120,8 @@ impl Sdhi {
     }
 
     pub fn present(&self, slot: usize) -> bool { self.cards[slot].is_some() }
+    /// Is there data waiting in the read FIFO?
+    pub fn data_ready(&self) -> bool { !self.fifo.is_empty() }
     fn slot(&self) -> usize { (self.regs[1] & 1) as usize }
 
     pub fn irq(&self) -> bool {
@@ -154,6 +194,7 @@ impl Sdhi {
         self.regs[0x1e / 2] &= !0x837f;
         if !self.present(self.slot()) {
             self.regs[0x1e / 2] |= 0x40; // response timeout
+            if self.trace { println!("[sd] slot {} CMD{} {:08x}: no card", self.slot() + 1, cmd, arg); }
             return;
         }
         let status = if self.selected { 0x900 } else { 0x700 };
@@ -162,16 +203,16 @@ impl Sdhi {
             (_, 0) => { self.selected = false; self.response(0); }
             (_, 8) => self.response(arg & 0xfff),
             (_, 55) => { self.app = true; self.response(status | 0x20); }
-            (true, 41) => self.response(0xc0ff_8000), // ready, SDHC, 3.3 V
+            // Ready, 3.3 V, and whether the card is a high-capacity one.
+            (true, 41) => {
+                let high = self.cards[self.slot()].as_ref().unwrap().high_capacity();
+                self.response(if high { 0xc0ff_8000 } else { 0x80ff_8000 });
+            }
             (_, 2 | 10) => self.long_response(*b"\x01RNEMUSD\x10\x00\x00\x00\x01\x01\x01\x01"),
             (_, 3) => self.response(0x0001_0700),
             (_, 7) => { self.selected = arg != 0; self.response(0x900); }
             (_, 9) => {
-                let size = (self.cards[self.slot()].as_ref().unwrap().sectors / 1024 - 1) as u32;
-                let mut csd = [0x40, 0x0e, 0, 0x32, 0x5b, 0x59, 0, 0, 0, 0, 0x7f, 0x80, 0x0a, 0x40, 0, 1];
-                csd[7] = (size >> 16) as u8 & 0x3f;
-                csd[8] = (size >> 8) as u8;
-                csd[9] = size as u8;
+                let csd = self.cards[self.slot()].as_ref().unwrap().csd();
                 self.long_response(csd);
             }
             (true, 51) => self.data(vec![2, 5, 0, 0, 0, 0, 0, 0]),
@@ -188,7 +229,10 @@ impl Sdhi {
             (false, 17 | 18) => {
                 let blocks = if cmd == 18 { self.regs[5].max(1) } else { 1 };
                 let bytes = usize::from(blocks) * 512;
-                match self.cards[self.slot()].as_mut().unwrap().read(arg, bytes) {
+                let card = self.cards[self.slot()].as_mut().unwrap();
+                // A standard-capacity card is addressed in bytes.
+                let sector = if card.high_capacity() { arg } else { arg / 512 };
+                match card.read(sector, bytes) {
                     Ok(bytes) => self.data(bytes),
                     Err(_) => { self.response(1 << 31); self.regs[0x1e / 2] |= 0x10; }
                 }
@@ -198,5 +242,10 @@ impl Sdhi {
             _ => self.response((1 << 22) | status), // illegal command
         }
         self.regs[0x1c / 2] |= 1;
+        if self.trace {
+            println!("[sd] slot {} {}CMD{} {:08x} -> {:04x}{:04x}{}", self.slot() + 1,
+                if app { "A" } else { "" }, cmd, arg, self.regs[0x0e / 2], self.regs[0x0c / 2],
+                if self.fifo.is_empty() { String::new() } else { format!(", {} bytes", self.fifo.len()) });
+        }
     }
 }

@@ -314,6 +314,98 @@ fn cd_audio_plays() {
     }
 }
 
+/// MP3 from an SD card on the 193, all of it done by the unit's own
+/// software: the card is found and read (host interface and its DMA
+/// channel), its files are listed, one is chosen through MEDIA and the
+/// list of sources, the software decodes it and sends the samples out
+/// through the serial sound interface.  The file has 440 Hz on the left
+/// and 880 Hz on the right.
+#[test]
+fn mp3_from_a_card_plays() {
+    use rnse::board::Model;
+    use rnse::dev::radio::Radio;
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse193)) else { return };
+    let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+    let song = include_bytes!("data/tones.mp3").to_vec();
+    let entries = vec![rnse::fat::Entry::folder("Tones", vec![rnse::fat::Entry::file("left 440 right 880.mp3", song.clone())]),
+        rnse::fat::Entry::file("TONES.MP3", song)];
+    let card = rnse::fat::card("MUSIC", &entries, None).unwrap();
+    let mut m = Machine::for_model(Model::Rnse193);
+    m.echo_console = false;
+    m.install_boot_stub(&v.name);
+    m.install(v, &index);
+    m.cpu.io.navi.as_mut().unwrap().sdhi.cards[0] = Some(rnse::dev::sdhi::Card::from_bytes(card).unwrap());
+    m.set_ignition(true);
+    let printf = Machine::known_printf(&v.module("OSM").unwrap().version);
+    if let Some(address) = printf { m.hook_printf(address); }
+    m.start_os(v).unwrap();
+    let ms = m.cycles_per_ms();
+    assert_eq!(m.run(30_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    {
+        // The card has been read: partition table, FAT, directories and
+        // the start of each file, by DMA.
+        let host = &m.cpu.io.navi.as_ref().unwrap().sdhi;
+        assert!(host.commands.iter().filter(|c| c.0 == 17).count() > 30, "{}: the card was not read: {:?}", v.name, host.commands);
+    }
+    let press = |m: &mut Machine, key: &str| {
+        assert!(m.panel_key(key, true));
+        m.run(200 * ms);
+        assert!(m.panel_key(key, false));
+    };
+    // MEDIA, the list of sources, the card (second in it, after the CD
+    // drive), and it plays its first file.
+    press(&mut m, "MEDIA");
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    press(&mut m, "SOFT_TR");
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    assert!(m.panel_knob("main", 1));
+    assert_eq!(m.run(1_500 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    press(&mut m, "SELECT");
+    // It starts a few seconds after this, sooner or later with the
+    // software; the file lasts six.
+    for _ in 0..40 {
+        assert_eq!(m.run(250 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        if m.cpu.io.navi.as_ref().unwrap().audio.running {
+            break;
+        }
+    }
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    let log = String::from_utf8_lossy(&m.console).into_owned();
+    if printf.is_some() {
+        assert!(log.contains("finf.filename=[TONES.MP3]"), "{}: not playing:\n{}", v.name, log);
+        assert!(!log.contains("SDC_ERROR"), "{}: the player reports an error:\n{}", v.name, log);
+    }
+    assert_eq!(m.radio.source, Radio::SOURCE_DECODER, "{}: the amplifier's source", v.name);
+    let navi = m.cpu.io.navi.as_ref().unwrap();
+    assert!(navi.audio.running, "{}: nothing is being sent to the sound interface", v.name);
+    assert_eq!(navi.audio_rate(), 44_100, "{}: sample rate", v.name);
+    // Two seconds of it: no gaps, the two tones where they belong,
+    // and as loud as the amplifier's volume makes it.
+    m.speaker = Some(Vec::new());
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    let heard = m.speaker.take().unwrap();
+    let seconds = heard.len() as f64 / 88_200.0;
+    assert!((1.95..=2.05).contains(&seconds), "{}: {} s of sound", v.name, seconds);
+    // (Without the first tenth of a second: listening began in the
+    // middle of a display frame, and the recording is kept by frames.)
+    let heard = &heard[8820..];
+    let seconds = heard.len() as f64 / 88_200.0;
+    for (channel, want) in [(0, 440.0), (1, 880.0)] {
+        let side: Vec<i16> = heard.chunks(2).map(|p| p[channel]).collect();
+        let crossings = side.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count() as f64;
+        let hz = crossings / 2.0 / seconds;
+        assert!((hz - want).abs() < 3.0, "{}: channel {} should sound at {} Hz, not {:.1}", v.name, channel, want, hz);
+        let peak = side.iter().map(|x| x.unsigned_abs() as f32).fold(0.0, f32::max);
+        let full = 0.25 * 32768.0 * m.radio.gain(Radio::SOURCE_DECODER);
+        assert!(peak > 0.7 * full && peak < 1.3 * full, "{}: channel {} peak {} at volume {} (expected about {})", v.name, channel, peak, m.radio.volume, full);
+    }
+    // No interrupt of the sound interface itself: it never ran dry.
+    assert_eq!(m.cpu.irq_counts[0xca0 >> 5], 0, "{}: the sound interface underflowed", v.name);
+    assert!(m.cpu.irq_counts[0x980 >> 5] > 20, "{}: blocks finished: {}", v.name, m.cpu.irq_counts[0x980 >> 5]);
+}
+
 /// A program written from scratch (sdk/examples/hello), built with an
 /// SH-4 GCC if there is one, put in the loader's place on the disc and
 /// started the way the boot ROM starts the loader: it brings the board
@@ -503,28 +595,54 @@ fn started_by_stock_software(image: &[u8], model: rnse::board::Model, example: &
     let higher = format!("{}{:02}{}", &index.sofidx[..1], middle + 1, &index.sofidx[3..]);
     assert_eq!(fw::set_disc_index(&mut custom, &v.name, &higher).unwrap(), index.sofidx);
 
-    let mut m = Machine::for_model(model);
-    m.echo_console = false;
-    // The CPU's caches are modelled all the way: the stock software has
-    // to live with them as on a real unit, and so has the program.
-    m.scramble_ram();
-    m.cache_model();
-    m.install_boot_stub(&v.name);
-    m.install(v, &index);
-    m.atapi().load(custom.clone());
-    m.start_os(v).unwrap();
-    m.set_ignition(true);
-    let ms = m.cycles_per_ms();
-    let entry = fw::load_variants(&custom).unwrap().iter().find(|x| x.name == v.name).unwrap().module("LDM").unwrap().entries[0];
-    m.cpu.breakpoints.push(entry);
-    let mut stop = Stop::Budget;
-    for _ in 0..40 {
-        stop = m.run(1_000 * ms);
-        if stop != Stop::Budget {
-            break;
+    // The stock software's own start of a loader can fail: on the
+    // European 192 the copy of the loader goes over a variable of the
+    // module APFM, whose timer handler (every 100 ms) then meets an
+    // address error if it runs in the 15 ms before the loader has
+    // taken the unit over (docs/boot-rom.md).  Whether it does is a
+    // matter of timing, which on a real unit the drive makes vary and
+    // which here is the same in every run.  So the start is tried at
+    // the nominal ratio of CPU speed to timers and, when exactly that
+    // happens, at the two next to it.
+    let apfm = v.module("APFM").map(|a| a.load_addr | 0x8000_0000..(a.load_addr | 0x8000_0000) + a.size);
+    let nominal = if model == Model::Rnse192 { 4 } else { 8 };
+    let mut started = None;
+    for ratio in [nominal, nominal + 1, nominal - 1] {
+        let mut m = Machine::for_model(model);
+        m.set_cpu_ratio(ratio);
+        m.echo_console = false;
+        // The CPU's caches are modelled all the way: the stock software has
+        // to live with them as on a real unit, and so has the program.
+        m.scramble_ram();
+        m.cache_model();
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        m.atapi().load(custom.clone());
+        m.start_os(v).unwrap();
+        m.set_ignition(true);
+        let ms = m.cycles_per_ms();
+        let entry = fw::load_variants(&custom).unwrap().iter().find(|x| x.name == v.name).unwrap().module("LDM").unwrap().entries[0];
+        m.cpu.breakpoints.push(entry);
+        let mut stop = Stop::Budget;
+        for _ in 0..40 {
+            stop = m.run(1_000 * ms);
+            if stop != Stop::Budget {
+                break;
+            }
         }
+        let collision = stop == Stop::Fault && m.cpu.fault.as_deref().is_some_and(|f| {
+            let spc = f.split("SPC=").nth(1).and_then(|t| u32::from_str_radix(&t[..8.min(t.len())], 16).ok());
+            f.contains("EXPEVT=0e0") && spc.zip(apfm.clone()).is_some_and(|(spc, range)| range.contains(&spc))
+        });
+        if collision {
+            eprintln!("{}: at CPU ratio {} the stock software's start of the loader collides with its own timer handler", v.name, ratio);
+            continue;
+        }
+        assert_eq!(stop, Stop::Breakpoint, "{}: the installed software did not start the program: {:?}", v.name, m.cpu.fault);
+        started = Some(m);
+        break;
     }
-    assert_eq!(stop, Stop::Breakpoint, "{}: the installed software did not start the program: {:?}", v.name, m.cpu.fault);
+    let mut m = started.unwrap_or_else(|| panic!("{}: the stock software's start of the loader failed at every speed tried", v.name));
     m.cpu.breakpoints.clear();
     Some((m, v.name.clone(), custom))
 }

@@ -39,7 +39,7 @@ reads it, shows its destination menus and draws the map, which can be
 zoomed and scrolled.  `--gps LAT,LON,COURSE` gives the unit a GPS fix,
 and the map shows that place; `--drive KMH` sets the car moving (speed
 pulses, gyroscope, and the fix along its course), and the map follows.
-`rnse ui disc.iso --variant V575 --nav-disc card.img --gps 41.8781,-87.6298,270 --drive 50@60000`
+`rnse ui disc.iso --variant V575 --nav-disc card.img --gps 41.8781,-87.6298,270 --drive 50@30000`
 In the browser front end the 193 has a fix in San Francisco unless
 `--gps` puts it elsewhere or `--no-gps` leaves it without one.
 
@@ -54,8 +54,22 @@ set with its knob. The 192's installed software reads data discs (it takes an
 update disc with a higher software index for an update and runs the
 whole update itself). The 192's SD/MP3 processor stand-ins complete
 their boot handshake and startup commands; both card slots report
-empty. Card images and MP3 decoding are still missing, as are the power
-button, the 192's GPS receiver and the 3D half of its graphics chip.
+empty. Card images and MP3 decoding are still missing on the 192, as
+are the power button, the 192's GPS receiver and the 3D half of its
+graphics chip.
+
+The 193 plays MP3 files from an SD card, all of it done by its own
+software: `rnse card music.img folder/` makes a card image from a
+folder, `--sd-card music.img` puts it in a slot, and MEDIA, the top
+right key ("Quelle"/"Source") and the card's name start the first
+file.  The unit lists folders and files, shows the time, decodes the
+file and sends the samples out through its serial sound interface;
+`--wav` records them:
+
+    rnse card music.img ~/Music/some-album
+    rnse boot disc.iso --variant V574 --ignition --no-disc --sd-card music.img \
+        --cycles 16000000000 --key MEDIA@15000 --key SOFT_TR@17000 \
+        --knob 1:1@19000 --key SELECT@20000 --wav out.wav
 
 `sdk/` has the start of a kit for writing software of your own for the
 unit: start-up code, a hardware layer for each generation and four
@@ -128,8 +142,8 @@ What the main software says while it starts (shortened):
 A scripted session, for example: wait for the radio screen, open the
 set-up menu, move two entries down, open the drop-down list.
 
-    rnse boot disc.iso --ignition --cycles 4000000000 \
-        --key SETUP@27000 --knob 1:2@29000 --key SELECT@30000 \
+    rnse boot disc.iso --ignition --cycles 2800000000 \
+        --key SETUP@7000 --knob 1:2@8500 --key SELECT@9500 \
         --screenshot menu.png
 
 Useful options while investigating (see `rnse` without arguments for the
@@ -158,6 +172,10 @@ full list):
                        of type 0x96); read as needed, not loaded
     --serial AUZ...    the unit's serial number (193), for map data made
                        for one unit; see docs/hardware-193.md
+    --sd-card FILE     an SD card in the 193's slot (see `rnse card`)
+    --trace-sd         SD card commands (193)
+    --trace-sound      the blocks of samples the 193's software sends out
+    --cpu-ratio N      CPU clock as a multiple of the peripheral clock
     --trace-atapi      CD drive commands, with where the firmware was
     --trace-bios       calls into the boot ROM
     --trace-exc        every exception and interrupt

@@ -11,9 +11,16 @@ Hitachi/Renesas SH-4, big-endian.  The firmware uses DMAC channels 4-7
 and their interrupt codes (0x780-0x7e0), which exist on the SH7750R and
 SH7751R but not on the original SH7750.
 
-* Peripheral clock about 29.4 MHz: the OS loads TMU0 with 14699 at Pclk/4
-  for a 2 ms tick, the loader 73499 for 10 ms.
-* CPU clock: taken as eight times that, 235 MHz (the SH7750R is a
+* Peripheral clock about 58.8 MHz: the OS loads TMU0 with 14699 at Pclk/4
+  for a 1 ms tick, the loader 73499 for 5 ms.  The tick's length is not
+  measured on this unit.  It is 1 ms on the 193, where sound gives an
+  independent clock (see [hardware-193.md](hardware-193.md), "Clocks and
+  time"), the two units' software is the same with every timer value in
+  the ratio 58.8 : 50, and 58.8 MHz is also what makes the CAN
+  controller's bit timing 100 kbit/s and four times the 14.7 MHz that
+  makes the serial channels' divisor 9600 bit/s.  (The emulator used to
+  take the tick for 2 ms and the clock for 29.4 MHz.)
+* CPU clock: taken as four times that, 235 MHz (the SH7750R is a
   240 MHz part), and the emulator counts one instruction per cycle.
   That is an estimate of the real speed, not a measurement.  The OS's
   calibrated delay routine (0x800ab794 in V2200815) runs 304
@@ -66,8 +73,8 @@ The OS addresses its byte-wide ports through a table of eight (index 0-7
 
 | port (data register) | bit | direction | meaning |
 |----------------------|-----|-----------|---------|
-| 0 (0x12300001) | 0 | out | watchdog strobe, toggled every 20 ms from the tick; the longest pause the OS leaves is about 220 ms, while it starts.  The emulator resets the unit when, after the first two edges, 1.5 s pass without one (the real period is not known) |
-| 2 (0x12500001) | 4 | in  | supply voltage good.  Low for about six seconds and the OS masks all interrupts and waits for the watchdog to reset it |
+| 0 (0x12300001) | 0 | out | watchdog strobe, toggled every 10 ms from the tick; the longest pause the OS leaves is about 220 ms, while it starts.  The emulator resets the unit when, after the first two edges, 1.5 s pass without one (the real period is not known) |
+| 2 (0x12500001) | 4 | in  | supply voltage good.  Low for about three seconds and the OS masks all interrupts and waits for the watchdog to reset it |
 | 3 (0x12600001) | 4 | out | display motor, towards closed |
 | 3              | 3 | out | display motor, towards open |
 | 3              | 2 | in  | display position switch: low only when fully open |
@@ -243,21 +250,21 @@ low = reset (the other bits the OS sets there, 0x04, 0x08, 0x10, 0x20
 and 0x40, are unidentified).  The OS starts with the line low, sets the
 port up with its transmitter and receiver off, raises the line and
 switches the port on; the controller's 0x0F follows.  Whenever the OS
-has sent a command frame it starts a two-second timer that any byte
+has sent a command frame it starts a one-second timer that any byte
 from the controller cancels; when it runs out the OS prints `fpdrv hard
 reset`, pulses the line low for one tick and expects the start-up
 again.  (The emulated controller used to answer in no time at all, that
 is before the timer was started, which left the timer running after the
-last frame and produced such a reset 4.6 s after every start.  It now
+last frame and produced such a reset a few seconds after every start.  It now
 answers after the time the bytes take on the line.)
 
 Bit rates.  All four serial channels in use have divisor 0x5f (channels
 1 and 3 and the loader's use of 5) or 0x1f (the application's use of
 channel 5), a ratio of three as between 9600 and 28800, or 38400 and
 115200 bit/s.  The 193 gives its faceplate port 0xa1, which is 9600
-bit/s from a 50 MHz peripheral clock or 4800 from 25 MHz, so 9600 it is
-if both faceplates talk at the same rate; that makes the companion
-chip's serial clock 14.7 MHz, half the 29.4 MHz peripheral clock.
+bit/s from its 50 MHz peripheral clock, so 9600 it is if both
+faceplates talk at the same rate; that makes the companion chip's
+serial clock 14.7 MHz, a quarter of the 58.8 MHz peripheral clock.
 Format on the 193: 8 bits, even parity (the 192's mode value 0x0011
 presumably says the same).  The emulator does not model bit rates or
 parity beyond delaying the faceplate's answers by ten bit times a byte
@@ -286,8 +293,7 @@ Bit timing as the loader sets it: BCR0 (+0x06) = 0x000d, BCR1 (+0x04) =
 0xf300, that is a prescaler of 14 and 1 + 16 + 4 = 21 quanta a bit.  A
 quantum of the HCAN2 is two clock periods times the prescaler, so the
 bit rate is the clock divided by 588: 100 kbit/s, the rate of Audi's
-infotainment bus, from 58.8 MHz, the CPU's bus clock (twice the 29.4
-MHz peripheral clock).  The loader does not put the controller in reset
+infotainment bus, from 58.8 MHz, the peripheral clock.  The loader does not put the controller in reset
 before it sets it up, and the OS never starts it at all: the boot ROM
 leaves it running, and the loader's BCR writes presumably only repeat
 what is there.

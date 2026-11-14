@@ -86,6 +86,11 @@ pub struct Machine {
     /// unless the unit has selected the CD drive as its source, and
     /// scaled by the volume the unit has set (see `dev/radio.rs`).
     pub speaker: Option<Vec<i16>>,
+    /// Sound from the 193's own output (its serial sound interface)
+    /// that has not gone into `speaker` yet, at 44.1 kHz.
+    decoded: VecDeque<i16>,
+    /// When the sound output is next served, in CPU cycles.
+    next_sound: u64,
     /// The external watchdog as last looked at.
     pub watchdog: Watchdog,
     /// The watchdog bites from the start, not only once the software
@@ -179,21 +184,24 @@ impl Machine {
     pub fn for_model(model: crate::board::Model) -> Self {
         let mut cpu = Cpu::new();
         // One instruction is counted as one CPU clock cycle.  The CPU
-        // clocks are those of the parts: 8 x 29.4 MHz = 235 MHz for the
-        // 192's SH7750R (a 240 MHz part), 16 x 25 MHz = 400 MHz for the
+        // clocks are those of the parts: 4 x 58.8 MHz = 235 MHz for the
+        // 192's SH7750R (a 240 MHz part), 8 x 50 MHz = 400 MHz for the
         // 193's SH-4A (a 400 MHz part).  The firmware's calibrated delay
         // loops agree in proportion: the 193's does 1056 instructions
-        // where the 192's does 304.
-        cpu.io.pclk_div = 8;
+        // where the 192's does 304.  The peripheral clocks follow from
+        // the operating system's tick being 1 ms (see `cycles_per_ms`).
+        cpu.io.pclk_div = 4;
+        cpu.io.pclk_hz = 58_800_000;
         if model == crate::board::Model::Rnse193 {
             cpu.io.navi = Some(Box::default());
             cpu.io.intc.int2 = Some(Default::default());
-            cpu.io.pclk_div = 16;
+            cpu.io.pclk_div = 8;
+            cpu.io.pclk_hz = 50_000_000;
         }
         // A display frame every 60th of a second.
-        let per_ms = cpu.io.pclk_div * if model == crate::board::Model::Rnse193 { 25_000 } else { 29_400 };
+        let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -442,11 +450,31 @@ impl Machine {
         }
     }
 
+    /// Change the CPU clock to `ratio` times the peripheral clock (4
+    /// on the 192 and 8 on the 193 unless told otherwise), before the
+    /// machine runs.  The emulator counts an instruction as a cycle
+    /// and the real ratio of the CPU's pace to the timers' is not
+    /// known, so anything that depends on it deserves a look at other
+    /// ratios.
+    pub fn set_cpu_ratio(&mut self, ratio: u64) {
+        self.cpu.io.pclk_div = ratio.max(1);
+        self.frame_cycles = self.cycles_per_ms() * 1000 / 60;
+        self.next_frame = self.cpu.cycles + self.frame_cycles;
+    }
+
     /// CPU cycles per millisecond of emulated time.
     pub fn cycles_per_ms(&self) -> u64 {
-        // Peripheral clock: 29.4 MHz on the 192, 25 MHz on the 193 (both
-        // from the reload values the firmware uses for its 2 ms tick).
-        self.cpu.io.pclk_div * if self.cpu.io.navi.is_some() { 25_000 } else { 29_400 }
+        // Peripheral clock: 58.8 MHz on the 192, 50 MHz on the 193.
+        // The operating system loads its tick timer with 14700 counts
+        // of a quarter of that clock on the 192 and 12488 on the 193,
+        // and the tick is 1 ms: on the 193 the time the unit shows for
+        // a playing MP3 file advances by a second for every 44100
+        // samples it sends out, the faceplate port's divisor makes
+        // 9600 bit/s and the CAN controller's bit timing 100 kbit/s
+        // only from 50 MHz.  The 192's software is the same with every
+        // timer value scaled by 58.8/50, so its tick is taken to be
+        // 1 ms as well; nothing measures it independently.
+        self.cpu.io.pclk_div * self.cpu.io.pclk_hz / 1000
     }
 
     /// Send `frame` to the unit every `period_ms` milliseconds, as another
@@ -787,7 +815,7 @@ impl Machine {
         self.cpu.set_sr(SR_MD | 0xf0);
         self.cpu.vbr = 0x8000_0000 | bootrom::VBR;
         self.cpu.r[15] = 0x8fff_ff00;
-        // The OS starts TMU0 for its 2 ms tick but never gives the timer an
+        // The OS starts TMU0 for its 1 ms tick but never gives the timer an
         // interrupt priority, so it relies on the boot ROM having done
         // that.  The loader, which shares the boot ROM's hardware layer,
         // uses level 7 (IPRA = 0x7000).
@@ -1023,9 +1051,10 @@ impl Machine {
                 }
                 // The CAN timer handler clears its underflow flag,
                 // but the OS never programs its reload or starts it.
-                // Use a 5 ms timer, giving the CAN service a 10 ms tick
+                // Use a 2.5 ms timer, the period the loaders give this
+                // timer themselves, for a CAN service tick of 5 ms
                 // (both firmware handlers divide this interrupt by two).
-                let reload = (self.cycles_per_ms() / self.cpu.io.pclk_div * 5 / 4 - 1) as u32;
+                let reload = (self.cycles_per_ms() / self.cpu.io.pclk_div * 5 / 8 - 1) as u32;
                 let now = self.cpu.cycles;
                 let pc = self.cpu.pc;
                 let (timer, start, bit) = if self.cpu.io.navi.is_some() {
@@ -1188,17 +1217,44 @@ impl Machine {
                 self.atapi().trace_mark = false;
                 eprintln!("[atapi]   at {} ms, {}", self.cpu.cycles / self.cycles_per_ms(), self.stack_trace(24));
             }
+            // The 193's own sound output (what its software decodes),
+            // a millisecond at a time: the driver queues blocks as
+            // short as 12 ms and has to hear promptly that one is done.
+            if self.cpu.cycles >= self.next_sound {
+                self.next_sound += self.cycles_per_ms();
+                let listening = self.sound.is_some() || self.speaker.is_some();
+                if let Some(navi) = self.cpu.io.navi.as_mut() {
+                    let rate = navi.audio_rate() as usize;
+                    let mut sent = Vec::new();
+                    navi.audio_out(&self.board.ram, self.board.ram_base, 1000, listening.then_some(&mut sent), &mut self.cpu.io.intc);
+                    // To the 44.1 kHz of the recording, by the nearest
+                    // sample where the rate is another.
+                    let (have, want) = (sent.len() / 2, sent.len() / 2 * 44_100 / rate.max(1));
+                    for i in 0..want {
+                        let at = if rate == 44_100 { i } else { (i * have / want).min(have - 1) };
+                        self.decoded.extend([sent[2 * at], sent[2 * at + 1]]);
+                    }
+                }
+            }
             if self.cpu.cycles >= self.next_frame {
                 self.next_frame += self.frame_cycles;
                 // The drive's audio player keeps time with the machine;
                 // what it plays is kept when somebody wants to hear it.
                 let frame_micros = self.frame_cycles * 1000 / self.cycles_per_ms();
-                if self.sound.is_some() || self.speaker.is_some() {
+                let listening = self.sound.is_some() || self.speaker.is_some();
+                if listening {
                     let mut played = Vec::new();
                     self.atapi().play_out(frame_micros, Some(&mut played));
+                    // The 193's own sound output, collected below.
+                    let mut decoded = Vec::new();
+                    for _ in 0..played.len() {
+                        decoded.push(self.decoded.pop_front().unwrap_or(0));
+                    }
                     if let Some(speaker) = self.speaker.as_mut() {
                         let gain = self.radio.cd_gain();
-                        speaker.extend(played.iter().map(|s| (*s as f32 * gain) as i16));
+                        let own = self.radio.gain(crate::dev::radio::Radio::SOURCE_DECODER);
+                        speaker.extend(played.iter().zip(&decoded)
+                            .map(|(cd, own_sample)| (*cd as f32 * gain + *own_sample as f32 * own) as i16));
                     }
                     if let Some(sound) = self.sound.as_mut() {
                         sound.append(&mut played);

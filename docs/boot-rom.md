@@ -62,6 +62,27 @@ data there.  And step 3's cache flush is `ocbwb` over the copied range
 only: the data cache is written back, the instruction cache is not
 touched.
 
+On the European 192 software (V220 0815) the copy is worse than that
+for the software itself.  The module `APFM` (a small executive that
+calls itself REX) keeps the pointer to its state at 0x8df9000c, which
+the loader's image covers, and has a handler on the system timer every
+100 ms that goes through that pointer.  From the moment the copy
+passes that address to the moment the loader has its own vectors
+(15 ms in the emulator: the rest of the copy, the cache flush, the two
+bytes of battery-backed memory, the call) the handler would read
+through loader code and meet an address error, which the OS hands to
+the boot ROM's handler at 0x80000900.  Whether a start runs into it
+depends on where in those 100 ms it falls, about one start in six by
+these numbers.  On a real unit that is a matter of how long the drive
+took, different every time, and what the boot ROM then does is not
+known (presumably the unit starts again and tries again).  In the
+emulator time is the same in every run: `rnse boot <disc> --variant
+V220 --installed-index 0640` ends in exactly this fault with the
+default clocks and starts the loader with `--cpu-ratio 3` or `5`.
+Nothing of the kind happens with the North American 192 software or
+on the 193.  A program of one's own started this way inherits the
+risk: it is in the stock software, before the program runs.
+
 ### Only from the CD drive
 
 Nothing in the stock software updates from an SD card.  The loaders
@@ -78,12 +99,13 @@ have a message `Loading from Multi-Changer` next to `Slotno Error`,
 so a slot number is among what it is handed; that is a disc changer,
 not a card.
 
-This is from reading the modules, not from a run: a card with the
-update disc's volume in a type-0x96 partition (the layout the 193
-takes map data from) was tried in the emulator with an empty drive and
-a lower installed index, but there the 193's software never sends the
-card a command (`--sd-card`; 96 register reads, no command), so the
-attempt says nothing either way.
+A run agrees as far as the application's side goes.  A card with the
+update disc's volume in a type-0x96 partition (the layout of the cards
+that carry map data for the 193), an empty drive and a lower installed
+index: the 193's software mounts the card's FAT partition, lists it for
+music and reads not one sector of the other partition, in the stock
+European software and in the modified North American one alike
+(`docs/hardware-193.md`, "SD cards").
 
 A program of one's own is not bound by this on the 193, where the SD
 host interface belongs to the main processor and the stock OS drives
@@ -120,7 +142,7 @@ State the OS inherits:
 
 * A stack above 0x8fc80000.  After a cold start the OS clears RAM from
   0x8c000000 up to that address while still running on the boot stack.
-* TMU0 interrupt priority.  The OS programs and starts TMU0 for its 2 ms
+* TMU0 interrupt priority.  The OS programs and starts TMU0 for its 1 ms
   tick but only ever sets the *TMU2* field of IPRA.  The loader, which
   shares its hardware layer with the boot ROM, uses IPRA = 0x7000.
 * On the 192, DMA master enable (`DMAOR.DME = 1`). The SD/MP3 driver
@@ -134,9 +156,10 @@ State the OS inherits:
   takes the controller out of its reset/halt state itself.
 * A running CAN timer: TMU2 on the 192, unit 1 channel 0 on the 193.
   The OS installs its handler and clears underflows but does not start
-  the timer. The stand-in supplies a 5 ms interval; the handlers divide
-  this by two to service CAN every 10 ms. The exact boot-ROM reload is
-  unavailable, so this interval is an emulation assumption.
+  the timer. The stand-in supplies a 2.5 ms interval, the one the
+  loaders program themselves; the handlers divide this by two to
+  service CAN every 5 ms. The exact boot-ROM reload is unavailable, so
+  this interval is an emulation assumption.
 * On the 192, shared receive mailboxes 0 (general), 2 (network management,
   mask `0x03f`) and 3 (`0x600..0x67f`, mask `0x07f`). The driver changes
   their identifiers as clients register but skips programming their mode.

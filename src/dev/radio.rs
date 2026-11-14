@@ -167,7 +167,17 @@ impl Radio {
     /// scales it.  The steps' size is not known; 2 dB a step is assumed,
     /// full scale at 30, silence at 0.
     pub fn cd_gain(&self) -> f32 {
-        if self.source != Self::SOURCE_CD || self.volume == 0 {
+        self.gain(Self::SOURCE_CD)
+    }
+
+    /// The source number the 193 selects for what its own software
+    /// decodes (MP3 from an SD card), which leaves the main processor
+    /// through its serial sound interface.
+    pub const SOURCE_DECODER: u8 = 4;
+
+    /// The same for any source.
+    pub fn gain(&self, source: u8) -> f32 {
+        if self.source != source || self.volume == 0 {
             return 0.0;
         }
         10f32.powf(-((30 - self.volume.min(30)) as f32) * 2.0 / 20.0)

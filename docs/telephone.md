@@ -13,14 +13,14 @@ With locally extracted OSM modules:
 ```
 python3 tools/telephone_probe.py out/V222/OSM.BIN out/V575/OSM.BIN
 target/release/rnse boot RNSE_NA_FW_0320_0350.iso --variant V222 \
-  --ignition --cycles 4200000000 --key TEL@30000 --trace-can \
+  --ignition --cycles 4200000000 --key TEL@15000 --trace-can \
   --screenshot out/tel-before-222.png > out/tel-before-222.log 2>&1
 ```
 
 The second command was run against V2220371. Its TEL screen says
 “Telephone is not installed.” The run continued to its cycle budget.
 The same check on V57510AA (`--variant V575 --cycles 6000000000
---key TEL@45000`) also reaches the telephone screen with the same
+--key TEL@12000`) also reaches the telephone screen with the same
 message, then runs to its cycle budget. Extracted modules, disassemblies, traces and
 screenshots belong under ignored `out/`, never in version control.
 
@@ -129,7 +129,7 @@ Tried in the emulator against V2200815, with both channels answered
   send anything on the telephone's channel, or changes the TEL screen
   from "Telefon nicht vorhanden".  Bit 2 of the first byte puts the
   mute symbol into the status line and nothing else.
-* Lines from the module (`--tel-say '^CTEL: 1@28000'`, `OK`, `^BTON:
+* Lines from the module (`--tel-say '^CTEL: 1@14000'`, `OK`, `^BTON:
   1`) are acknowledged by the transport and not answered.
 * The telephone code decides how to start by the unit's network
   management state: `8011a86c` and `8011a52c` fetch a byte through

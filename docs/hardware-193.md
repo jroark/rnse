@@ -30,16 +30,20 @@ The loader, linked at 0x09b60000, runs in P0.
 | 0x08000000-0x0fffffff | RAM, 128 MiB (the loader's stack starts at 0x8fffdf00) |
 | 0x18000000-           | battery-backed SRAM (the OS has some 1800 references to it) |
 | 0xfe008000, 0xfe800100 | not identified (a few writes at start-up; 0xfe800100 takes the key 0xa55a) |
+| 0xff801000-0xff8014ff | DMA channels, 0x80 apart, and their common registers at 0xff801400 (see "DMA channels") |
 | 0xff802000            | interrupt pin control (the layout of the SH7780's INTC: sense, mask and mask-clear registers) |
 | 0xff804000            | interrupt controller |
 | 0xff902000            | a second block of interrupt priority and mask registers, written alongside 0xff804000 (not emulated) |
 | 0xff907000            | a clock that keeps running, used by the GPS library only: six 16-bit values to set at +0x06..+0x10 (the last one shifted left by five), taken over by writing 0xffff to +0x02; the running values at +0x12..+0x1c, read once bit 1 of +0x04 is clear.  Which value is which (date and time, by their number) is not established; not emulated, the registers read back what was written |
 | 0xff908000            | ten registers written in groups at start-up, purpose not established (not emulated) |
 | 0xff909000            | a port: +0 written 0, 0xc0000000 and later 0xc0100000 (direction or pin function, not understood), data at +4.  Data bit 1 is the faceplate controller's reset line, low = reset; bits 0 and 3 are set at start-up and unidentified |
+| 0xff90a000            | SD host interface for the two card slots (see "SD cards") |
 | 0xff915000            | serial port to the radio processor |
 | 0xff926000            | serial port with FIFO to the faceplate controller |
 | 0xff923000, 0xff927000 | further serial ports with FIFO (not emulated) |
 | 0xff93c000            | A/D converter |
+| 0xff972000            | audio clock: 0x3dff for sample rates of the 44.1 kHz family, 0x3eff for those of the 48 kHz family |
+| 0xff984000            | serial sound interface (see "Sound output") |
 | 0xff93e000, 0xff93f000, 0xff940000 | ports; 0xff93f000 has the display motor and the supply monitor |
 | 0xffc40000, 0xffc44000 | ports; 0xffc44008 bit 0 strobes the external watchdog |
 | 0xffc62100            | ATAPI interface |
@@ -78,6 +82,9 @@ touches its port.
 | serial port, radio processor | 0xd20 | PRI9 bits 15:8 | 9 of the second pair | 2 |
 | serial port, faceplate | 0xdc0 | PRI10 bits 23:16 | 14 of the second pair | 9 |
 | A/D converter | 0xf00 | PRI11 bits 15:8 | none found | 11 |
+| SD host interface | 0xea0 | PRI11 bits 31:24 | 21 of the second pair | |
+| DMA channel 3 (sound) | 0x980 | PRI6 bits 31:24 | 27 | 6 |
+| serial sound interface | 0xca0 | PRI9 bits 31:24 | 5 of the second pair | 6 |
 
 The levels are the ones the 192 uses for the same jobs.  The timer
 fields are an inference: the loader sets bits 23:16 when it starts timer
@@ -95,7 +102,7 @@ The CAN timer is a separate channel at `0xffd81008` (reload),
 `0xffd81004`. V57510AA's interrupt table installs wrapper `804cc58c`
 at exception `480`; it calls `806305a0`, which clears this timer's
 underflow and wakes the CAN task every second interrupt. The boot ROM
-stand-in starts it at 5 ms (see [boot-rom.md](boot-rom.md)).
+stand-in starts it at 2.5 ms (see [boot-rom.md](boot-rom.md)).
 
 ## Display unit
 
@@ -172,7 +179,7 @@ as the alpha map.  The 0xab commands of several pieces can be in one
 list and the drawing in the next.
 
 The OS starts a list, waits for the interrupt its end raises (status bit
-2, INTEVT 0x780) for up to four seconds and logs `Q2 TIME OUT` if it
+2, INTEVT 0x780) for up to two seconds and logs `Q2 TIME OUT` if it
 does not come.
 
 Two commands (0xab, 0xaa) bracket drawing into a surface that has alpha
@@ -231,11 +238,7 @@ Bit timing as the loader sets it, after putting the controller in reset
 (MCR = 1): BCR0 (+0x06) = 0x000b, BCR1 (+0x04) = 0xb730, a prescaler of
 12 and 1 + 12 + 8 = 21 quanta a bit.  With the HCAN2's rule (a quantum
 is two clock periods times the prescaler) that is 100 kbit/s from 50.4
-MHz.  The faceplate port's divisor says 50 MHz too (9600 bit/s), while
-the timers count at 6.25 MHz, which is a quarter of 25 MHz as on every
-SH-4: the serial peripherals seem to run from twice the clock the timers
-divide.  (Both timer periods match the 192's: 2 ms for the OS's tick,
-5 ms for the CAN timer.)
+MHz, the peripheral clock (see "Clocks and time").
 
 ### Who sets up the mailboxes
 
@@ -278,13 +281,10 @@ See [boot-rom.md](boot-rom.md).
   Set-up by the OS: control 0, FIFO control 6 (both FIFOs held empty),
   status flags cleared, mode 0x0020 (8 bits, even parity), bit rate
   0xa1; then the controller's reset line (bit 1 of 0xff909004) goes
-  high, FIFO control 0, control 0x30.  0xa1 is 9600 bit/s if the
-  peripheral clock is 50 MHz and 4800 if it is 25 MHz; the debug port's
-  divisor (0x36 at +0x30, sixteen samples a bit) then gives 57600 or
-  28800.  The CAN controller's bit timing also points at 50 MHz (see
-  CAN), and the 192's notes say why 9600 is the likelier for the
-  faceplate.  As on the 192 the OS resets the controller when it leaves
-  a command unanswered for two seconds.
+  high, FIFO control 0, control 0x30.  0xa1 is 9600 bit/s from the
+  50 MHz peripheral clock; the debug port's divisor (0x36 at +0x30,
+  sixteen samples a bit) gives 57600.  As on the 192 the OS resets the
+  controller when it leaves a command unanswered for a second.
 
 ## A/D converter and ports
 
@@ -303,14 +303,14 @@ averages them:
 Port 0xff93f000 (direction +4, output +8, input +0xc): output bits 19
 and 18 drive the display motor (assumed: 19 towards closed), input bit
 20 is low only when the display is fully open, and input bit 22 has to
-be high or the OS stops itself after nine seconds, waiting for the
+be high or the OS stops itself after four and a half seconds, waiting for the
 watchdog: presumably the supply voltage monitor.
 
 ## Watchdog
 
 External, strobed through bit 0 of the port at 0xffc44008 from the
-tick, every 20 ms; the longest pause the OS leaves while it starts is
-about 150 ms.  The loader ends an update by printing `*** WDT Reset ***`
+tick, every 10 ms; the longest pause the OS leaves while it starts is
+about 135 ms.  The loader ends an update by printing `*** WDT Reset ***`
 and no longer strobing; when it gets impatient it jumps to address 0
 itself.  The emulator resets after 1.5 s without an edge (the real
 limit is not known).
@@ -363,11 +363,33 @@ the debug log), with two differences in how they are started:
   exception codes 0x000-0x1e0, all of them for TRAPA 0-63) and 125 mask
   bytes at +0x780.  See [boot-rom.md](boot-rom.md).
 
-As on the 192, the OS starts timer 0 for its 2 ms tick without giving it
+As on the 192, the OS starts timer 0 for its tick without giving it
 a priority; the boot ROM has done that (the loader's value is level 7,
-with the timers' mask bit cleared).  The peripheral clock is 25 MHz,
-going by the tick's reload value.  The CPU clock is taken as sixteen
-times that, 400 MHz, the rated speed of this family, and the emulator
+with the timers' mask bit cleared).
+
+### Clocks and time
+
+The peripheral clock is 50 MHz and the OS's tick is 1 ms: timer 0
+counts a quarter of the peripheral clock, as on every SH-4, and is
+reloaded with 12487.  Three things that do not depend on each other say
+so:
+
+* the time the unit shows for a playing MP3 file, which it counts in
+  ticks, goes up by a second for every 44100 samples it sends out (see
+  "Sound output"); with a tick of 2 ms it would show half the time;
+* the faceplate port's divisor makes 9600 bit/s from 50 MHz and 4800
+  from 25;
+* the CAN controller's bit timing makes the infotainment bus's 100
+  kbit/s from 50.4 MHz.
+
+The loader's tick (62437) is 5 ms, the CAN timer's period 2.5 ms.
+(Until the sound output was modelled the emulator took the tick for
+2 ms and the clock for 25 MHz, with the serial peripherals running from
+twice the timers' clock; the unit then ran at half its speed measured
+in its own time, which nothing showed.)
+
+The CPU clock is taken as eight times the peripheral clock, 400 MHz,
+the rated speed of this family, and the emulator
 counts one instruction per cycle; this is an estimate.  The firmware's
 calibrated delay routine (0x804dd960 in V5741040) runs 1056 instructions
 per unit of its argument where the 192's runs 304, which fits a CPU
@@ -375,7 +397,7 @@ about three and a half times as fast.
 
 In the emulator the OS starts all its tasks, checks its flash file
 system, sees the ignition, talks to the radio processor and the
-faceplate, shows its start-up picture after about half a minute and
+faceplate, shows its start-up picture after about fifteen seconds and
 then its user interface, on all three variants.  It reads the disc in
 the drive, takes keys from the faceplate and changes screens (radio,
 set-up and so on).  A freshly installed unit first asks for the
@@ -385,15 +407,138 @@ function keys work regardless.  `printf` is at
 0x80688afe in V5741040, 0x80688146 in VB481000 and 0x8067b886 in
 V57510AA.
 
+## SD cards
+
+The two card slots hang on a host interface in the system-on-chip, at
+0xff90a000: registers of 16 bits in the layout known from Toshiba's
+and Renesas's SD host controllers (command at +0x00, slot select +0x02,
+argument +0x04, block count +0x0a, response from +0x0c, status +0x1c
+and +0x1e with their masks at +0x20 and +0x22, block size +0x26, data
+port +0x30, soft reset +0xe0; bit 1 of +0xd8 hands the data port to
+DMA).  Its interrupt is INTEVT 0xea0.  The driver is in the OS
+(`0x80688c00`-`0x80697000` in V5741040); `src/dev/sdhi.rs` is the model
+and `--trace-sd` lists the commands.
+
+What the driver does with a card, in the emulator: CMD0, CMD8, ACMD41,
+CMD2, CMD3, CMD9, CMD7, for a standard-capacity card CMD16 with 512,
+ACMD6 for the four-bit bus, ACMD13 and ACMD51 (their 64 and 8 bytes
+read from the data port by the program), and from then on CMD17, one
+sector at a time, each fetched by DMA (see "DMA channels") and each
+framed by CMD13.  It reads nothing with CMD18 and writes nothing in
+normal use.
+
+It is particular about sizes: a card that answers ACMD41 as a
+high-capacity card must have more than 0x3f6000 sectors (about 2 GB)
+and at most 0x3fd8000 (32 GB), and a standard-capacity card at most
+0x3f6000; anything else is turned away after ACMD13 and tried again
+for ever.  The emulator therefore presents an image as the one kind or
+the other by its size.
+
+The OS then reads the partition table and mounts a FAT partition
+(types 1, 4, 6, 0xb, 0xc, 0xe; FAT16 and FAT32 both seen working) as
+`/affm/sd2` (the slot the emulator calls the first) or `/affm/sd1`.
+The card is music to the stock software and nothing else: it reads the
+volume label, looks for a folder `SD_AUDIO`, lists folders and files
+and reads the first sector of each MP3 file.  The label then stands in
+the list of sources under MEDIA ("Quelle") between the CD drive and
+the other slot.  A partition of type 0x96 is not looked at, and neither
+is `LOADING.KWI` anywhere on a card: updates come from the drive only
+(see [boot-rom.md](boot-rom.md), "Only from the CD drive").
+
+The modified North American software (index 0320, see "Map data made
+for one unit") has code added at 0x806a9400 that is called when
+`sd2` is mounted and notes the start and size of a type-0x96 partition
+at 0x0e8cff3c; what it then does with them has not been followed.  With
+such a card in the emulator that software records the partition and
+reads no sector of it in the first half minute.
+
+`rnse card out.img folder [--disc disc.iso]` writes a card image from a
+folder (FAT16, long names), with a disc's volume in a type-0x96
+partition if wanted; `--sd-card out.img` puts it in the slot.
+
+## DMA channels
+
+Channels 0x80 apart from 0xff801000 and a block of common registers at
+0xff801400.  Two are in use: channel 4 (0xff801200) by the SD card
+driver, which polls it, and channel 3 (0xff801180) for sound.
+
+| register | meaning |
+|----------|---------|
+| +0x00, +0x04, +0x08 | source address, destination address, count of transfers (16 bits each from the SD host's data port: 0x100 a sector; 32 bits each to the sound interface) |
+| +0x0c, +0x10, +0x14 | a second set of the three |
+| +0x28 | mode: 0x00402112 for the SD driver's reads, 0x05050022 for sound |
+| +0x2c | control.  Bit 0: run.  Bit 1: the set that is not in use has been loaded, go on with it when this one is done.  Bit 2: stop when this one is done |
+| +0x30 | write 1: stop |
+| +0x34 | status.  Bit 0: running.  Bit 1: a loaded set is waiting.  Bit 6: the first set is the one in use |
+
+Common block, bit 2n for channel n: +0x10 a set's count has run out,
++0x14 write 1 to clear that, +0x18 interrupt enable.  Channel 3's
+interrupt is INTEVT 0x980 (channel 4's would be 0x9c0, going by the
+handler number its driver removes).  0xff903024 is written 0x200 before
+each transfer of the SD driver and is not understood.
+
+The control and status bits are read off the sound driver
+(`0x806495d4` in V5741040), which keeps two blocks queued: it loads the
+set the status says is free, sets bit 1, and in the interrupt handler
+for a finished set loads the next; when it has nothing more it sets bit
+2 instead.  That the address and count registers count during a
+transfer is assumed; nothing reads them back.
+
+## Sound output
+
+The system-on-chip decodes MP3 itself, in software, and sends the
+samples out through a serial sound interface at 0xff984000 with the
+registers of the SSI of other Renesas chips: control at +0 (bit 0
+enable, bit 1 transmit, bits 6:4 clock divider, bits 27 and 26
+interrupt enables for underflow and overflow, bit 28 DMA), status at +4
+(the same bits; written as zeroes to clear), transmit data at +8.  The
+driver's table of sample rates (0x804b3f7c in V5741040) gives for each
+rate the control bits and the value for the audio clock register at
+0xff972000:
+
+| rates | control bits | audio clock |
+|-------|--------------|-------------|
+| 48000, 44100 | 0x000b0030 | 0x3eff, 0x3dff |
+| 32000 | 0x000b0060 | 0x3eff |
+| 24000, 22050 | 0x000b0040 | 0x3eff, 0x3dff |
+| 16000 | 0x000c0040 | 0x3eff |
+| 12000, 11025 | 0x000d0040 | 0x3eff, 0x3dff |
+
+A word of 32 bits goes out for every sample period: the left channel's
+16 bits in the high half, the right one's in the low half.  DMA channel
+3 fetches the words from buffers in RAM, in blocks of 512 to 4096
+words, two queued at a time.  When a block is done the handler of
+INTEVT 0x980 queues the next; when the last is done it switches the
+interface off.  The interface's own interrupt (INTEVT 0xca0) is for
+underflow and overflow, which the driver counts as errors, and for the
+idle state.
+
+The amplifier's source for this is 4 (see the radio processor's notes
+in [hardware.md](hardware.md)); the CD drive's own audio output is 1.
+
+In the emulator a card with MP3 files plays: MEDIA, the top right key
+for the list of sources, the card, and the first file starts; the
+unit shows folders, file names and the time, and `--wav` records what
+comes out (`--trace-sound` lists the blocks).  A file with 440 Hz on
+the left and 880 Hz on the right comes out as exactly that, without a
+gap, and the next file follows.  What is assumed: how the hardware
+keeps the moment between a last block and the handler switching the
+interface off from counting as an underflow (the emulator reports an
+underflow only when the interface has had nothing to send for more
+than a millisecond), and the amplifier's gain law.  WMA, playlists
+and the second slot have not been tried.
+
 ## Navigation
 
 The map comes from a DVD (ISO 9660): `ALLDATA.KWI` with the map in
 Aisin's KIWI format, index files for destination entry under `IDX`,
 `VOICEDAT.KWI`, and a copy of the unit's software for updating older
-units from.  The unit's SD card slots take the same thing: a card with
-the DVD's volume in a second partition of type 0x96, behind a FAT
-partition.  The SD card processors are not emulated, so the emulator
-puts that partition into the DVD drive instead (`--nav-disc card.img`).
+units from.  Cards are sold that carry the same thing: the DVD's volume
+in a second partition of type 0x96, behind a FAT partition.  The stock
+software does nothing with that partition (see "SD cards"); the cards
+go with a modified version of the software, and how far that one takes
+the map from the card has not been followed.  The emulator puts the
+partition into the DVD drive instead (`--nav-disc card.img`).
 
 ![The map (V575) in the emulator](nav-193.png)
 
@@ -561,9 +706,9 @@ writing that block before the start.
   disc.
 * The GPS block itself and the satellite record; the rest of the
   coding, and where a car without the pulse wire gets its distance
-  from; the SD card processors; route guidance has not been tried.
+  from; route guidance has not been tried.
 * The second interrupt register block at 0xff902000, the I2C masters,
   the remaining serial ports, DMA for the drive.
 * Interrupt sources the OS registers handlers for and that have no
-  model: 0x480, 0x760, 0x7a0, 0x940-0x980, 0xc00, 0xca0-0xce0, 0xde0,
-  0xe20, 0xea0, 0xfa0.
+  model: 0x760, 0x7a0, 0x940, 0x960, 0xc00, 0xcc0, 0xce0, 0xde0,
+  0xe20, 0xfa0.

@@ -14,8 +14,14 @@
 //!
 //! | address      | module                                             |
 //! |--------------|----------------------------------------------------|
+//! | 0xff80_1000  | DMA channels, 0x80 apart: 3 (0xff80_1180) feeds the |
+//! |              | serial sound interface, 4 (0xff80_1200) serves the |
+//! |              | SD host interface; at 0xff80_1400 registers common |
+//! |              | to the channels.  See `dma_write`                  |
 //! | 0xff80_2000  | bus state controller (area set-up; ignored)        |
 //! | 0xff80_4000  | interrupt controller, SH7780 INTC2 layout          |
+//! | 0xff90_a000  | SD host interface for the two card slots, see      |
+//! |              | [`crate::dev::sdhi`]                               |
 //! | 0xff91_5000  | serial port to the radio processor: the 192's      |
 //! |              | companion-chip UART with its registers 4 apart     |
 //! | 0xff92_6000  | SCIF to the faceplate controller                   |
@@ -23,6 +29,11 @@
 //! | 0xff93_f000  | port: +4 direction, +8 output, +0xc input.  Bits   |
 //! |              | 19/18 run the display motor (closing/opening), bit |
 //! |              | 20 is low only when the display is fully open      |
+//! | 0xff97_2000  | audio clock: 0x3dff for the 44.1 kHz family of     |
+//! |              | sample rates, 0x3eff for the 48 kHz family         |
+//! | 0xff98_4000  | serial sound interface (the SSI of other Renesas   |
+//! |              | chips): +0 control, +4 status, +8 transmit data.   |
+//! |              | Sound decoded by the software (MP3) leaves here    |
 //! | 0xffc4_4008  | port data; bit 0 is the strobe for the external    |
 //! |              | watchdog (the firmware toggles it from its tick)    |
 //! | 0xffc6_2100  | ATAPI interface: task file at +0x00..+0x1c (one   |
@@ -45,12 +56,42 @@ use crate::dev::sdhi::Sdhi;
 use crate::iolog::IoLog;
 use std::collections::HashMap;
 
+/// State of the DMA channel that feeds the sound interface, beyond
+/// what its registers hold.
+#[derive(Default)]
+pub struct AudioDma {
+    pub running: bool,
+    /// The second set of address and count registers is the one in use.
+    second: bool,
+    /// Time not yet turned into samples, in microseconds times the rate.
+    owed: u64,
+    /// The interface was on with nothing to send when last looked at.
+    starved: bool,
+    /// Stereo samples sent since the start.
+    pub frames: u64,
+    /// Print what the driver does with the channel (`--trace-sound`).
+    pub trace: bool,
+}
+
 const DU: u32 = 0xfff8_0000;
 const DU_END: u32 = 0xfffa_0000;
 /// A port (direction +0, data +4); bit 1 of the data register resets
 /// the faceplate controller when low.
 const PORT_FP: u32 = 0xff90_9000;
 const SCIF_DEBUG: u32 = 0xffe4_0000;
+/// The DMA channel that feeds the serial sound interface.
+const AUDIO_DMA: u32 = 0xff80_1180;
+/// Its bit in the common registers.
+const AUDIO_DMA_BIT: u32 = 0x40;
+/// The DMA channel the SD card driver reads sectors through.
+const DMA: u32 = 0xff80_1200;
+/// Registers common to the DMA channels.
+const DMA_COMMON: u32 = 0xff80_1400;
+/// This channel's bit in the common registers.
+const DMA_BIT: u32 = 0x100;
+/// The serial sound interface: control, status, transmit data.
+const SSI: u32 = 0xff98_4000;
+const AUDIO_CLOCK: u32 = 0xff97_2000;
 const ATAPI: u32 = 0xffc6_2100;
 const ATAPI_CONTROL: u32 = 0xffc6_2180;
 const ATAPI_STATUS: u32 = 0xffc6_2184;
@@ -101,6 +142,8 @@ pub struct Navi {
     /// The on-chip CAN controller (infotainment bus).
     pub can: Hcan,
     pub sdhi: Sdhi,
+    /// The sound interface's DMA channel.
+    pub audio: AudioDma,
     /// Cycle of the last watchdog strobe edge, once there has been one.
     /// Edges seen on the watchdog strobe (bit 0 of [`WATCHDOG_PORT`]).
     pub watchdog_edges: u64,
@@ -157,7 +200,7 @@ impl Navi {
         let mut atapi = Atapi::new();
         atapi.packet_irq = true;
         // A/D inputs: the display closed (4) and 25 degrees (5).
-        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), watchdog_edges: 0, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), debug_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() }
+        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), audio: AudioDma::default(), watchdog_edges: 0, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), debug_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() }
     }
 
     /// Whether this module, rather than the SH-4 model, owns `addr`.
@@ -320,6 +363,8 @@ impl Navi {
             // written (the input register is handled above where known).
             0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.port_read(addr, size),
             PORT_FP..=0xff90_9007 => self.raw_read(addr, size),
+            a if a == AUDIO_DMA + 0x34 => self.audio_dma_status(),
+            AUDIO_DMA..=0xff80_14ff | SSI..=0xff98_400f | AUDIO_CLOCK..=0xff97_2003 => self.raw_read(addr, size),
             _ => {
                 self.unmodelled.note(addr, false, pc);
                 self.raw_read(addr, size)
@@ -399,6 +444,21 @@ impl Navi {
             }
             0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.port_write(addr, size, v),
             PORT_FP..=0xff90_9007 => self.raw_write(addr, size, v),
+            AUDIO_DMA..=0xff80_14ff if size == 4 => {
+                self.dma_write(addr, v);
+                self.audio_irq(intc);
+            }
+            // Status bits of the sound interface are cleared by
+            // writing them as zeroes.
+            a if a == SSI + 4 => {
+                let left = self.raw_read(a, 4) & v;
+                self.raw_write(a, 4, left);
+                self.audio_irq(intc);
+            }
+            SSI..=0xff98_400f | AUDIO_CLOCK..=0xff97_2003 => {
+                self.raw_write(addr, size, v);
+                self.audio_irq(intc);
+            }
             _ => {
                 self.unmodelled.note(addr, true, pc);
                 self.raw_write(addr, size, v)
@@ -430,6 +490,188 @@ impl Navi {
         }
         self.display_pos = pos.clamp(0, 1023) as u16;
         self.adc.input[4] = self.display_pos;
+    }
+
+    /// The DMA channels, as far as their two users show them.  They
+    /// are 0x80 apart from 0xff80_1000; channel 4 (0xff80_1200) is the
+    /// SD card driver's, which polls, channel 3 (0xff80_1180) feeds
+    /// the serial sound interface and interrupts.
+    ///
+    /// | register | meaning |
+    /// |----------|---------|
+    /// | +0x00 | source address |
+    /// | +0x04 | destination address |
+    /// | +0x08 | count of transfers (16 bits each for the SD host's data port, 32 for the sound interface) |
+    /// | +0x0c, +0x10, +0x14 | a second set of the three |
+    /// | +0x28 | mode: 0x0040_2112 for the SD driver's reads, 0x0505_0022 for sound |
+    /// | +0x2c | control.  Bit 0: run.  Bit 1: the set that is not in use has been loaded, go on with it when this one is done.  Bit 2: stop when this one is done |
+    /// | +0x30 | write 1: stop |
+    /// | +0x34 | status.  Bit 0: running.  Bit 1: a loaded set is waiting.  Bit 6: the first set is the one in use (the driver loads the second then) |
+    ///
+    /// In the common block at 0xff80_1400, with bit 2n for channel n:
+    /// +0x10 a set's count has run out, +0x14 write 1 to clear that,
+    /// +0x18 interrupt enable.  The sound channel's interrupt is INTEVT
+    /// 0x980, the SD channel's would be 0x9c0 (its driver clears the
+    /// enable bit and looks at +0x10 itself).
+    ///
+    /// The meaning of the control and status bits is read off the
+    /// sound driver, which keeps two blocks queued; that the address
+    /// and count registers count during a transfer is assumed.
+    fn dma_write(&mut self, addr: u32, v: u32) {
+        match addr {
+            a if a == DMA + 0x2c => if v & 1 != 0 { self.raw_write(DMA + 0x34, 4, 1) },
+            a if a == DMA + 0x30 => if v & 1 != 0 { self.raw_write(DMA + 0x34, 4, 0) },
+            a if a == DMA_COMMON + 0x14 => {
+                let left = self.raw_read(DMA_COMMON + 0x10, 4) & !v;
+                self.raw_write(DMA_COMMON + 0x10, 4, left);
+            }
+            a if a == AUDIO_DMA + 0x2c => {
+                if self.audio.trace {
+                    println!("[sound] control {:x} (was {:x}, status {:x}); sets {:08x}+{:x} {:08x}+{:x}; {} samples out", v,
+                        self.raw_read(a, 4), self.audio_dma_status(), self.raw_read(AUDIO_DMA, 4), self.raw_read(AUDIO_DMA + 8, 4),
+                        self.raw_read(AUDIO_DMA + 0xc, 4), self.raw_read(AUDIO_DMA + 0x14, 4), self.audio.frames);
+                }
+                self.raw_write(a, 4, v);
+                if v & 1 != 0 && !self.audio.running {
+                    self.audio.running = true;
+                    self.audio.second = false;
+                }
+            }
+            a if a == AUDIO_DMA + 0x30 => if v & 1 != 0 {
+                self.audio.running = false;
+                self.raw_write(AUDIO_DMA + 0x2c, 4, 0);
+            },
+            _ => self.raw_write(addr, 4, v),
+        }
+    }
+
+    fn audio_dma_status(&self) -> u32 {
+        if !self.audio.running {
+            return 0;
+        }
+        1 | (self.raw_read(AUDIO_DMA + 0x2c, 4) & 2) | if self.audio.second { 0 } else { 0x40 }
+    }
+
+    /// The sample rate the sound interface is set up for.  The driver
+    /// has a table of rates with what it writes for each to the
+    /// interface's control register (the clock divider among it) and
+    /// to the audio clock register; this is that table read backwards.
+    pub fn audio_rate(&self) -> u32 {
+        let family = if self.raw_read(AUDIO_CLOCK, 4) == 0x3dff { 44_100 } else { 48_000 };
+        match self.raw_read(SSI, 4) & 0x000f_0070 {
+            0x000b_0060 => 32_000,
+            0x000b_0040 => family / 2,
+            0x000c_0040 => 16_000,
+            0x000d_0040 => family / 4,
+            _ => family,
+        }
+    }
+
+    fn audio_irq(&self, intc: &mut Intc) {
+        let common = self.raw_read(DMA_COMMON + 0x10, 4) & self.raw_read(DMA_COMMON + 0x18, 4);
+        intc.set_int2(super::onchip::INT2_AUDIO_DMA, common & AUDIO_DMA_BIT != 0);
+        // Underflow: bit 27 of the status, enabled by the same bit of
+        // the control register (as in the SSI of other Renesas chips:
+        // 28 DMA, 27 underflow, 26 overflow, 25 idle).
+        let underflow = self.raw_read(SSI + 4, 4) & self.raw_read(SSI, 4) & 0x0800_0000 != 0;
+        intc.set_int2(super::onchip::INT2_SSI, underflow);
+    }
+
+    /// The sound interface sends for `micros` microseconds: its DMA
+    /// channel fetches the samples from memory, a word of 32 bits for
+    /// each moment: 16 bits for the left channel in the high half and
+    /// 16 for the right one in the low half, so that the buffer is
+    /// plain interleaved big-endian PCM (a file with different tones
+    /// left and right comes out of the stock decoder that way round).
+    /// What goes out is added to `out` as
+    /// stereo samples at the interface's rate; nothing is added while
+    /// the interface is off.
+    pub fn audio_out(&mut self, ram: &[u8], base: u32, micros: u64, mut out: Option<&mut Vec<i16>>, intc: &mut Intc) {
+        let control = self.raw_read(SSI, 4);
+        // Enabled, transmitting, with DMA.
+        if control & 0x1000_0003 != 0x1000_0003 {
+            return;
+        }
+        self.audio.owed += micros * u64::from(self.audio_rate());
+        let frames = self.audio.owed / 1_000_000;
+        self.audio.owed %= 1_000_000;
+        if !self.audio.running {
+            // Nothing to send.  The driver lets the channel run out
+            // when it has no further block (control bit 2) and turns
+            // the interface off in the channel's interrupt handler, so
+            // there is always a moment like this; how the hardware
+            // keeps that from counting as an underflow is not known.
+            // Here it is one only if it lasts into a second period.
+            if std::mem::replace(&mut self.audio.starved, true) {
+                let status = self.raw_read(SSI + 4, 4) | 0x0800_0000;
+                self.raw_write(SSI + 4, 4, status);
+            }
+            if let Some(out) = out.as_deref_mut() {
+                out.resize(out.len() + 2 * frames as usize, 0);
+            }
+            self.audio_irq(intc);
+            return;
+        }
+        self.audio.starved = false;
+        for _ in 0..frames {
+            if !self.audio.running {
+                if let Some(out) = out.as_deref_mut() {
+                    out.extend_from_slice(&[0, 0]);
+                }
+                continue;
+            }
+            let set = AUDIO_DMA + if self.audio.second { 0x0c } else { 0 };
+            let from = self.raw_read(set, 4);
+            let at = (from & 0x1fff_ffff).wrapping_sub(base) as usize;
+            let word = ram.get(at..at + 4).map(|b| [b[0], b[1], b[2], b[3]]).unwrap_or([0; 4]);
+            if let Some(out) = out.as_deref_mut() {
+                out.push(i16::from_be_bytes([word[0], word[1]]));
+                out.push(i16::from_be_bytes([word[2], word[3]]));
+            }
+            self.audio.frames += 1;
+            self.raw_write(set, 4, from.wrapping_add(4));
+            let left = self.raw_read(set + 8, 4).saturating_sub(1);
+            self.raw_write(set + 8, 4, left);
+            if left == 0 {
+                let done = self.raw_read(DMA_COMMON + 0x10, 4) | AUDIO_DMA_BIT;
+                self.raw_write(DMA_COMMON + 0x10, 4, done);
+                let control = self.raw_read(AUDIO_DMA + 0x2c, 4);
+                if self.audio.trace {
+                    println!("[sound] set {} done after {} samples, control {:x}", self.audio.second as u8 + 1, self.audio.frames, control);
+                }
+                if control & 2 != 0 {
+                    self.audio.second = !self.audio.second;
+                    self.raw_write(AUDIO_DMA + 0x2c, 4, control & !2);
+                } else {
+                    self.audio.running = false;
+                }
+            }
+        }
+        self.audio_irq(intc);
+    }
+
+    /// Move what the SD host interface has ready to memory, if the DMA
+    /// channel is running and set up for it.  Memory is written past
+    /// the CPU's caches, as DMA does.
+    pub fn dma_run<B: super::Bus>(&mut self, bus: &mut B, intc: &mut Intc) {
+        if self.raw_read(DMA + 0x34, 4) & 1 == 0 || self.raw_read(DMA, 4) != SDHI + 0x30 {
+            return;
+        }
+        let (mut to, mut count) = (self.raw_read(DMA + 4, 4), self.raw_read(DMA + 8, 4));
+        while count != 0 && self.sdhi.data_ready() {
+            let word = self.sdhi.read(0x30);
+            bus.write16(to & 0x1fff_ffff, word);
+            to = to.wrapping_add(2);
+            count -= 1;
+        }
+        self.raw_write(DMA + 4, 4, to);
+        self.raw_write(DMA + 8, 4, count);
+        if count == 0 {
+            self.raw_write(DMA + 0x34, 4, 0);
+            let done = self.raw_read(DMA_COMMON + 0x10, 4) | DMA_BIT;
+            self.raw_write(DMA_COMMON + 0x10, 4, done);
+        }
+        intc.set_int2(super::onchip::INT2_SDHI, self.sdhi.irq());
     }
 
     /// Recompute the request lines of the devices the host can poke

@@ -101,7 +101,7 @@ pub struct Int2Source {
 
 /// The sources identified so far, from the firmware's own set-up code.
 /// The index is the bit number in [`Int2::pending`].
-pub const INT2_SOURCES: [Int2Source; 12] = [
+pub const INT2_SOURCES: [Int2Source; 14] = [
     Int2Source { name: "TMU0", code: 0x400, pri: (0, 16), mask_bit: 1 },
     Int2Source { name: "TMU2", code: 0x440, pri: (0, 8), mask_bit: 1 },
     Int2Source { name: "TMU2 capture", code: 0x460, pri: (0, 0), mask_bit: 1 },
@@ -120,8 +120,15 @@ pub const INT2_SOURCES: [Int2Source; 12] = [
     Int2Source { name: "graphics engine", code: 0x780, pri: (3, 0), mask_bit: 19 },
     Int2Source { name: "CAN timer", code: 0x480, pri: (1, 24), mask_bit: 2 },
     Int2Source { name: "SD host", code: 0xea0, pri: (11, 24), mask_bit: 32 + 21 },
+    // The DMA channel that feeds the serial sound interface: a block
+    // of samples has gone out.
+    Int2Source { name: "audio DMA", code: 0x980, pri: (6, 24), mask_bit: 27 },
+    // The serial sound interface itself: it ran out of samples.
+    Int2Source { name: "sound interface", code: 0xca0, pri: (9, 24), mask_bit: 32 + 5 },
 ];
 pub const INT2_SDHI: usize = 11;
+pub const INT2_AUDIO_DMA: usize = 12;
+pub const INT2_SSI: usize = 13;
 pub const INT2_GE: usize = 9;
 pub const INT2_CAN_TIMER: usize = 10;
 pub const INT2_RADIO: usize = 7;
@@ -351,6 +358,8 @@ pub struct OnChip {
     pub tocr: u8,
     /// CPU cycles per peripheral clock (P-phi) cycle.
     pub pclk_div: u64,
+    /// The peripheral clock, in Hz.
+    pub pclk_hz: u64,
 
     pub dma: [DmaCh; 8],
     pub dmaor: u32,
@@ -428,6 +437,7 @@ impl OnChip {
             tmu,
             tocr: 0,
             pclk_div: 4,
+            pclk_hz: 58_800_000,
             dma: [DmaCh::default(); 8],
             dmaor: 0,
             scif_scr: 0,
@@ -544,10 +554,8 @@ impl OnChip {
     }
 
     fn rtc_period(&self) -> u64 {
-        // One emulated second.  The firmware's timer settings imply a
-        // peripheral clock of 29.4 MHz (TMU0 reload 14699 at Pclk/4 for
-        // its 2 ms tick).
-        self.pclk_div * 29_400_000
+        // One emulated second.
+        self.pclk_div * self.pclk_hz
     }
 
     /// Called by the CPU when `cycles >= next_event`.
@@ -974,7 +982,12 @@ impl OnChip {
                 return;
             }
             if super::navi::Navi::owns(addr) {
-                return n.write(addr, size, v, now, pc, &mut self.intc);
+                n.write(addr, size, v, now, pc, &mut self.intc);
+                // The SD host interface's data goes out by DMA.
+                if matches!(addr, 0xff80_1200..=0xff80_14ff | 0xff90_a000..=0xff90_a0ff) {
+                    n.dma_run(bus, &mut self.intc);
+                }
+                return;
             }
         }
         self.log.log("onchip", true, addr, size, v, pc);
