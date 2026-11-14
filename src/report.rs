@@ -6,11 +6,16 @@
 //!
 //! | id  | data |
 //! |-----|------|
-//! | 7F1 | `'R'`, unit (0x92 or 0x93), version 1, number of registers, length of the ROM (3 bytes), pass |
+//! | 7F1 | `'R'`, unit (0x92 or 0x93), version, number of registers, length of the ROM (3 bytes), pass |
 //! | 7F2 | index, size, address (4 bytes) |
 //! | 7F3 | index, size, value (4 bytes) |
 //! | 7F4 | 0, 0, 0, 0, CRC-32 of the ROM (4 bytes) |
 //! | 7F0 | offset (3 bytes), 5 bytes of the ROM |
+//!
+//! After the registers come values under made-up addresses: 1 to 7 the
+//! state the program was started in, and from version 2 on, on the 192,
+//! 0x10-0x16 and 0x20-0x26 what its two card processors answered
+//! (`sdk/examples/report/dsp.h`).
 //!
 //! The round is sent again and again, so a log may start anywhere and
 //! may have lost frames; what one round lacks another supplies.
@@ -102,6 +107,8 @@ pub struct Register {
 pub struct Report {
     /// 0x92 or 0x93; 0 when no header frame was in the log.
     pub unit: u8,
+    /// The program's version: 2 has the card processors of the 192.
+    pub version: u8,
     /// How many registers the program says it read (not counting the
     /// seven values of the start state that follow them).
     pub count: usize,
@@ -124,6 +131,7 @@ impl Report {
             match (f.id, f.len) {
                 (0x7f1, 8) if d[0] == b'R' => {
                     r.unit = d[1];
+                    r.version = d[2];
                     r.count = d[3] as usize;
                     r.rom_len = (d[4] as usize) << 16 | (d[5] as usize) << 8 | d[6] as usize;
                 }
@@ -164,10 +172,15 @@ impl Report {
         if missing.is_empty() && self.rom_len != 0 { Ok(out) } else { Err(missing) }
     }
 
+    /// How many values follow the registers.
+    pub fn extras(&self) -> usize {
+        if self.version >= 2 && self.unit == 0x92 { 21 } else { 7 }
+    }
+
     /// Everything arrived and the ROM has the check sum the unit
     /// computed.
     pub fn complete(&self) -> bool {
-        let registers = (0..self.count + 7).all(|i| self.registers.get(&(i as u8)).is_some_and(|r| r.addr.is_some() && r.value.is_some()));
+        let registers = (0..self.count + self.extras()).all(|i| self.registers.get(&(i as u8)).is_some_and(|r| r.addr.is_some() && r.value.is_some()));
         registers && self.unit != 0 && self.rom_bytes().is_ok_and(|rom| Some(crc32(&rom)) == self.crc)
     }
 
@@ -182,7 +195,7 @@ impl Report {
         let mut s = String::new();
         let unit = match self.unit { 0x92 => "192", 0x93 => "193", _ => "unknown unit" };
         let _ = writeln!(s, "report from a {}: {} frames, {} of {} registers", unit, self.frames,
-            self.registers.values().filter(|r| r.value.is_some()).count(), self.count + 7);
+            self.registers.values().filter(|r| r.value.is_some()).count(), self.count + self.extras());
         for (i, r) in &self.registers {
             let (Some(addr), Some(value)) = (r.addr, r.value) else {
                 let _ = writeln!(s, "  #{:<3} incomplete", i);
@@ -203,6 +216,42 @@ impl Report {
                     if frqcr & 0x400 != 0 { "" } else { " (its first multiplier is off)" });
                 let _ = writeln!(s, "  with 235.2 MHz from the 19.6 MHz crystal that is {:.1} MHz for the peripherals, a tick of {:.2} ms from the timer value 14699",
                     235.2 / per as f64, 14700.0 * 4.0 * per as f64 / 235_200.0);
+            }
+        }
+        // What the 192's card processors answered.
+        for (n, base) in [(0, 0x10u32), (1, 0x20)] {
+            let Some(result) = self.value(base) else { continue };
+            let _ = writeln!(s, "card processor {}:", n);
+            if result != 1 {
+                let _ = writeln!(s, "  did not get through: stopped at step {:#x} ({})", result, match result {
+                    0xe1 => "its boot ROM took no word: is the processor there, and its reset released?",
+                    0xe2 => "its boot ROM stopped taking the program",
+                    0xe3 => "the program sent nothing: it did not start, or not as written",
+                    0xe4 | 0xe6 => "the program did not take the count, or its loop did not end in 20 s",
+                    0xe5 => "the program did not report the clock switched",
+                    _ => "?",
+                });
+            }
+            if let (Some(pins), true) = (self.value(base + 1), result == 1 || result > 0xe3) {
+                let m = match pins >> 4 & 15 { 0 => 16, m => m };
+                let _ = writeln!(s, "  port pins after reset {:02x}: clock multiplier {} (pins 7-4), boot mode pins {}{} ({}), pin 3 {}, pin 2 {}",
+                    pins & 0xff, m, pins >> 1 & 1, pins & 1,
+                    match pins & 3 { 3 => "host word boot", 1 => "host byte boot", 0 => "no boot", _ => "not allowed" },
+                    pins >> 3 & 1, pins >> 2 & 1);
+                let _ = writeln!(s, "  with the board's 22.5792 MHz crystal that is {:.4} MHz", 22.5792 * m as f64);
+                let (clock, host) = (self.value(base + 2).unwrap_or(0), self.value(base + 3).unwrap_or(0));
+                let _ = writeln!(s, "  clock control {:04x}, host status {:04x}", clock, host);
+            }
+            if let (1, Some(t1), Some(t2), Some(loops)) = (result, self.value(base + 4), self.value(base + 5), self.value(base + 6)) {
+                let clocks = loops as f64 * 32768.0;
+                // Timer 0 counts a quarter of the main processor's
+                // peripheral clock.
+                let per = t1 as f64 * 4.0 / (clocks / 22.5792);
+                let _ = writeln!(s, "  {} clocks of the crystal took {} counts of the main processor's timer 0: its peripheral clock is {:.3} MHz{}",
+                    clocks, t1, per, if (per - 58.8).abs() < 0.3 { ", the 58.8 MHz the emulator has" } else { ", NOT the 58.8 MHz the emulator has" });
+                if t2 != 0 {
+                    let _ = writeln!(s, "  the same on the multiplied clock took {} counts: {:.3} times as fast", t2, t1 as f64 / t2 as f64);
+                }
             }
         }
         match self.rom_bytes() {
@@ -240,6 +289,13 @@ pub fn name(unit: u8, addr: u32) -> &'static str {
         5 => return "R4 (the language)",
         6 => return "R5",
         7 => return "R6",
+        0x10 | 0x20 => return "card processor: how far the questions got (1 = all the way)",
+        0x11 | 0x21 => return "card processor: port pins after reset",
+        0x12 | 0x22 => return "card processor: clock control after reset",
+        0x13 | 0x23 => return "card processor: host status",
+        0x14 | 0x24 => return "card processor: timer counts for the loops, clock input",
+        0x15 | 0x25 => return "card processor: timer counts for the loops, multiplied clock",
+        0x16 | 0x26 => return "card processor: loops of 32768 clocks",
         0xff00_0030 => return "PVR, processor version",
         0xff00_0040 => return "CVR, cache version",
         0xff00_0044 => return "PRR, product revision",

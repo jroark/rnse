@@ -129,6 +129,11 @@ pub struct Board {
     pub can: Hcan,
     /// The 192's two SD/MP3 coprocessor host interfaces.
     pub media: Media,
+    /// The CPU's cycle count as far as the board can tell: set by the
+    /// machine before it lets the CPU run, and counted on with every
+    /// instruction.  Devices that keep time of their own between two
+    /// accesses go by it.
+    pub now: u64,
     /// The companion chip's serial channels, indexed by the channel
     /// digit of the address (0x07aN_0000).  Channel 5 carries the
     /// loader's debug text, channel 1 the link to the radio processor.
@@ -190,6 +195,7 @@ impl Board {
             atapi: Atapi::new(),
             can: Hcan::new(),
             media: Media::new(),
+            now: 0,
             uart: Default::default(),
             gpio_in: [0, 0, 0x10, 0x04, 0, 0, 0, 0],
             gpio_out: [0; 8],
@@ -416,14 +422,14 @@ impl Board {
             return self.coral.read(addr - CORAL_BASE, size, self.pc);
         }
         if size == 2 && matches!(addr, 0x1500_0002 | 0x1500_004a) {
-            let v = self.media.read(usize::from(addr == 0x1500_004a)) as u32;
+            let v = self.media.read(usize::from(addr == 0x1500_004a), self.now) as u32;
             self.media_edges();
             self.log.log("media", false, addr, size, v, self.pc);
             return v;
         }
         if addr == 0x1240_0001 && size == 1 {
             let v = self.unmapped.get(&(addr >> 12)).map_or(0, |p| p[1]);
-            let v = u32::from((v & !0x0f) | self.media.status());
+            let v = u32::from((v & !0x0f) | self.media.status(self.now));
             self.media_edges();
             self.log.log("media", false, addr, size, v, self.pc);
             return v;
@@ -510,7 +516,7 @@ impl Board {
             return;
         }
         if size == 2 && matches!(addr, 0x1500_0002 | 0x1500_004a) {
-            self.media.write(usize::from(addr == 0x1500_004a), v as u16);
+            self.media.write(usize::from(addr == 0x1500_004a), v as u16, self.now);
             self.media_edges();
             self.log.log("media", true, addr, size, v, self.pc);
             return;
@@ -742,6 +748,7 @@ impl Bus for Board {
     #[inline(always)]
     fn set_pc(&mut self, pc: u32, pr: u32) {
         self.pc = pc;
+        self.now += 1;
         if self.log_pr {
             self.log.pr = pr;
             self.coral.log.pr = pr;

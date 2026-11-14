@@ -93,8 +93,6 @@ pub struct Machine {
     media_last: [[i16; 2]; 2],
     /// When the sound output is next served, in CPU cycles.
     next_sound: u64,
-    /// Up to when the 192's card processors have had their time.
-    media_time: u64,
     /// The external watchdog as last looked at.
     pub watchdog: Watchdog,
     /// The watchdog bites from the start, not only once the software
@@ -207,7 +205,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, media_time: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -464,6 +462,7 @@ impl Machine {
     /// ratios.
     pub fn set_cpu_ratio(&mut self, ratio: u64) {
         self.cpu.io.pclk_div = ratio.max(1);
+        self.board.media.per_second = self.cycles_per_ms() * 1000;
         self.frame_cycles = self.cycles_per_ms() * 1000 / 60;
         self.next_frame = self.cpu.cycles + self.frame_cycles;
     }
@@ -1207,6 +1206,7 @@ impl Machine {
         self.board.refresh_logging();
         loop {
             let slice = left.min(20_000);
+            self.board.now = self.cpu.cycles;
             let stop = self.cpu.run(&mut self.board, slice);
             self.drain_console();
             if self.board.atapi.dma_request() {
@@ -1237,10 +1237,8 @@ impl Machine {
                 }
             }
             if self.board.model == crate::board::Model::Rnse192 {
-                // The card processors' share of the time.
-                let now = self.cpu.cycles;
-                self.board.media.advance(now - self.media_time, self.cycles_per_ms() * 1000);
-                self.media_time = now;
+                // The card processors, up to now.
+                self.board.media.sync(self.cpu.cycles);
                 self.board.media_edges();
             }
             if !self.can_peers.is_empty() {

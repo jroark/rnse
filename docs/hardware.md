@@ -480,10 +480,15 @@ pins and interrupt pins:
 | INT4 | the program takes it for "the card has gone" |
 | MCLK | the audio master clock: the crystal, by the division the program selects (512 per sample) |
 
-The processor's clock is the crystal's times a factor set by pins.  The
-emulator takes three (67.7 MHz, under the part's 75 MHz): the program
-sets its timer to 53 counts of the clock divided by 128 and counts its
-own timeouts in those ticks, which at that factor are 100 µs.
+The processor runs on the crystal's clock after a reset and, once its
+program switches over (the stock program does, first thing, after
+giving the multiplier 20,000 clocks to settle), on that clock times a
+factor that pins 7 to 4 of its port set at reset.  The emulator takes
+three (67.7 MHz, under the part's 75 MHz): the program sets its timer
+to 53 counts of the clock divided by 128 and counts its own timeouts
+in those ticks, which at that factor are 100 µs.  The pins can be read
+and the clock measured on a real unit: `sdk/examples/report` does both
+(`docs/custom-firmware.md`, "The card processors of the 192").
 
 ### Start-up
 
@@ -553,10 +558,16 @@ What is not modelled, or assumed:
 
 * The processor's time: one instruction per clock (two or three for a
   jump), which is what the manual gives, at the assumed 67.7 MHz.  The
-  main processor's driver polls the processors' pins between words;
-  the emulator lets a processor run on whenever its port is touched
-  (up to 400 clocks), so that it is not slower at this than the real
-  one, and takes that time off its next share.
+  processors keep the main processor's time exactly: whenever a port
+  or the pins are touched they are first brought up to that instruction
+  of the main processor.  (The driver polls the pins between words, and
+  the North American software does not forgive a processor that reacts
+  a time slice late.)  Only a DMA transfer, which the emulator does in
+  a burst, lets a processor run ahead for the words of the burst, by
+  no more than 4096 clocks, which are taken off its time afterwards.
+  In HALT the real part runs on a divided clock; whether that slows
+  its timer is not clear from the manual, and the emulator does not
+  slow it.
 * Writing to a card (the image is never changed: a write command gets
   the card's "write protect violation"), the copy protection ROM, the
   serial input, the processor's stop mode beyond stopping (what wakes

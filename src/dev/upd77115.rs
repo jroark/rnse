@@ -57,17 +57,27 @@ use std::fmt::Write as _;
 
 use super::sdcard::{Response, SdCard};
 
-/// System clocks per second: three times the 22.5792 MHz of the crystal
-/// on the 192's card board.  The multiplier is set by pins and not
-/// known from the board; three is what makes the timer the 192's
-/// program sets up (53 counts of the clock divided by 128) tick every
-/// 100 microseconds.
-pub const CLOCK_HZ: u64 = 67_737_600;
+/// The crystal on the 192's card board: the processor's clock input,
+/// and (as the emulator takes it) the audio master clock, 512 periods
+/// of which are a sample at 44.1 kHz.
+pub const CRYSTAL_HZ: u64 = 22_579_200;
 
-/// System clocks per period of the audio master clock, which is taken
-/// to be the crystal itself (512 of its periods are one sample at
-/// 44.1 kHz).
-const MCLK_DIV: u64 = 3;
+/// The levels on the port pins when nothing drives them, as the
+/// emulator takes them to be on the 192's card board.  Pins 7-4 are
+/// read at reset as the clock multiplier, pins 1 and 0 as the boot
+/// mode; neither can be seen on the photographs of the board.
+///
+/// * Multiplier 3 (pins 5 and 4 high), for 67.7 MHz under the part's
+///   75 MHz: the 192's program sets the timer to 53 counts of the clock
+///   divided by 128 and counts its timeouts in those ticks, which are
+///   100 microseconds at that factor.
+/// * Pins 1 and 0 high, "host word boot", which is what the 192's
+///   software sends.
+/// * Pin 3 high: see `docs/hardware.md`; pin 2 pulled up, being an
+///   active-low request once the program makes it an output.
+///
+/// `sdk/examples/report` reads the pins on a real unit.
+pub const PINS_192: u8 = 0x3f;
 
 /// Divisors of the SD card clock, by the DIV field of SDCTL.
 const SD_DIV: [u64; 16] = [1, 2, 3, 4, 5, 7, 8, 9, 10, 12, 16, 32, 64, 128, 256, 512];
@@ -198,6 +208,8 @@ pub struct Dsp {
     /// does not have.
     pub fault: Option<String>,
     rom: Rom,
+    /// Repetitions still to come of the instruction after a REP.
+    repeat: u32,
     /// Set by a memory access that has to wait for the host.
     wait: bool,
     /// The instruction at PC is waiting for the host.
@@ -276,6 +288,7 @@ impl Dsp {
             halted: false,
             fault: None,
             rom: Rom::Dummy,
+            repeat: 0,
             wait: false,
             waiting: false,
             stopped: false,
@@ -284,7 +297,7 @@ impl Dsp {
             hst: 0,
             port_out: 0,
             port_dir: 0,
-            pins: 0xff,
+            pins: PINS_192,
             host_irq: false,
             tir: 0xffff,
             tcsr: 0,
@@ -325,6 +338,7 @@ impl Dsp {
         self.pending = 0;
         self.halted = false;
         self.fault = None;
+        self.repeat = 0;
         self.wait = false;
         self.waiting = false;
         self.rom = Rom::Dummy;
@@ -356,9 +370,30 @@ impl Dsp {
         }
     }
 
+    /// The clock multiplier the pins select: pins 7-4, where 0 stands
+    /// for 16.
+    pub fn multiplier(&self) -> u64 {
+        match u64::from(self.pins >> 4) {
+            0 => 16,
+            n => n,
+        }
+    }
+
+    /// System clocks per period of the clock input: one until the
+    /// program switches over to the multiplied clock (CLKCNTL bit 7),
+    /// which it may once the multiplier has had time to settle.
+    fn clock_ratio(&self) -> u64 {
+        if self.io[0x2e] & 0x80 != 0 { self.multiplier() } else { 1 }
+    }
+
+    /// System clocks per second at the moment.
+    pub fn clock_hz(&self) -> u64 {
+        CRYSTAL_HZ * self.clock_ratio()
+    }
+
     /// Samples per second of the audio output as it is set up.
     pub fn sample_rate(&self) -> u64 {
-        CLOCK_HZ / self.frame_period()
+        CRYSTAL_HZ * self.clock_ratio() / self.frame_period()
     }
 
     // ---- host side -------------------------------------------------
@@ -506,7 +541,8 @@ impl Dsp {
     }
 
     fn can_interrupt(&self) -> bool {
-        self.regs.eir & 0x8000 == 0 && self.pending & !self.regs.sr & 0xfff != 0
+        // (None is taken between a REP and the end of its repetitions.)
+        self.regs.eir & 0x8000 == 0 && self.pending & !self.regs.sr & 0xfff != 0 && self.repeat == 0
     }
 
     /// Let `cycles` system clocks pass: instructions, and what the
@@ -608,7 +644,7 @@ impl Dsp {
 
     /// System clocks per sample.
     fn frame_period(&self) -> u64 {
-        MCLK_DIV * match (self.asst >> 10) & 7 {
+        self.clock_ratio() * match (self.asst >> 10) & 7 {
             0 | 1 => 256,
             2 | 3 => 384,
             _ => 512,
@@ -768,8 +804,8 @@ impl Dsp {
         self.regs.sp = self.regs.sp.wrapping_sub(1);
     }
 
-    /// One instruction (with the instruction a REP repeats, all of its
-    /// repetitions), or the taking of an interrupt.
+    /// One instruction (of a repeated one, one repetition), or the
+    /// taking of an interrupt.
     pub fn step(&mut self) {
         if self.can_interrupt() {
             let n = (self.pending & !self.regs.sr & 0xfff).trailing_zeros();
@@ -814,22 +850,26 @@ impl Dsp {
         self.wait = false;
         self.cycles += 1;
         if w >> 26 == 0b000111 || w >> 26 == 0b000110 {
-            // REP: the next instruction, that many times.
+            // REP: the next instruction, that many times; they follow
+            // one to a step.
             let count = if w >> 26 == 0b000111 { w & 0x7fff } else { self.regs.r[(w & 7) as usize] as u32 & 0xffff };
-            let target = self.imem[self.regs.pc as usize];
-            self.regs.pc = self.regs.pc.wrapping_add(1);
-            let next = self.regs.pc;
-            for _ in 0..count.max(1) {
-                self.exec(target);
-                self.regs.pc = next;
-                self.cycles += 1;
-                if self.wait || self.fault.is_some() {
-                    break;
-                }
-            }
-        } else {
-            self.exec(w);
+            self.repeat = count.max(1);
+            return;
         }
+        if self.repeat != 0 {
+            // A repetition: the program counter stays on the repeated
+            // instruction until the last.
+            self.exec(w);
+            if self.wait {
+                self.regs = saved;
+                self.waiting = true;
+                return;
+            }
+            self.repeat -= 1;
+            self.regs.pc = if self.repeat != 0 { pc } else { pc.wrapping_add(1) };
+            return;
+        }
+        self.exec(w);
         if self.wait {
             // Not now: the host has to read or write first.
             self.regs = saved;
@@ -1826,6 +1866,8 @@ mod tests {
         d.run(10);
         // As the 192's software sets it: output, master, 16 bits a
         // channel, 512 master clocks a sample.
+        d.io_write(0x2e, 0x180); // the multiplied clock
+        assert_eq!(d.clock_hz(), 67_737_600);
         d.io_write(1, 0x0ac0);
         d.io_write(2, 0xd762);
         assert_eq!(d.sample_rate(), 44_100);

@@ -723,6 +723,24 @@ fn report_program_sends_the_boot_rom() {
             // report makes of it.
             assert_eq!(report.value(0xffc0_0000), Some(0x0e0a), "{}", name);
             assert!(report.describe().contains("peripherals 1/4"), "{}: {}", name, report.describe());
+            // The two card processors have run the little program the
+            // report loads into them: their pins as the emulator
+            // straps them, and the two loops timed, which come out as
+            // the emulator's clocks.
+            for base in [0x10, 0x20] {
+                assert_eq!(report.value(base), Some(1), "{}: {}", name, report.describe());
+                assert_eq!(report.value(base + 1), Some(0x3f), "{}: {}", name, report.describe());
+                assert_eq!(report.value(base + 2), Some(0), "{}", name);
+                let (t1, t2) = (report.value(base + 4).unwrap() as f64, report.value(base + 5).unwrap() as f64);
+                // 1024 x 32768 clocks of 22.5792 MHz, in counts of 14.7 MHz.
+                let want = 1024.0 * 32768.0 / 22_579_200.0 * 14_700_000.0;
+                assert!((t1 / want - 1.0).abs() < 0.001, "{}: {} counts, {} expected", name, t1, want);
+                assert!((t1 / t2 - 3.0).abs() < 0.01, "{}: {} and {} counts", name, t1, t2);
+            }
+            assert!(report.describe().contains("the 58.8 MHz the emulator has"), "{}: {}", name, report.describe());
+            assert!(text.contains("0000003f"), "{}: console: {:?}", name, text);
+        } else {
+            assert!(report.value(0x10).is_none(), "{}", name);
         }
         assert_eq!(rom[..], m.board.flash[..rom.len()], "{}: the ROM that arrived", name);
         // Not much slower than the bus allows: at least 500 frames a
