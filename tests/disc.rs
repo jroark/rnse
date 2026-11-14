@@ -649,6 +649,51 @@ fn custom_program_reads_the_disc() {
     }
 }
 
+/// The drive log (sdk/examples/drive): the program has the drive push
+/// the disc out when the eject key is pressed, the disc goes back in,
+/// and the log has what the drive's model says on the way, with the
+/// times; then SETUP hands over to the stock loader.  On a real unit
+/// the same log tells what the model has to assume.
+#[test]
+fn drive_program_logs_the_drive() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some((mut m, name, custom)) = sdk_example(&image, model, "drive") else { continue };
+        let ms = m.cycles_per_ms();
+        m.atapi().load(custom);
+        assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let press = |m: &mut Machine, key: &str| {
+            assert!(m.panel_key(key, true));
+            m.run(300 * ms);
+            assert!(m.panel_key(key, false));
+        };
+        press(&mut m, "CD_EJECT");
+        assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let ejects = m.atapi().ejects;
+        assert_eq!(ejects, 1, "{}: {:?}", name, String::from_utf8_lossy(&m.console));
+        // Back in: becoming ready for the model's six seconds, the
+        // notice that the medium may have changed, ready.
+        assert!(m.atapi().reinsert());
+        assert_eq!(m.run(8_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        let lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| l.len() > 8 && l.as_bytes()[7] == b' ' && l[..7].bytes().all(|b| b.is_ascii_digit())).collect();
+        let states: Vec<&str> = lines.iter().map(|l| &l[8..]).collect();
+        assert_eq!(states, ["READY", "2/3A/00", "2/04/01", "6/28/00", "READY"], "{}: {:?}", name, text);
+        let time = |i: usize| lines[i][..7].parse::<u64>().unwrap();
+        assert!((5_900..=6_200).contains(&(time(3) - time(2))), "{}: becoming ready from {} to {}", name, time(2), time(3));
+        assert!(!text.contains("unexpected"), "{}: {:?}", name, text);
+        // The line went out on the bus as well.
+        let frames: Vec<_> = m.can().tx.iter().filter(|f| f.id == 0x7f5).cloned().collect();
+        assert_eq!(frames.len(), 5, "{}", name);
+        assert_eq!(&frames[2].data[4..8], &[2, 4, 1, 0], "{}", name);
+        press(&mut m, "SETUP");
+        m.run(1_000 * ms);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        assert!(text.contains("starting the stock loader"), "{}: {:?}", name, text);
+    }
+}
+
 /// The SDK's CAN code against the controller's model: frames from the
 /// bus reach the program, its own frame goes out with the stock bit
 /// timing, and on a bus with nobody else it gives up as it should.

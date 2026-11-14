@@ -76,14 +76,15 @@ processors").  `--wav` records what comes out:
         --knob 1:1@20000 --key SELECT@21500 --wav out.wav
 
 `sdk/` has the start of a kit for writing software of your own for the
-unit: start-up code, a hardware layer for each generation and six
+unit: start-up code, a hardware layer for each generation and seven
 examples: one draws, keeps time and talks on the debug serial port, one
 reads the faceplate's keys and knobs, one reads a file from the CD, one
-listens and talks on the CAN bus, and two are meant for a first try on
-a real unit: `probe`, which only shows that it runs and hands back to
-the stock software, and `report`, which reads out what the emulator
-has had to assume (the processor's registers, the boot ROM, and on the
-192 the card processors' straps and clock) and shows and sends it.
+listens and talks on the CAN bus, and three are meant for a real
+unit: `probe`, which only shows that it runs and hands back to the
+stock software, `report`, which reads out what the emulator has had to
+assume (the processor's registers, the boot ROM, and on the 192 the
+card processors' straps and clock) and shows and sends it, and `drive`,
+which logs what the CD drive answers while a disc goes out and in.
 `rnse custom` puts such a program in the update loader's place on a
 copy of a disc (it then runs from RAM and leaves the flash alone); the
 unit's own software, run in the emulator, takes such a disc for an

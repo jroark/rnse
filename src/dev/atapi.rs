@@ -266,6 +266,13 @@ pub struct Atapi {
     spin_up: u64,
     /// How long that takes ([`SPIN_UP_MICROS`] unless changed).
     pub spin_up_micros: u64,
+    /// The disc an eject command (START STOP UNIT) pushed out, as it
+    /// waits in the slot, and how many such commands there were.
+    ejected: (Option<Disc>, Option<AudioDisc>),
+    pub ejects: u32,
+    /// The drive says that the medium may have changed as soon as a disc
+    /// goes in, before it is ready, instead of when it is.
+    pub attention_first: bool,
     /// Reading takes time: [`SEEK_MICROS`] to get somewhere else on the
     /// disc and [`SECTOR_MICROS`] for every sector, during which the
     /// drive is busy.  Off, the data is there at once.
@@ -337,6 +344,9 @@ impl Atapi {
             unit_attention: false,
             spin_up: 0,
             spin_up_micros: SPIN_UP_MICROS,
+            ejected: (None, None),
+            ejects: 0,
+            attention_first: false,
             times: false,
             busy: 0,
             head: 0,
@@ -361,11 +371,23 @@ impl Atapi {
         self.insert_disc(image.map(Disc::from));
     }
 
+    /// Push the disc that an eject command left in the slot back in.
+    /// False when there is none.
+    pub fn reinsert(&mut self) -> bool {
+        match std::mem::take(&mut self.ejected) {
+            (Some(image), _) => self.insert_disc(Some(image)),
+            (_, Some(audio)) => self.insert_audio(audio, true),
+            _ => return false,
+        }
+        true
+    }
+
     /// Like [`insert`](Self::insert), for any kind of data disc.
     pub fn insert_disc(&mut self, image: Option<Disc>) {
         self.spin_up = if image.is_some() { self.spin_up_micros } else { 0 };
-        // Told when the disc is ready, not while it is being loaded.
-        self.unit_attention = self.spin_up == 0;
+        // Told when the disc is ready, not while it is being loaded;
+        // or, the other way a drive may have it, at once.
+        self.unit_attention = self.spin_up == 0 || self.attention_first;
         self.image = image;
         self.audio = None;
         self.audio_status = AudioStatus::None;
@@ -379,7 +401,7 @@ impl Atapi {
         self.audio_status = AudioStatus::None;
         self.audio_sample = 0;
         self.spin_up = if running { self.spin_up_micros } else { 0 };
-        self.unit_attention = running && self.spin_up == 0;
+        self.unit_attention = running && (self.spin_up == 0 || self.attention_first);
     }
 
     /// The data disc is a DVD: it holds more than fits on a CD.
@@ -479,7 +501,9 @@ impl Atapi {
             self.spin_up = self.spin_up.saturating_sub(micros);
             // Ready: the next command hears that the medium may have
             // changed, once.
-            self.unit_attention = self.spin_up == 0;
+            if !self.attention_first {
+                self.unit_attention = self.spin_up == 0;
+            }
         }
     }
 
@@ -779,6 +803,11 @@ impl Atapi {
         if op != 0x03 && op != 0x12 {
             let needs_medium = matches!(op, 0x00 | 0x25 | 0x28 | 0xa8 | 0x2b | 0x43 | 0x42 | 0x51 | 0xbe | 0xb9 | 0xad);
             let needs_medium = needs_medium || matches!(op, 0x45 | 0x47 | 0x48 | 0x4b | 0x4e | 0xa5 | 0xbc);
+            if self.attention_first && self.unit_attention && self.has_disc() {
+                self.unit_attention = false;
+                self.fail(6, 0x28, 0); // medium may have changed
+                return;
+            }
             if needs_medium && self.has_disc() && self.spin_up > 0 {
                 self.fail(2, 0x04, 0x01); // becoming ready
                 return;
@@ -828,6 +857,18 @@ impl Atapi {
                         self.audio_sample = be32(2) as u64 * SAMPLES_PER_FRAME;
                     }
                     self.audio_status = AudioStatus::None;
+                }
+                if op == 0x1b && p[4] & 3 == 2 {
+                    // Eject: the disc comes out and waits in the slot.
+                    if self.has_disc() {
+                        self.ejected = (self.image.take(), self.audio.take());
+                        self.spin_up = 0;
+                        self.unit_attention = false;
+                        self.ejects += 1;
+                    }
+                } else if op == 0x1b && p[4] & 3 == 3 {
+                    // Load: what waits in the slot is pulled back in.
+                    self.reinsert();
                 }
                 self.complete_ok();
             }

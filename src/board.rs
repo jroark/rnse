@@ -129,6 +129,8 @@ pub struct Board {
     pub can: Hcan,
     /// The 192's two SD/MP3 coprocessor host interfaces.
     pub media: Media,
+    /// Writes to the battery-backed memory at these offsets are printed.
+    pub nvram_watch: Option<(u32, u32)>,
     /// The CPU's cycle count as far as the board can tell: set by the
     /// machine before it lets the CPU run, and counted on with every
     /// instruction.  Devices that keep time of their own between two
@@ -195,6 +197,7 @@ impl Board {
             atapi: Atapi::new(),
             can: Hcan::new(),
             media: Media::new(),
+            nvram_watch: None,
             now: 0,
             uart: Default::default(),
             gpio_in: [0, 0, 0x10, 0x04, 0, 0, 0, 0],
@@ -533,6 +536,11 @@ impl Board {
             NVRAM_BASE => {
                 let o = (addr - NVRAM_BASE) as usize;
                 self.nvram_top = self.nvram_top.max(o);
+                if let Some((from, to)) = self.nvram_watch {
+                    if o as u32 + size > from && o as u32 <= to {
+                        eprintln!("[nvram] {:05x}.{} <= {:x}  pc={:08x} at cycle {}", o, size, v, self.pc, self.now);
+                    }
+                }
                 for i in 0..size as usize {
                     self.nvram[(o + i) & self.nvram_mask] = (v >> ((size as usize - 1 - i) * 8)) as u8;
                 }
