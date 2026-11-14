@@ -52,24 +52,28 @@ as far as the radio processor's side of it is understood, silent
 unless the CD is the selected source and at the volume the unit has
 set with its knob. The 192's installed software reads data discs (it takes an
 update disc with a higher software index for an update and runs the
-whole update itself). The 192's SD/MP3 processor stand-ins complete
-their boot handshake and startup commands; both card slots report
-empty. Card images and MP3 decoding are still missing on the 192, as
-are the power button, the 192's GPS receiver and the 3D half of its
-graphics chip.
+whole update itself). Still missing on the 192 are the power button,
+its GPS receiver and the 3D half of its graphics chip.
 
-The 193 plays MP3 files from an SD card, all of it done by its own
+Both units play MP3 files from an SD card, all of it done by their own
 software: `rnse card music.img folder/` makes a card image from a
 folder, `--sd-card music.img` puts it in a slot, and MEDIA, the top
-right key ("Quelle"/"Source") and the card's name start the first
-file.  The unit lists folders and files, shows the time, decodes the
-file and sends the samples out through its serial sound interface;
-`--wav` records them:
+right key ("Quelle"/"Source") and the card's entry start the first
+file.  The 193 lists folders and files, shows the time, decodes the
+file itself and sends the samples out through its serial sound
+interface.  The 192 has a signal processor of its own behind each card
+slot (NEC µPD77115A): the emulator has that processor too, and runs the
+program the unit's software downloads into it, which fetches the file
+from the card and decodes it (`docs/hardware.md`, "SD card
+processors").  `--wav` records what comes out:
 
     rnse card music.img ~/Music/some-album
     rnse boot disc.iso --variant V574 --ignition --no-disc --sd-card music.img \
         --cycles 16000000000 --key MEDIA@15000 --key SOFT_TR@17000 \
         --knob 1:1@19000 --key SELECT@20000 --wav out.wav
+    rnse boot disc.iso --variant V220 --ignition --no-disc --sd-card music.img \
+        --cycles 7000000000 --key MEDIA@15000 --key SOFT_TR@18000 \
+        --knob 1:1@20000 --key SELECT@21500 --wav out.wav
 
 `sdk/` has the start of a kit for writing software of your own for the
 unit: start-up code, a hardware layer for each generation and four
@@ -179,8 +183,8 @@ full list):
     --disc-in MS       empty drive at the start, the disc goes in at MS ms
     --spin-up MS       how long the drive takes over a disc that goes in
     --drive-times      seeks and reads take time (also with --strict)
-    --sd-card FILE     an SD card in the 193's slot (see `rnse card`)
-    --trace-sd         SD card commands (193)
+    --sd-card FILE     an SD card in a slot (see `rnse card`)
+    --trace-sd         SD card commands
     --trace-sound      the blocks of samples the 193's software sends out
     --cpu-ratio N      CPU clock as a multiple of the peripheral clock
     --trace-atapi      CD drive commands, with where the firmware was

@@ -51,8 +51,10 @@ impl Card {
     /// standard-capacity card (byte addresses, version 1).
     pub fn high_capacity(&self) -> bool { self.sectors > 0x3f_6000 }
 
+    pub fn sectors(&self) -> u64 { self.sectors }
+
     /// The card-specific data register (CSD) with the card's size in it.
-    fn csd(&self) -> [u8; 16] {
+    pub(crate) fn csd(&self) -> [u8; 16] {
         if self.high_capacity() {
             let size = (self.sectors / 1024 - 1) as u32;
             let mut csd = [0x40, 0x0e, 0, 0x32, 0x5b, 0x59, 0, 0, 0, 0, 0x7f, 0x80, 0x0a, 0x40, 0, 1];
@@ -72,7 +74,7 @@ impl Card {
             0xb4 | mult >> 1, (mult & 1) << 7 | 0x7f, 0x80, 0x0a, 0x40, 0, 1]
     }
 
-    fn read(&mut self, sector: u32, bytes: usize) -> io::Result<Vec<u8>> {
+    pub(crate) fn read(&mut self, sector: u32, bytes: usize) -> io::Result<Vec<u8>> {
         let offset = u64::from(sector) * 512;
         if offset + bytes as u64 > self.sectors * 512 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "read beyond SD image"));

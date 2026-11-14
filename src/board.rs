@@ -260,6 +260,16 @@ impl Board {
         }
     }
 
+    /// Interrupt requests of the card processors go into the latch at
+    /// 0x07b0_0016.
+    pub fn media_edges(&mut self) {
+        let edges = self.media.take_edges();
+        if edges != 0 {
+            self.set_ipr(0x16, self.ipr(0x16) | u32::from(edges));
+            self.update_irl();
+        }
+    }
+
     fn set_ipr(&mut self, reg: u32, v: u32) {
         let a = 0x07b0_0000 + reg;
         let p = self.unmapped.entry(a >> 12).or_insert_with(|| Box::new([0; 4096]));
@@ -407,12 +417,14 @@ impl Board {
         }
         if size == 2 && matches!(addr, 0x1500_0002 | 0x1500_004a) {
             let v = self.media.read(usize::from(addr == 0x1500_004a)) as u32;
+            self.media_edges();
             self.log.log("media", false, addr, size, v, self.pc);
             return v;
         }
         if addr == 0x1240_0001 && size == 1 {
             let v = self.unmapped.get(&(addr >> 12)).map_or(0, |p| p[1]);
             let v = u32::from((v & !0x0f) | self.media.status());
+            self.media_edges();
             self.log.log("media", false, addr, size, v, self.pc);
             return v;
         }
@@ -434,9 +446,20 @@ impl Board {
             return v;
         }
         match addr & 0xfff0_0000 {
-            0x1250_0000 | 0x1260_0000 | 0x1270_0000 if size == 1 => {
+            // (The registers after the first two of a port are its
+            // interrupt controls, which are only stored.)
+            0x1250_0000 | 0x1260_0000 | 0x1270_0000 if size == 1 && addr & 0xf_fffe == 0 => {
                 let i = ((addr >> 20) & 7) as usize - 3;
-                let v = if addr & 1 == 0 { self.gpio_dir[i] } else { (self.gpio_in[i] & !self.gpio_dir[i]) | (self.gpio_out[i] & self.gpio_dir[i]) } as u32;
+                // The switch of the first card slot is bit 6 of port 2.
+                let pins = self.gpio_in[i] | if i == 2 && self.media.present(0) { 0x40 } else { 0 };
+                let v = if addr & 1 == 0 { self.gpio_dir[i] } else { (pins & !self.gpio_dir[i]) | (self.gpio_out[i] & self.gpio_dir[i]) } as u32;
+                self.log.log("gpio", false, addr, size, v, self.pc);
+                return v;
+            }
+            0x1290_0000 if size == 1 && addr & 0xf_ffff == 1 => {
+                // Port 6: bit 0 is the switch of the second card slot.
+                let v = self.unmapped.get(&(addr >> 12)).map_or(0, |p| p[1]);
+                let v = u32::from(v & !1 | u8::from(self.media.present(1)));
                 self.log.log("gpio", false, addr, size, v, self.pc);
                 return v;
             }
@@ -488,8 +511,7 @@ impl Board {
         }
         if size == 2 && matches!(addr, 0x1500_0002 | 0x1500_004a) {
             self.media.write(usize::from(addr == 0x1500_004a), v as u16);
-            let edges = self.media.take_edges();
-            self.set_ipr(0x16, self.ipr(0x16) | u32::from(edges));
+            self.media_edges();
             self.log.log("media", true, addr, size, v, self.pc);
             return;
         }
@@ -522,7 +544,7 @@ impl Board {
         }
         self.log.log(Self::area_name(addr), true, addr, size, v, self.pc);
         match addr & 0xfff0_0000 {
-            0x1250_0000 | 0x1260_0000 | 0x1270_0000 if size == 1 => {
+            0x1250_0000 | 0x1260_0000 | 0x1270_0000 if size == 1 && addr & 0xf_fffe == 0 => {
                 let i = ((addr >> 20) & 7) as usize - 3;
                 if addr & 1 == 0 {
                     self.gpio_dir[i] = v as u8;

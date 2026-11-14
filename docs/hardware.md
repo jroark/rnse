@@ -56,8 +56,8 @@ command state each and small sectors at the bottom of both (the stock
 loader does erase 8 KiB sectors from 0x01000000, as from 0x0000c000);
 the battery-backed memory is 256 KiB (and the stock software uses it
 up to offset 0x3f630, no further); the CPU clock estimate has a
-crystal behind it.  What it opens: the card processors are a known
-part, see "SD card processors".
+crystal behind it.  And the card processors turned out to be a
+documented part, which is now emulated: see "SD card processors".
 
 ## CPU
 
@@ -111,7 +111,7 @@ Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2
 | 0x10000000-0x1003ffff | battery-backed SRAM for settings, 256 KiB | likely (OS reads and writes it heavily; loader reads a "slot number" with complement check at +0, +1) |
 | 0x12N00000, 0x12N00001 | byte-wide ports, N = 3..a: direction register (1 = output) and data | see "Ports" |
 | 0x12d00000-6          | output latches | bits unknown; 0x12d00001 is driven around CD DMA transfers |
-| 0x15000002, 0x1500004a | 16-bit host ports of the two SD card/MP3 processors | see "SD card processors" |
+| 0x15000002, 0x1500004a | 16-bit host ports of the two SD card/MP3 processors (NEC µPD77115A) | certain; see "SD card processors" |
 | 0x16000000-0x16000020 | 32-bit control registers | unknown |
 | 0x17c00000-0x17c00014 | GPS baseband, control registers | see "GPS" |
 | 0x17e00400, 0x17e00800 | GPS baseband, further register blocks | see "GPS" |
@@ -128,12 +128,20 @@ The OS addresses its byte-wide ports through a table of eight (index 0-7
 | port (data register) | bit | direction | meaning |
 |----------------------|-----|-----------|---------|
 | 0 (0x12300001) | 0 | out | watchdog strobe, toggled every 10 ms from the tick; the longest pause the OS leaves is about 220 ms, while it starts.  The emulator resets the unit when, after the first two edges, 1.5 s pass without one (the real period is not known) |
+| 2 (0x12500001) | 6 | in  | switch of the first SD card slot (the one of DSP 0): high with a card in it |
 | 2 (0x12500001) | 4 | in  | supply voltage good.  Low for about three seconds and the OS masks all interrupts and waits for the watchdog to reset it |
 | 3 (0x12600001) | 4 | out | display motor, towards closed |
 | 3              | 3 | out | display motor, towards open |
 | 3              | 2 | in  | display position switch: low only when fully open |
 | 3              | 1 | in  | polled every tick, unknown |
 | 4 (0x12700001) | 7 | in  | polled every tick, unknown |
+| 6 (0x12900001) | 0 | in  | switch of the second SD card slot (DSP 1) |
+
+A port has more registers than the two: the card driver writes +2 and
++4 of ports 2 and 6 (0x40 and 0x01 to +2: the bits of the two card
+switches, so these select the pins that interrupt).  The emulator
+stores them and does nothing with them; it used to take every even
+address of a port for its direction register.
 
 ## Interrupts
 
@@ -414,9 +422,8 @@ state is known to the OS, which is not the case in the emulator yet.
   ROM services for the DMA controller (see `boot-rom.md`).  The display-
   open key works (the display's position follows the motor outputs) and
   shows the drive and the two card slots.
-* The SD/MP3 processor stand-ins accept the firmware download and startup
-  commands. Both slots report empty; card images and MP3 audio are not
-  implemented (see "SD card processors").
+* The two SD/MP3 processors are emulated and run their downloaded
+  program: cards are read and MP3 files play (see "SD card processors").
 * The radio processor stand-in knows one command (see above); there is
   no tuner, no sound and no power button.
 * Navigation stays at "Navigation wird initialisiert": no GPS receiver
@@ -429,76 +436,140 @@ state is known to the OS, which is not the case in the emulator yet.
 ## SD card processors
 
 The two SD card slots and MP3 decoding belong to two processors of
-their own (the firmware calls them DSP 0 and DSP 1), each behind one
-16-bit host port: 0x15000002 and 0x1500004a. `src/dev/media.rs` answers
-their host protocol, without executing the downloaded DSP program.
+their own on the card board (the firmware calls them DSP 0 and DSP 1):
+two NEC µPD77115A, 16-bit fixed-point signal processors of NEC's
+µPD77016 family, with a 22.5792 MHz crystal (512 x 44.1 kHz).  The
+emulator has a model of the part (`src/dev/upd77115.rs`) and runs the
+program the main software downloads into it; `src/dev/media.rs` is the
+wiring.  Nothing of the protocol below is answered by the emulator
+itself any more: it is what the downloaded program does.
 
-The following was traced through the V2220371 driver and checked with
-V2220317 as well:
+Sources: NEC's "µPD77016 Family Instructions" manual (U13116E) for the
+instruction set, the "µPD77111 Family Architecture" manual (U14623E),
+chapters 5 to 7, for the µPD77115's memory map, peripherals and boot
+procedure, and the µPD77115 data sheet (U14867E).  Where they leave
+something open, the answer is from the 192's program and marked so in
+the model's comments: the instruction manual gives the fields of an
+instruction word but not all of their codes (the numbers of the
+monomial and immediate operations, of the register parts in load/store
+instructions, of the registers a transfer names).
 
-| Register | Meaning |
-|----------|---------|
-| 0x12400001 bit 2 / bit 0 | DSP0 / DSP1 receive FIFO empty (1 = empty) |
-| 0x12400001 bit 3 / bit 1 | DSP0 / DSP1 transmit busy (1 = busy) |
-| 0x16000004 bit 2 / bit 3 | DSP0 / DSP1 reset release; the driver pulses these low |
-| 0x07b00016 bit 2 / bit 3 | DSP0 / DSP1 receive edge latch; cleared by writing 0 |
-| 0x07b0001e bit 2 / bit 3 | Receive interrupt mask; the driver clears these to enable |
-| 0x07b00000 bits 11:8 / 15:12 | DSP0 / DSP1 interrupt priority |
+### Wiring
 
-At startup the OS downloads the same embedded program to each port.
-There are **four sections**, each starting with a block count. Each
-block sends a length, an address and its data, then reads one acknowledgement
-word. Lengths in the first two sections count pairs of 16-bit words;
-the final two sections count individual words. Empty sections are allowed.
-V2220371 sends 29,452 payload words in nine blocks. The acknowledgement
-contents are not checked by this uploader; the stand-in returns zero.
-The firmware's source file uses little-endian lengths and addresses,
-converted by the SH-4 driver before writing these 16-bit port words.
+| Where | What |
+|-------|------|
+| 0x15000002, 0x1500004a | host data register of DSP 0 / DSP 1, 16 bits |
+| 0x12400001 bit 2 / bit 0 | DSP 0 / DSP 1: nothing to read (the part's HRE pin) |
+| 0x12400001 bit 3 / bit 1 | DSP 0 / DSP 1: cannot take a word (its HWE pin) |
+| 0x16000004 bit 2 / bit 3 | reset of DSP 0 / DSP 1, active low; the driver pulses it |
+| 0x07b00016 bit 2 / bit 3 | interrupt request of DSP 0 / DSP 1, latched; cleared by writing 0 |
+| 0x07b0001e bit 2 / bit 3 | mask of that request |
+| 0x07b00000 bits 11:8 / 15:12 | its priority |
+| 0x12500001 bit 6 | switch of DSP 0's slot: 1 = a card is in |
+| 0x12900001 bit 0 | switch of DSP 1's slot |
+| SH-4 DMA channel 7 / 3 | words to and from DSP 0 / DSP 1, 16 bits each, on the pins above (request selectors at 0x12d00007 and 0x12d00003) |
 
-Runtime commands have a header whose low byte counts following words.
-The receive handler puts only the response header into a software FIFO;
-the task reads the response payload directly from the host port. The
-stand-in raises one receive edge for each response, not each payload word.
+On the processor's side, by what its program does with its eight port
+pins and interrupt pins:
 
-| Command and arguments | Stand-in reply | Purpose / confidence |
-|-----------------------|----------------|----------------------|
-| `1202 d762 0034` | `f000` | System initialization; the driver logs `DSPC_SYS_INIT Success` |
-| `7301 mode` | `f000` | Host transfer mode; startup selects 2 |
-| `3301 enable`, `3101 enable` | `f000` | Library/output startup controls; exact semantics inferred |
-| `3201 0000` | `d503 0000 0000 0000` | Library identity; synthetic version 0.0, build 0 |
-| `2203 0001 5000 selector` | `d301 0000` | Card status; both slots absent |
+| Pin | Use |
+|-----|-----|
+| P2 (output) | interrupt request to the main processor: pulled low while the first word of a message waits in the host data register, high again once it is read.  This is what 0x07b00016 latches |
+| P0, P1 (outputs) | set by a command of the main processor; what they drive is not known |
+| P3 (input) | read at card start-up and reported to the main processor on request; low lets the program accept commands that write.  The card's write-protect switch, by that.  The emulator holds it high: card images are not written |
+| INT4 | the program takes it for "the card has gone" |
+| MCLK | the audio master clock: the crystal, by the division the program selects (512 per sample) |
 
-Other commands are left unanswered. The first command is sent with
-polled I/O; later blocks use SH-4 DMA channel **7 for DSP0**, **3 for DSP1**,
-with 16-bit transfers. The device provides requests only for available
-FIFO words on reads, and accepts writes immediately. The companion DMA
-request selectors are at 0x12d00007 and 0x12d00003. This is a simplified
-data-ready model, not a complete emulation of the DDT request bus.
+The processor's clock is the crystal's times a factor set by pins.  The
+emulator takes three (67.7 MHz, under the part's 75 MHz): the program
+sets its timer to 53 counts of the clock divided by 128 and counts its
+own timeouts in those ticks, which at that factor are 100 µs.
 
-The OS also configures port interrupt controls at 0x12500000 and
-0x12900000. Card insertion and removal events on those ports are not
-implemented. The firmware regression test `media_dsps_boot` checks both
-downloads, the initialization replies, and the switch to DMA without
-`BOOT ERROR` or `ERR_cmd_dma` messages.
+### Start-up
 
-The processors are two NEC µPD77115A (the marking on the card board,
-see "The boards"): 16-bit fixed-point signal processors of NEC's
-µPD77016 family, which have instructions of 32 bits and two data
-memories of 16-bit words.  That is what the download looks like: two
-sections counted in pairs of 16-bit words (instructions) and two
-counted in single words (the two data memories), and at the start of
-the program a table of entries eight 16-bit words long, four
-instructions each, as that family's interrupt vectors are.  The clock
-is a 22.5792 MHz crystal on the card board, 512 times 44.1 kHz.
+The driver resets a processor and writes its program through the host
+port.  The first part is taken by the processor's boot ROM, as the
+manual describes ("host word boot"): a dummy word, the number of
+instructions (0x0e00: all of the RAM at 0x200-0xfff), a word for the
+host interface's mode register, then the instructions, low half first.
+That part of the program then takes the rest itself, in three sections
+that each start with a count of blocks, a block being a length, an
+address and its words: instructions for the RAM at 0x8000 (through the
+boot ROM's "reboot" service at address 6), then data for the X memory
+and for the Y memory.  After the boot ROM's part and after every block
+it sends a word (zero) that the driver reads.  V2220371 sends 29,363
+words in all to each processor.
 
-Emulating SD card access and MP3 playback the way the unit does it now
-has a way forward that does not involve guessing a protocol: run the
-downloaded program on a model of that processor, with its host port,
-its card interface and its audio output.  The family's instruction set
-and the part's peripherals are documented by NEC; neither has been
-worked through here, and until then the host command stand-in is all
-there is: both slots report empty, and nothing plays.  The 193 uses a
-different media interface; this device is only mapped on the 192.
+The program then calls address 8 of the boot ROM four times with an
+address around 0x7b00-0x7ea0 in R7 and an instruction in R6: the
+"instruction ROM correction" the manual describes for other members of
+the family.  So this part has a mask ROM of its own at 0x7000 on, which
+the manual does not mention (it calls 0x1000-0x7fff "system"), and the
+program patches four instructions of it.  It reaches that ROM through
+twelve entries at 0x7000-0x700b, and by what it hands them (blocks of
+64 bits, keys kept exclusive-ored with constants, a self-test against
+fixed results) the ROM holds the cipher and authentication of the SD
+card's copy protection, which the manual says is kept out of sight in
+parts made for licensees.  **The emulator does not model that ROM, and
+is not meant to**: every entry returns "failed".  Plain MP3 files do
+not go through it (the decoder calls it only for a frame flagged as
+encrypted).
+
+### Messages
+
+Everything after that is messages of 16-bit words, in both directions
+with a header whose low byte counts the words that follow.  From what
+has been seen so far:
+
+| From the main processor | Answer | Meaning |
+|-------------------------|--------|---------|
+| `1202 asst tir` | `f000` | start: `asst` (0xd762) goes into the audio serial interface's mode register (output on, master, 16 bits a channel, 512 master clocks a sample), `tir` (0x34) into the timer's period register.  The driver logs `DSPC_SYS_INIT Success` |
+| a card command: the interface's command register value, argument high, argument low | `d104` + 3 words of response + the control register, or `d209` + 8 words for a long response | **the main processor runs the card itself**: CMD0, ACMD41, CMD2, CMD3, CMD9, CMD10, CMD7, CMD16 arrive this way, the program only passes them to the card interface |
+| a read of sectors | data by DMA | the program has the card interface fill its data memory through the buffer transfer unit, a sector (CMD17) at a time, and hands the words on |
+| play: where the file's data is on the card, as a byte address and a length (8000 bytes at a time) | `c701 001f` when it wants the next piece | the program reads the sectors itself, finds the MP3 frames, decodes, and sends the samples out of the audio serial interface; `c500` ends it (also on an error of the decoder) |
+| others | `f000`, or `ee01 code` for an error | port pins, clock stop (the processor's STOP instruction), status |
+
+The file system is the main processor's business: it reads the
+partition table, the FAT and the directories through the sector
+command, lists the files in its own format, and tells the processor
+which bytes of the card to play.
+
+### In the emulator
+
+`rnse boot --sd-card FILE` puts an image (see `rnse card`) into the
+first slot, a second `--sd-card` into the other.  The unit sees the
+card by the slot's switch, starts it, reads it, offers "MP3" in the
+media sources, and plays: `tests/disc.rs`
+`mp3_from_a_card_plays_on_the_192` goes from the card image to a tone
+of the right pitch on the right channel, on both the European and the
+North American software.  `--trace-sd` shows the card commands and the
+processors' peripheral registers, `--trace-dsp` the words on the host
+ports, `--dsp-tp` and `--dsp-watch` look into a processor's program.
+
+What is not modelled, or assumed:
+
+* The processor's time: one instruction per clock (two or three for a
+  jump), which is what the manual gives, at the assumed 67.7 MHz.  The
+  main processor's driver polls the processors' pins between words;
+  the emulator lets a processor run on whenever its port is touched
+  (up to 400 clocks), so that it is not slower at this than the real
+  one, and takes that time off its next share.
+* Writing to a card (the image is never changed: a write command gets
+  the card's "write protect violation"), the copy protection ROM, the
+  serial input, the processor's stop mode beyond stopping (what wakes
+  it on the board is not known; the driver resets it).
+* The card is a standard-capacity one by its registers when the image
+  is no larger than about 2 GiB, a high-capacity one above (the rule
+  the 193's driver forces, see `sdhi.rs`).  The 192's software (V220
+  0650) does not take a high-capacity card: it never sends the command
+  that tells such a card the host knows its kind (CMD8, and the bit in
+  ACMD41), so the card stays "busy" for good, as a real one would.
+* The pins' assignment above is from the program's use of them, not
+  from the board: the photographs do not show the tracks.
+
+The 193 has none of this: its main processor has an SD host interface
+of its own and decodes MP3 in software (see
+[hardware-193.md](hardware-193.md)).
 
 ## GPS
 

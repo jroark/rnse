@@ -1,182 +1,158 @@
-//! Host interface to the 192's two SD/MP3 coprocessors: NEC uPD77115A
-//! signal processors on the card board (`docs/hardware.md`, "The
-//! boards" and "SD card processors").
+//! The 192's card board: two NEC uPD77115A signal processors, one per
+//! SD card slot, each behind a 16-bit host port of the main processor
+//! (`docs/hardware.md`, "The boards" and "SD card processors").
 //!
-//! This models the boot downloader and the runtime commands identified so
-//! far, not the DSP instruction set. Cards and audio decoding are not yet
-//! implemented. Unknown commands receive no fabricated success response.
+//! The processors are emulated ([`Dsp`]) and run the program the main
+//! software downloads into them; this module is the wiring between
+//! them, the main processor's bus and the slots:
+//!
+//! * the host ports at 0x15000002 (processor 0) and 0x1500004a
+//!   (processor 1), with the "may read" and "may write" pins of each in
+//!   a port of the main processor (0x12400001);
+//! * port pin 2 of each processor, the interrupt request to the main
+//!   processor;
+//! * the reset lines (0x16000004);
+//! * a card in each slot, on the processor's card interface.
+//!
+//! The processors run in step with the main processor
+//! ([`Media::advance`]), and in between whenever the main processor
+//! touches a port: its driver polls the pins between words, and the
+//! processor has to get from one word to the next in that time, as it
+//! does on the board, where it is the faster of the two at this.
 
-use std::collections::VecDeque;
+use super::sdcard::SdCard;
+use super::sdhi::Card;
+use super::upd77115::{self, irq, Dsp};
 
-#[derive(Default)]
-enum Download {
-    #[default]
-    Blocks,
-    Length,
-    Address,
-    Data,
-    Running,
-}
+/// System clocks a processor gets to react to an access by the host
+/// before the host looks again.
+const SETTLE: u64 = 400;
 
-#[derive(Default)]
-struct Dsp {
-    download: Download,
-    section: u8,
-    blocks: u16,
-    words: u32,
-    rx: VecDeque<u16>,
-    command: Vec<u16>,
-    edge: bool,
-    uploaded: u64,
-    commands: u64,
-    initialized: bool,
-    mode: u16,
-    library_enabled: bool,
-    output_enabled: bool,
-}
-
-impl Dsp {
-    fn write(&mut self, word: u16) {
-        match self.download {
-            Download::Blocks => {
-                self.blocks = word;
-                self.download = Download::Length;
-                if word == 0 {
-                    self.next_section();
-                }
-            }
-            Download::Length => {
-                // Program sections express lengths in pairs of 16-bit
-                // words. The two data sections use individual words.
-                self.words = u32::from(word) * if self.section < 2 { 2 } else { 1 };
-                self.download = Download::Address;
-            }
-            Download::Address => {
-                self.download = Download::Data;
-                if self.words == 0 {
-                    self.finish_block();
-                }
-            }
-            Download::Data => {
-                self.uploaded += 1;
-                self.words -= 1;
-                if self.words == 0 {
-                    self.finish_block();
-                }
-            }
-            Download::Running => {
-                self.command.push(word);
-                let length = 1 + (self.command[0] & 0xff) as usize;
-                if self.command.len() == length {
-                    self.commands += 1;
-                    match self.command.as_slice() {
-                        [0x1202, 0xd762, 0x0034] => {
-                            self.initialized = true;
-                            self.rx.push_back(0xf000);
-                            self.edge = true;
-                        }
-                        [0x7301, mode] => {
-                            self.mode = *mode;
-                            self.rx.push_back(0xf000);
-                            self.edge = true;
-                        }
-                        [0x3301, enabled] => {
-                            self.output_enabled = *enabled != 0;
-                            self.rx.push_back(0xf000);
-                            self.edge = true;
-                        }
-                        [0x3101, enabled] => {
-                            self.library_enabled = *enabled != 0;
-                            self.rx.push_back(0xf000);
-                            self.edge = true;
-                        }
-                        // Library identity: this protocol stand-in reports
-                        // version 0.0, build 0, not a real DSP release.
-                        [0x3201, 0] => {
-                            self.rx.extend([0xd503, 0, 0, 0]);
-                            self.edge = true;
-                        }
-                        // Card status query. Both slots are empty until
-                        // the card protocol and image backing are modelled.
-                        [0x2203, 1, 0x5000, _] => {
-                            self.rx.extend([0xd301, 0]);
-                            self.edge = true;
-                        }
-                        _ => {}
-                    }
-                    self.command.clear();
-                }
-            }
-        }
-    }
-
-    fn finish_block(&mut self) {
-        self.rx.push_back(0);
-        self.blocks -= 1;
-        self.download = Download::Length;
-        if self.blocks == 0 {
-            self.next_section();
-        }
-    }
-
-    fn next_section(&mut self) {
-        self.section += 1;
-        self.download = if self.section == 4 { Download::Running } else { Download::Blocks };
-    }
-}
-
-#[derive(Default)]
 pub struct Media {
-    dsps: [Dsp; 2],
+    pub dsps: [Dsp; 2],
+    /// System clocks each processor is ahead of the main processor,
+    /// from running between host accesses.
+    ahead: [u64; 2],
+    /// Fraction of a system clock left over by [`Media::advance`].
+    rest: u64,
+    /// Log the words that go through the host ports.
+    pub trace: bool,
+}
+
+impl Default for Media {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Media {
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        let mut dsps = [Dsp::new(), Dsp::new()];
+        dsps[0].name = "dsp0";
+        dsps[1].name = "dsp1";
+        Media { dsps, ahead: [0; 2], rest: 0, trace: false }
+    }
 
-    /// Low four bits of port 1 at 0x1240_0001. A set bit means
-    /// RX empty or TX busy; this stand-in accepts writes immediately.
-    pub fn status(&self) -> u8 {
-        (if self.dsps[0].rx.is_empty() { 4 } else { 0 })
-            | (if self.dsps[1].rx.is_empty() { 1 } else { 0 })
+    fn settle(&mut self, channel: usize) {
+        let d = &mut self.dsps[channel];
+        let before = d.cycles;
+        d.settle(SETTLE);
+        self.ahead[channel] += d.cycles - before;
+    }
+
+    /// Low four bits of the port at 0x1240_0001: bit 2 (processor 0)
+    /// and bit 0 (processor 1) are high while there is nothing to read,
+    /// bit 3 and bit 1 while the processor cannot take a word.
+    pub fn status(&mut self) -> u8 {
+        let mut v = 0;
+        for (i, shift) in [(0, 2), (1, 0)] {
+            self.settle(i);
+            let d = &self.dsps[i];
+            v |= (u8::from(!d.host_can_read()) | u8::from(!d.host_can_write()) << 1) << shift;
+        }
+        v
     }
 
     pub fn read(&mut self, channel: usize) -> u16 {
-        self.dsps[channel].rx.pop_front().unwrap_or(0)
+        self.settle(channel);
+        let v = self.dsps[channel].host_read();
+        if self.trace {
+            eprintln!("[dsp{}] host R {:04x}", channel, v);
+        }
+        self.settle(channel);
+        v
     }
 
     pub fn write(&mut self, channel: usize, word: u16) {
-        self.dsps[channel].write(word);
+        self.settle(channel);
+        if self.trace {
+            eprintln!("[dsp{}] host W {:04x}", channel, word);
+        }
+        self.dsps[channel].host_write(word);
+        self.settle(channel);
     }
 
+    /// The reset line of a processor, pulled low.
     pub fn reset(&mut self, channel: usize) {
-        self.dsps[channel] = Dsp::default();
+        self.dsps[channel].reset();
     }
 
-    /// Companion-chip edge latch bits 2 and 3, one per receive port.
+    /// Interrupt requests to the main processor since the last call:
+    /// bit 2 for processor 0, bit 3 for processor 1, as in the latch at
+    /// 0x07b0_0016.
     pub fn take_edges(&mut self) -> u16 {
         let mut edges = 0;
         for (i, dsp) in self.dsps.iter_mut().enumerate() {
-            if std::mem::take(&mut dsp.edge) {
+            if std::mem::take(&mut dsp.host_irq) {
                 edges |= 1 << (i + 2);
             }
         }
         edges
     }
 
-    pub fn uploaded_words(&self, channel: usize) -> u64 { self.dsps[channel].uploaded }
-    pub fn command_count(&self, channel: usize) -> u64 { self.dsps[channel].commands }
-    pub fn initialized(&self, channel: usize) -> bool { self.dsps[channel].initialized }
-    pub fn mode(&self, channel: usize) -> u16 { self.dsps[channel].mode }
-
-    /// Available 16-bit DMA transfer units for a host port. Writes are
-    /// always ready; reads must stop at the end of the receive FIFO.
-    pub fn dma_request(&self, address: u32, write: bool) -> u32 {
+    /// Whether a host port asks for a DMA transfer in the given
+    /// direction: the "may write" pin for a transfer to the processor,
+    /// the "may read" pin for one from it.
+    pub fn dma_request(&mut self, address: u32, write: bool) -> bool {
         let channel = match address & 0x1fff_ffff {
             0x1500_0002 => 0,
             0x1500_004a => 1,
-            _ => return 0,
+            _ => return false,
         };
-        if write { u32::MAX } else { self.dsps[channel].rx.len() as u32 }
+        self.settle(channel);
+        let d = &self.dsps[channel];
+        if write { d.host_can_write() } else { d.host_can_read() }
+    }
+
+    /// The processors' share of `cycles` cycles of a main processor that
+    /// makes `per_second` of them a second.
+    pub fn advance(&mut self, cycles: u64, per_second: u64) {
+        let n = cycles * upd77115::CLOCK_HZ + self.rest;
+        let clocks = n / per_second;
+        self.rest = n % per_second;
+        for i in 0..2 {
+            let owed = clocks.saturating_sub(self.ahead[i]);
+            self.ahead[i] = self.ahead[i].saturating_sub(clocks);
+            self.dsps[i].run(owed);
+        }
+    }
+
+    /// Put a card into a slot (0 or 1).
+    pub fn insert(&mut self, slot: usize, card: Card) {
+        self.dsps[slot].card = Some(SdCard::new(card));
+    }
+
+    /// Take the card out of a slot.  The slot's switch is on the
+    /// processor's INT4 pin, which is how the program learns that its
+    /// card is gone.
+    pub fn eject(&mut self, slot: usize) {
+        if self.dsps[slot].card.take().is_some() {
+            self.dsps[slot].request(irq::INT4);
+        }
+    }
+
+    pub fn present(&self, slot: usize) -> bool {
+        self.dsps[slot].card.is_some()
     }
 }
 
@@ -184,113 +160,121 @@ impl Media {
 mod tests {
     use super::*;
 
+    /// The boot ROM's download: a dummy word, the number of
+    /// instructions, the handshake setting, the instructions.  This
+    /// program sends the host the words it gets, each plus one, with the
+    /// interrupt pin pulled low for each.
     fn boot(m: &mut Media, ch: usize) {
-        // Two program words followed by one data word. No firmware bytes.
-        for word in [1, 1, 0xc00, 0xabcd, 0x1234, 0, 1, 1, 0x800, 0x5678, 0] {
+        let program: [u32; 12] = [
+            0x3801_0004, // r0l = 4
+            0x4810_3804, // PDT = r0l: pin 2 high, once it is an output
+            0x3801_3004, // r0l = 0x3004
+            0x4810_3805, // PCD = r0l: pin 2 is an output
+            0x3801_0004, // r0l = 4
+            0x4810_3804, // PDT = r0l: pin 2 high
+            0x4811_3806, // r0l = HDT
+            0x5800_0001, // r0 = r0 + 1
+            0x4810_3806, // HDT = r0l
+            0x6100_0000, // clr(r0)
+            0x4810_3804, // PDT = r0l: pin 2 low
+            0x2c7f_fc80, // jmp back to "r0l = 4"
+        ];
+        for word in [0, program.len() as u16, 0x0c00] {
             m.write(ch, word);
+        }
+        for w in program {
+            m.write(ch, w as u16);
+            m.write(ch, (w >> 16) as u16);
         }
     }
 
     #[test]
-    fn download_and_command_replies_use_separate_interrupt_paths() {
+    fn host_words_pins_and_interrupts() {
         let mut m = Media::new();
+        // Nothing to read, both processors ready for a word.
         assert_eq!(m.status(), 5);
         boot(&mut m, 0);
-        assert_eq!(m.uploaded_words(0), 3);
-        assert_eq!(m.take_edges(), 0);
-        assert_eq!(m.status(), 1);
-        assert_eq!(m.read(0), 0);
-        assert_eq!(m.read(0), 0);
+        assert!(m.dsps[0].fault.is_none(), "{:?}", m.dsps[0].fault);
         assert_eq!(m.status(), 5);
-        for word in [0x1202, 0xd762, 0x0034] { m.write(0, word); }
+        assert_eq!(m.take_edges(), 0);
+        m.write(0, 0x1233);
+        assert_eq!(m.status(), 1, "a word to read");
         assert_eq!(m.take_edges(), 4);
         assert_eq!(m.take_edges(), 0);
-        assert_eq!(m.read(0), 0xf000);
-        assert_eq!(m.command_count(0), 1);
-    }
-
-    #[test]
-    fn channels_and_reset_are_independent() {
-        let mut m = Media::new();
+        assert_eq!(m.read(0), 0x1234);
+        assert_eq!(m.status(), 5);
+        // The other processor still waits for its program.
+        assert!(m.dsps[1].idle());
         boot(&mut m, 1);
-        m.read(1); m.read(1);
-        m.write(1, 0x7301);
-        assert_eq!(m.take_edges(), 0);
-        m.write(1, 2);
+        m.write(1, 7);
         assert_eq!(m.take_edges(), 8);
         assert_eq!(m.status(), 4);
-        m.reset(0);
-        assert_eq!(m.read(1), 0xf000);
-        m.write(1, 0x9900); // Unidentified command: no success reply.
-        assert_eq!(m.status(), 5);
         m.reset(1);
-        assert_eq!(m.command_count(1), 0);
+        assert_eq!(m.status(), 5);
+        assert_eq!(m.read(0), 0x1234, "the word stays in the register");
     }
 
     #[test]
-    fn host_dma_and_receive_interrupt() {
+    fn time_is_shared_out() {
+        let mut m = Media::new();
+        boot(&mut m, 0);
+        let before = m.dsps[0].cycles;
+        // A second of a 235.2 MHz main processor.
+        for _ in 0..1000 {
+            m.advance(235_200, 235_200_000);
+        }
+        let got = m.dsps[0].cycles - before;
+        assert!(got <= upd77115::CLOCK_HZ && got > upd77115::CLOCK_HZ - 10_000, "{got}");
+    }
+
+    #[test]
+    fn host_dma_and_interrupt_latch() {
         use crate::machine::Machine;
         use crate::sh4::Bus;
         let mut m = Machine::new();
         boot(&mut m.board.media, 0);
-        m.board.read16(0x1500_0002);
-        m.board.read16(0x1500_0002);
-        m.board.write16(0x07b0_0000, 0x0600); // DSP0 priority 6
-        m.board.write16(0x07b0_001e, 4); // RX masked
-        m.board.ram[..4].copy_from_slice(&[0x73, 1, 0, 2]);
+        m.board.write16(0x07b0_0000, 0x0600); // processor 0 at priority 6
+        m.board.write16(0x07b0_001e, 4); // masked
+        m.board.ram[..4].copy_from_slice(&[0x11, 0x10, 0x22, 0x20]);
         let dma = &mut m.cpu.io.dma[7];
         dma.sar = 0x8c00_0000;
         dma.dar = 0xb500_0002;
-        dma.tcr = 2;
+        dma.tcr = 1;
         dma.chcr = 0xa1025;
-        // DDT mode must retain DBL and honor master enable.
+        // The channel runs only with the master enable.
         m.cpu.io.write(&mut m.board, 0xffa0_0040, 4, 0xc300, 0, 0);
         m.run(0);
-        assert_eq!(m.cpu.io.dma[7].tcr, 2);
+        assert_eq!(m.cpu.io.dma[7].tcr, 1);
         m.cpu.io.write(&mut m.board, 0xffa0_0040, 4, 0xc301, 0, 0);
-        assert_eq!(m.cpu.io.dmaor, 0xc301);
         m.run(0);
         assert_eq!(m.cpu.io.dma[7].tcr, 0);
-        assert_eq!(m.board.media.mode(0), 2);
+        // The processor has answered: its request is latched, and
+        // reaches the main processor once unmasked.
         assert_eq!(m.board.irl, 0);
         assert_eq!(m.board.read16(0x07b0_0016) & 4, 4);
         m.board.write16(0x07b0_001e, 0);
         assert_eq!(m.board.irl, 6);
         m.board.write16(0x07b0_0016, 0);
         assert_eq!(m.board.irl, 0);
-
+        // The answer by DMA; a second word is not there to be had.
         m.cpu.io.dma[7] = Default::default();
         let dma = &mut m.cpu.io.dma[7];
         dma.sar = 0xb500_0002;
         dma.dar = 0x8c00_0010;
         dma.tcr = 2;
         dma.chcr = 0xa4025;
-        m.board.ram[18..20].copy_from_slice(&[0xbe, 0xef]);
         m.run(0);
-        assert_eq!(&m.board.ram[16..20], &[0xf0, 0, 0xbe, 0xef]);
-        assert_eq!(m.cpu.io.dma[7].tcr, 1, "DMA must stop at an empty FIFO");
-        m.run(0);
-        assert_eq!(m.cpu.io.dma[7].tcr, 1);
+        assert_eq!(&m.board.ram[16..18], &[0x11, 0x11]);
+        assert_eq!(m.cpu.io.dma[7].tcr, 1, "a transfer waits for the processor's word");
     }
 
     #[test]
-    fn reset_clears_pending_reply_and_193_keeps_its_own_map() {
+    fn the_193_has_no_card_board() {
         use crate::board::{Board, Model};
         use crate::sh4::Bus;
-        let mut b = Board::new();
-        boot(&mut b.media, 0);
-        b.read16(0x1500_0002); b.read16(0x1500_0002);
-        b.write16(0x07b0_0000, 0x0600);
-        b.write16(0x1500_0002, 0x7301);
-        b.write16(0x1500_0002, 2);
-        assert_eq!(b.irl, 6);
-        b.write32(0x1600_0004, 0);
-        assert_eq!(b.irl, 0);
-        assert_eq!(b.read8(0x1240_0001) & 15, 5);
-        assert_eq!(b.media.mode(0), 0);
         let mut b = Board::for_model(Model::Rnse193);
         b.write16(0x1500_0002, 0x1234);
         assert_eq!(b.read16(0x1500_0002), 0x1234);
-        assert_eq!(b.media.uploaded_words(0), 0);
+        assert!(b.media.dsps[0].idle() && b.media.dsps[0].cycles == 0);
     }
 }

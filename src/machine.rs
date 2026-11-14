@@ -89,8 +89,12 @@ pub struct Machine {
     /// Sound from the 193's own output (its serial sound interface)
     /// that has not gone into `speaker` yet, at 44.1 kHz.
     decoded: VecDeque<i16>,
+    /// The last sample each of the 192's card processors sent.
+    media_last: [[i16; 2]; 2],
     /// When the sound output is next served, in CPU cycles.
     next_sound: u64,
+    /// Up to when the 192's card processors have had their time.
+    media_time: u64,
     /// The external watchdog as last looked at.
     pub watchdog: Watchdog,
     /// The watchdog bites from the start, not only once the software
@@ -203,7 +207,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, media_time: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -1196,15 +1200,28 @@ impl Machine {
                 // a receive transfer can move only the words available
                 // in the host FIFO. Both directions use 16-bit units.
                 for ch in [3, 7] {
-                    let dma = self.cpu.io.dma[ch];
-                    if dma.chcr & 0xf73 != 0x21 { continue; }
-                    let units = self.board.media.dma_request(dma.dar, true)
-                        .max(self.board.media.dma_request(dma.sar, false));
-                    if units != 0 {
-                        self.cpu.io.dma_transfer(&mut self.board, ch, units, self.cpu.cycles);
-                        self.board.update_irl();
+                    // A word at a time, as the processor's pins ask for
+                    // them; what it does not get to in this time slice
+                    // waits for the next.
+                    for _ in 0..512 {
+                        let dma = self.cpu.io.dma[ch];
+                        if dma.chcr & 0xf73 != 0x21 { break; }
+                        if !self.board.media.dma_request(dma.dar, true) && !self.board.media.dma_request(dma.sar, false) {
+                            break;
+                        }
+                        if self.cpu.io.dma_transfer(&mut self.board, ch, 1, self.cpu.cycles) == 0 {
+                            break;
+                        }
                     }
+                    self.board.update_irl();
                 }
+            }
+            if self.board.model == crate::board::Model::Rnse192 {
+                // The card processors' share of the time.
+                let now = self.cpu.cycles;
+                self.board.media.advance(now - self.media_time, self.cycles_per_ms() * 1000);
+                self.media_time = now;
+                self.board.media_edges();
             }
             if !self.can_peers.is_empty() {
                 self.can_peers_tick();
@@ -1274,6 +1291,26 @@ impl Machine {
                     let mut decoded = Vec::new();
                     for _ in 0..played.len() {
                         decoded.push(self.decoded.pop_front().unwrap_or(0));
+                    }
+                    if self.board.model == crate::board::Model::Rnse192 {
+                        // What the 192's card processors have sent to
+                        // their converters, the two added.  Each keeps
+                        // its own time, so a sample may not be there
+                        // yet: the last one stands in for it.
+                        for (dsp, last) in self.board.media.dsps.iter_mut().zip(self.media_last.iter_mut()) {
+                            let rate = dsp.sample_rate() as usize;
+                            let have = dsp.audio.len() / 2;
+                            let take = (played.len() / 2 * rate / 44_100).min(have);
+                            let sent: Vec<i16> = dsp.audio.drain(..2 * take).collect();
+                            for (i, out) in decoded.chunks_mut(2).enumerate() {
+                                let at = i * rate / 44_100;
+                                if at < take {
+                                    *last = [sent[2 * at], sent[2 * at + 1]];
+                                }
+                                out[0] = out[0].saturating_add(last[0]);
+                                out[1] = out[1].saturating_add(last[1]);
+                            }
+                        }
                     }
                     if let Some(speaker) = self.speaker.as_mut() {
                         let gain = self.radio.cd_gain();

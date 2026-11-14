@@ -21,8 +21,9 @@ fn disc() -> Option<Vec<u8>> {
     Some(std::fs::read(path).expect("RNSE_DISC is not readable"))
 }
 
-/// Exercise the real SD/MP3 driver, including both downloads, polling,
-/// companion-chip receive interrupts and the switch to block DMA.
+/// The 192's two card processors, emulated, under the real driver: it
+/// downloads their program, which starts, answers the first commands
+/// and sets its audio output going.
 #[test]
 fn media_dsps_boot() {
     use rnse::board::Model;
@@ -40,21 +41,109 @@ fn media_dsps_boot() {
     let printf = Machine::known_printf(&v.module("OSM").unwrap().version);
     if let Some(address) = printf { m.hook_printf(address); }
     m.start_os(v).unwrap();
-    assert_eq!(m.run(30_000 * m.cycles_per_ms()), Stop::Budget, "{:?}", m.cpu.fault);
+    assert_eq!(m.run(12_000 * m.cycles_per_ms()), Stop::Budget, "{:?}", m.cpu.fault);
     let log = String::from_utf8_lossy(&m.console);
-    for ch in 0..2 {
-        assert!(m.board.media.initialized(ch), "DSP{ch} initialization failed:\n{log}");
-        assert_eq!(m.board.media.mode(ch), 2, "DSP{ch} transfer mode was not selected");
-        assert!(m.board.media.uploaded_words(ch) > 20_000, "DSP{ch} download was incomplete");
-        assert!(m.board.media.command_count(ch) >= 2, "DSP{ch} runtime commands stalled:\n{log}");
+    for (ch, dsp) in m.board.media.dsps.iter().enumerate() {
+        assert!(dsp.fault.is_none(), "DSP{ch}: {:?}", dsp.fault);
+        // The program is there, both parts of it.
+        assert!(dsp.imem[0x200] != 0 && dsp.imem[0x8000] != 0, "DSP{ch}: no program");
+        // "System initialisation" has set the audio interface up for
+        // 44.1 kHz and started it; silence goes out.
+        assert_eq!(dsp.sample_rate(), 44_100, "DSP{ch}");
+        assert!(dsp.frames > 44_100 && dsp.loud_frames == 0, "DSP{ch}: {} samples sent, {} not silent", dsp.frames, dsp.loud_frames);
         if printf.is_some() {
             assert!(log.contains(&format!("SDC{ch}-DSPC_SYS_INIT Success")), "driver rejected DSP{ch}:\n{log}");
+            assert!(log.contains(&format!("SDC{ch}-CARD_EJECT")), "DSP{ch}: no card should be seen:\n{log}");
         }
     }
-    assert!(m.board.media.command_count(0) >= 5, "DSP0 DMA commands stalled:\n{log}");
     assert!(m.cpu.irq_counts[0x7e0 >> 5] > 0, "DSP0 DMA completion never interrupted");
     assert!(!log.contains("BOOT ERROR"), "DSP boot failure:\n{log}");
-    assert!(!log.contains("ERR_cmd_dma"), "media DMA did not complete:\n{log}");
+    assert!(!log.contains("ERR_"), "the driver reports an error:\n{log}");
+}
+
+/// The 192 plays an MP3 file from an SD card: its software finds the
+/// card by the slot's switch, runs the card's start-up by commands
+/// passed through the slot's processor, reads the file system, and has
+/// the processor fetch and decode the file.  All of it is the unit's
+/// own code, the processor's program included.
+#[test]
+fn mp3_from_a_card_plays_on_the_192() {
+    use rnse::board::Model;
+    use rnse::dev::radio::Radio;
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192)) else { return };
+    let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+    let song = include_bytes!("data/tones.mp3").to_vec();
+    let entries = vec![rnse::fat::Entry::folder("Tones", vec![rnse::fat::Entry::file("left 440 right 880.mp3", song.clone())]),
+        rnse::fat::Entry::file("TONES.MP3", song)];
+    let card = rnse::fat::card("MUSIC", &entries, None).unwrap();
+    let mut m = Machine::new();
+    m.echo_console = false;
+    m.install_boot_stub(&v.name);
+    m.install(v, &index);
+    m.board.media.insert(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap());
+    m.set_ignition(true);
+    let printf = Machine::known_printf(&v.module("OSM").unwrap().version);
+    if let Some(address) = printf { m.hook_printf(address); }
+    m.start_os(v).unwrap();
+    let ms = m.cycles_per_ms();
+    // (The unit takes the MEDIA key only some 14 s after its start.)
+    assert_eq!(m.run(16_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    {
+        let dsp = &m.board.media.dsps[0];
+        assert!(dsp.fault.is_none(), "{}: {:?}", v.name, dsp.fault);
+        let card = dsp.card.as_ref().unwrap();
+        assert!(card.sectors_read > 20, "{}: the card was not read ({} commands, {} sectors)", v.name, card.commands, card.sectors_read);
+    }
+    let press = |m: &mut Machine, key: &str| {
+        assert!(m.panel_key(key, true));
+        m.run(200 * ms);
+        assert!(m.panel_key(key, false));
+    };
+    // MEDIA, the list of sources, "MP3" (second in it, after the CD
+    // drive), and it plays the card's first file.
+    press(&mut m, "MEDIA");
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    press(&mut m, "SOFT_TR");
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    assert!(m.panel_knob("main", 1));
+    assert_eq!(m.run(1_500 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    press(&mut m, "SELECT");
+    for _ in 0..40 {
+        assert_eq!(m.run(250 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        if m.board.media.dsps[0].loud_frames > 0 {
+            break;
+        }
+    }
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    let log = String::from_utf8_lossy(&m.console).into_owned();
+    if printf.is_some() {
+        assert!(log.contains("Play-OK[/TONES.MP3]"), "{}: not playing:\n{}", v.name, log);
+        assert!(!log.contains("SDC_ERROR"), "{}: the player reports an error:\n{}", v.name, log);
+    }
+    assert!(m.board.media.dsps[0].fault.is_none(), "{}: {:?}", v.name, m.board.media.dsps[0].fault);
+    assert!(m.board.media.dsps[0].loud_frames > 0, "{}: the processor sends its converter only silence:\n{}", v.name, log);
+    assert_eq!(m.board.media.dsps[1].loud_frames, 0, "{}: the other processor has nothing to play", v.name);
+    assert_eq!(m.radio.source, Radio::SOURCE_DECODER, "{}: the amplifier's source", v.name);
+    // Two seconds of it: no gaps, the two tones where they belong, and
+    // as loud as the amplifier's volume makes it.
+    m.speaker = Some(Vec::new());
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+    let heard = m.speaker.take().unwrap();
+    let seconds = heard.len() as f64 / 88_200.0;
+    assert!((1.95..=2.05).contains(&seconds), "{}: {} s of sound", v.name, seconds);
+    let heard = &heard[8820..];
+    let seconds = heard.len() as f64 / 88_200.0;
+    for (channel, want) in [(0, 440.0), (1, 880.0)] {
+        let side: Vec<i16> = heard.chunks(2).map(|p| p[channel]).collect();
+        let crossings = side.windows(2).filter(|w| (w[0] < 0) != (w[1] < 0)).count() as f64;
+        let hz = crossings / 2.0 / seconds;
+        assert!((hz - want).abs() < 3.0, "{}: channel {} should sound at {} Hz, not {:.1}", v.name, channel, want, hz);
+        let peak = side.iter().map(|x| x.unsigned_abs() as f32).fold(0.0, f32::max);
+        let full = 0.25 * 32768.0 * m.radio.gain(Radio::SOURCE_DECODER);
+        assert!(peak > 0.7 * full && peak < 1.3 * full, "{}: channel {} peak {} at volume {} (expected about {})", v.name, channel, peak, m.radio.volume, full);
+    }
 }
 
 /// The boot ROM supplies CAN software state and a running CAN timer.
