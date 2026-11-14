@@ -521,10 +521,13 @@ fn custom_program_reads_the_disc() {
     for model in [Model::Rnse192, Model::Rnse193] {
         let Some((mut m, name, custom)) = sdk_example(&image, model, "cd") else { continue };
         let ms = m.cycles_per_ms();
-        // The disc "changed": the drive answers the first command with
-        // a unit attention, which the program has to get past.
+        // The disc "changed": the drive is becoming ready for some
+        // seconds and then answers one command with a unit attention,
+        // all of which the program has to get past; and it takes its
+        // time over seeks and reads.
+        m.atapi().times = true;
         m.atapi().insert(Some(custom.clone()));
-        assert_eq!(m.run(4_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert_eq!(m.run(12_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
         // What the program should have found, from the image itself.
         let iso = fw::Iso::new(&custom).unwrap();

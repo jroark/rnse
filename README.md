@@ -177,6 +177,8 @@ full list):
     --serial AUZ...    the unit's serial number (193), for map data made
                        for one unit; see docs/hardware-193.md
     --disc-in MS       empty drive at the start, the disc goes in at MS ms
+    --spin-up MS       how long the drive takes over a disc that goes in
+    --drive-times      seeks and reads take time (also with --strict)
     --sd-card FILE     an SD card in the 193's slot (see `rnse card`)
     --trace-sd         SD card commands (193)
     --trace-sound      the blocks of samples the 193's software sends out

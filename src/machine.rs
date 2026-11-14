@@ -1239,6 +1239,14 @@ impl Machine {
             // short as 12 ms and has to hear promptly that one is done.
             if self.cpu.cycles >= self.next_sound {
                 self.next_sound += self.cycles_per_ms();
+                // The drive's own time: spinning up, seeking, reading.
+                let waiting = { let a = self.atapi(); a.advance(1000); a.irq() || a.dma_request() };
+                if waiting {
+                    self.board.update_irl();
+                    if let Some(navi) = self.cpu.io.navi.as_mut() {
+                        navi.update_irqs(&mut self.cpu.io.intc);
+                    }
+                }
                 let listening = self.sound.is_some() || self.speaker.is_some();
                 if let Some(navi) = self.cpu.io.navi.as_mut() {
                     let rate = navi.audio_rate() as usize;
