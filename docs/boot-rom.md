@@ -203,17 +203,46 @@ work with says 2/04/00, then; that is what the emulator's drive now
 says (`Atapi::loading_sense`), followed as before by one "the medium
 may have changed" when the disc is ready.
 
-It is an inference, not a measurement.  What the real drive (an
-Alpine DV35M110 in the 192) answers, in which order and for how long,
-can be read off a unit: `sdk/examples/drive` logs every change in the
-drive's answer, with times, while a disc is ejected and pushed back in
-(`docs/custom-firmware.md`).  The switches to try other drives are
+It was an inference; it has since been measured, on a North American
+192 (its drive an Alpine DV35M110) with `sdk/examples/drive`, which
+asks the drive ten times a second and logs every change, here with a
+CD-R, ejected by command and pushed back in by hand (times in ms from
+the program's start; the same lines came over the CAN bus):
+
+    0000000 READY
+    0005210 2/04/00     the eject command: not ready
+    0008820 6/28/00     the medium may have changed
+    0008930 2/3A/01     no medium (the "tray closed" form)
+    0011940 2/3A/00     no medium
+    0016350 2/04/00     the disc pushed in: not ready
+    0019060 6/28/00     the medium may have changed
+    0019170 2/04/04     not ready, a third way
+
+**While it loads a disc the drive says 2/04/00, as inferred**, and the
+attention comes after that, not at the insertion.  What the emulator
+does not have: loading takes 2.7 s (the emulator's 6 s is a guess); after the attention the drive is not ready
+but says 2/04/04, which the OS takes for "becoming ready" like
+2/04/01, and it still said so 9.4 s later, when the run was ended (how
+long it takes to READY is not measured); and on the way out it says
+2/04/00 for 3.6 s, then the attention, then 2/3A/01 for 3 s before
+2/3A/00.
+
+The emulated 192's drive now answers this way by default (2.7 s of
+loading, then 10 s of 2/04/04, which is a guess at a time only known to
+be longer than 9.4 s; 3.6 s for an eject and 3 s of 2/3A/01), and the
+program's log in the emulator is the unit's, line for line.  The North
+American 192 software still takes a disc that goes in while it runs,
+with 0, 5, 10, 15 and 25 s of 2/04/04 alike.  The 193's drive, which
+nobody has measured, is as it was: 6 s of loading, nothing after it.
+`--spin-up`, `--settle` and `--eject-time` change the three times.
+
+The program for it is in `docs/custom-firmware.md`.  The switches to try other drives are
 `--loading-sense K/CC/QQ`, `--spin-up MS`, `--attention-first` and
 `--attention-both` ("the medium may have changed" at insertion instead
 of, or as well as, when the disc is ready).
 
 Other things about the drive that were wrong and are fixed: a disc that
-goes in is not ready for a while (`--spin-up`, 6 s by default; the
+goes in is not ready for a while (`--spin-up`; the
 real mechanism pulls the disc in by motor), and "the medium may have
 changed" is reported once at the end of that, not at the moment of
 insertion.  And reading can be given its

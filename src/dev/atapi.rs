@@ -235,7 +235,8 @@ impl From<Vec<u8>> for Disc {
 /// just that; with 2/04/00 all three softwares take a disc that goes
 /// in while they run, whatever the loading time, and with 2/04/01 each
 /// does so only in a narrow range of loading times of its own.
-/// `sdk/examples/drive` shows what a real drive says.
+/// A 192's drive has since been seen to say just this while it loads
+/// (`sdk/examples/drive` on a unit).
 pub const LOADING_SENSE: (u8, u8, u8) = (2, 0x04, 0x00);
 
 pub struct Atapi {
@@ -280,6 +281,24 @@ pub struct Atapi {
     spin_up: u64,
     /// How long that takes ([`SPIN_UP_MICROS`] unless changed).
     pub spin_up_micros: u64,
+    /// After a disc has been loaded and the drive has said that the
+    /// medium may have changed, it is still not ready for a while, and
+    /// says so in another way than while loading (2/04/04 on a 192's
+    /// drive, measured: docs/boot-rom.md).  Microseconds of that left,
+    /// and how long it takes; 0, the default, leaves the phase out.
+    settle: u64,
+    pub settle_micros: u64,
+    pub settle_sense: (u8, u8, u8),
+    /// An eject takes time as well: the drive is "not ready" (2/04/00)
+    /// while the disc goes out, then says that the medium may have
+    /// changed, then "no medium, tray closed" (2/3A/01) for a while
+    /// before the plain "no medium".  Microseconds left of the first
+    /// and the third, whether the attention is still to come, and how
+    /// long the first takes; 0, the default, leaves all of it out.
+    ejecting: u64,
+    tray: u64,
+    eject_attention: bool,
+    pub eject_micros: u64,
     /// The disc an eject command (START STOP UNIT) pushed out, as it
     /// waits in the slot, and how many such commands there were.
     ejected: (Option<Disc>, Option<AudioDisc>),
@@ -335,6 +354,10 @@ pub const SPIN_UP_MICROS: u64 = 6_000_000;
 /// costs, and a sector read (some 1.3 MB/s).  Round numbers for a
 /// mechanism whose real ones are not known.
 pub const SEEK_MICROS: u64 = 120_000;
+/// With [`Atapi::eject_micros`]: how long the drive says "no medium,
+/// tray closed" after an eject before it says "no medium" (3.0 s on a
+/// 192's drive).
+pub const TRAY_MICROS: u64 = 3_000_000;
 pub const SECTOR_MICROS: u64 = 1_500;
 
 impl Atapi {
@@ -363,6 +386,13 @@ impl Atapi {
             unit_attention: false,
             spin_up: 0,
             spin_up_micros: SPIN_UP_MICROS,
+            settle: 0,
+            settle_micros: 0,
+            settle_sense: (2, 0x04, 0x04),
+            ejecting: 0,
+            tray: 0,
+            eject_attention: false,
+            eject_micros: 0,
             ejected: (None, None),
             ejects: 0,
             attention_first: false,
@@ -406,6 +436,10 @@ impl Atapi {
     /// Like [`insert`](Self::insert), for any kind of data disc.
     pub fn insert_disc(&mut self, image: Option<Disc>) {
         self.spin_up = if image.is_some() { self.spin_up_micros } else { 0 };
+        self.settle = 0;
+        self.ejecting = 0;
+        self.tray = 0;
+        self.eject_attention = false;
         // Told when the disc is ready, not while it is being loaded;
         // or, the other way a drive may have it, at once.
         self.unit_attention = self.spin_up == 0 || self.attention_first;
@@ -518,8 +552,21 @@ impl Atapi {
     /// [`play_out`](Self::play_out) moves).
     pub fn advance(&mut self, micros: u64) {
         self.busy = self.busy.saturating_sub(micros);
+        self.settle = self.settle.saturating_sub(micros);
+        if self.ejecting > 0 {
+            self.ejecting = self.ejecting.saturating_sub(micros);
+            if self.ejecting == 0 {
+                self.eject_attention = true;
+                self.tray = TRAY_MICROS;
+            }
+        } else {
+            self.tray = self.tray.saturating_sub(micros);
+        }
         if self.spin_up > 0 {
             self.spin_up = self.spin_up.saturating_sub(micros);
+            if self.spin_up == 0 {
+                self.settle = self.settle_micros;
+            }
             // Ready: the next command hears that the medium may have
             // changed, once.
             if !self.attention_first || self.attention_again {
@@ -841,8 +888,23 @@ impl Atapi {
                     return;
                 }
             }
+            if needs_medium && self.has_disc() && self.settle > 0 {
+                let (key, code, qualifier) = self.settle_sense;
+                self.fail(key, code, qualifier);
+                return;
+            }
+            if needs_medium && self.ejecting > 0 {
+                self.fail(2, 0x04, 0); // not ready: the disc is on its way out
+                return;
+            }
+            if self.eject_attention {
+                self.eject_attention = false;
+                self.fail(6, 0x28, 0); // medium may have changed
+                return;
+            }
             if needs_medium && !self.has_disc() {
-                self.fail(2, 0x3a, 0); // medium not present
+                // Medium not present; "tray closed" for a while after an eject.
+                self.fail(2, 0x3a, if self.tray > 0 { 1 } else { 0 });
                 return;
             }
         }
@@ -885,7 +947,9 @@ impl Atapi {
                     if self.has_disc() {
                         self.ejected = (self.image.take(), self.audio.take());
                         self.spin_up = 0;
+                        self.settle = 0;
                         self.unit_attention = false;
+                        self.ejecting = self.eject_micros;
                         self.ejects += 1;
                     }
                 } else if op == 0x1b && p[4] & 3 == 3 {
