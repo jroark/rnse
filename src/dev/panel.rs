@@ -184,6 +184,14 @@ pub struct Panel {
     pub online: bool,
     /// The reset line is low: the controller does nothing.
     pub in_reset: bool,
+    /// The screen's lighting is on.  It is this controller's: on a
+    /// unit the screen was dark for as long as a program held the
+    /// controller in reset, with the picture there all the while, and
+    /// lit once the controller had its settings again.  Taken here as:
+    /// on after a command 0x06 (six levels) with a level that is not
+    /// zero, off after a reset.  Which of the six is the screen's is
+    /// not known.
+    pub lit: bool,
     /// Nothing is sent before this time (start-up after a reset).
     quiet_until: u64,
     /// Times the unit has reset the controller after its first start.
@@ -201,7 +209,7 @@ impl Default for Panel {
 
 impl Panel {
     pub fn new() -> Panel {
-        let mut p = Panel { parser: Parser::default(), queue: VecDeque::new(), pending: None, keys: [0; 6], last_rx_ms: 0, online: false, in_reset: false, quiet_until: 0, resets: 0, from_unit: Default::default(), trace: false };
+        let mut p = Panel { parser: Parser::default(), queue: VecDeque::new(), pending: None, keys: [0; 6], last_rx_ms: 0, online: false, in_reset: false, lit: false, quiet_until: 0, resets: 0, from_unit: Default::default(), trace: false };
         p.queue.push_back(frame(CMD_STARTED, &[]));
         p
     }
@@ -222,6 +230,7 @@ impl Panel {
             self.queue.clear();
             self.pending = None;
             self.online = false;
+            self.lit = false;
         } else {
             self.queue.clear();
             self.queue.push_back(frame(CMD_STARTED, &[]));
@@ -298,6 +307,9 @@ impl Panel {
                 Some(FromUnit::Frame { cmd, data }) => {
                     if self.trace {
                         eprintln!("[panel] {:>7} ms  unit command {:02x}: {}", now_ms, cmd, hex(&data));
+                    }
+                    if cmd == 0x06 {
+                        self.lit = data.iter().any(|b| *b != 0);
                     }
                     if let Some(slot) = self.from_unit.get_mut(cmd as usize) {
                         *slot = Some(data);

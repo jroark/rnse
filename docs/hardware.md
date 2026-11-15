@@ -347,6 +347,15 @@ configures it (commands 0x02, 0x03, 0x0A, 0x09), sets the lighting (0x06,
 repeated while fading, and 0x07) and waits for key state (0x0C, six
 bytes, one bit per key) and encoder (0x0D) frames.
 
+The screen's lighting is this controller's.  On a unit, a program that
+held the controller in reset had a dark screen, the picture being
+there all the while, and the screen lit when the controller was started
+and given its settings again.  The emulator shows a black picture
+accordingly: from a reset of the controller until a command 0x06 with
+a level that is not zero (which of the six levels is the screen's is
+not known).  The boot ROM gives the controller its settings before it
+starts anything, a loader from a disc included.
+
 The power button is not among the keys: it has to work while the main
 processor is off, so it presumably goes to the radio processor.
 

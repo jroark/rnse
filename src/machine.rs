@@ -320,6 +320,11 @@ impl Machine {
         bootrom::install(&mut self.board, project);
         self.cpu.hypercalls_enabled = true;
         if self.board.model == crate::board::Model::Rnse192 {
+            // The ROM gives the faceplate controller its settings, the
+            // lighting among them, before it starts anything (it can be
+            // seen doing so in the emulator, a loader from a disc
+            // included).
+            self.panel.lit = true;
             // What a 192's ROM sets in its reset code before anything
             // else runs (docs/boot-rom.md, "The real one"): the ten
             // registers at 0x16000000, the latch among them, and the
@@ -630,7 +635,15 @@ impl Machine {
                 let (ram, base) = (&self.board.ram, self.board.ram_base);
                 navi.render(&|a| ram.get(a.wrapping_sub(base) as usize).copied().unwrap_or(0))
             }
-            None => self.board.coral.render(),
+            None => {
+                let (w, h, mut picture) = self.board.coral.render();
+                if self.panel_present && !self.panel.lit {
+                    // No lighting: the picture is there and cannot be
+                    // seen (see `Panel::lit`).
+                    picture.fill(0);
+                }
+                (w, h, picture)
+            }
         }
     }
 
