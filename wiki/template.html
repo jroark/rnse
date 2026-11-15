@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{title}} · RNS-E</title>
+<meta name="description" content="{{description}}">
+<meta name="color-scheme" content="dark light">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body class="{{home}}">
+<a class="skip" href="#content">Skip to the text</a>
+<header class="top">
+  <a class="brand" href="/"><span class="mark" aria-hidden="true"></span>RNS-E</a>
+  <span class="tag">the unit, its emulator, and how it was taken apart</span>
+  <a class="run" href="/emulator/">Run the emulator</a>
+  <button class="menu" aria-expanded="false" aria-controls="side">Pages</button>
+</header>
+<div class="layout">
+  <nav class="side" id="side" aria-label="Pages">
+    <ol>
+{{nav}}
+    </ol>
+    <a class="side-run" href="/emulator/">Emulator <span>in your browser</span></a>
+  </nav>
+  <main id="content">
+    <article>
+      <h1>{{heading}}</h1>
+{{toc}}
+{{content}}
+    </article>
+{{pager}}
+    <footer>
+      An independent hobby project, not affiliated with Audi, Aisin AW or anyone
+      else. No firmware or map data is distributed here.
+      <a href="/legal/">Legal</a>
+    </footer>
+  </main>
+</div>
+<script>
+// The page list folds away on narrow screens.
+const b = document.querySelector(".menu"), s = document.getElementById("side");
+b.addEventListener("click", () => {
+  const open = s.classList.toggle("open");
+  b.setAttribute("aria-expanded", open);
+});
+</script>
+</body>
+</html>

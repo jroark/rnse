@@ -217,12 +217,28 @@ compiled to WebAssembly (`src/web.rs`), a worker that runs it and a page.
 The visitor picks an image of their own update disc, and optionally of
 a navigation disc, which the page reads in place; nothing is uploaded
 and the site holds no firmware.  It is published at
-[rns-e.com](https://rns-e.com/).
+[rns-e.com/emulator](https://rns-e.com/emulator/).
 
     web/build.sh                  # into target/web/site; needs the
                                   # wasm32-unknown-unknown target
     node web/smoke.mjs target/web/site/rnse.wasm disc.iso V575
-    BUCKET=... DISTRIBUTION=... web/deploy.sh
+
+## The wiki at rns-e.com
+
+[rns-e.com](https://rns-e.com/) is a wiki about the unit, the emulator
+and how both were worked out, with the browser emulator at
+`/emulator/`.  The pages are Markdown in `wiki/pages/`, the photographs
+(resized, camera and location data stripped) in `wiki/media/`;
+`tools/wiki.py` (standard library only) turns them into a static site and
+refuses broken links, missing images and photographs that still carry
+metadata.
+
+    wiki/build.sh                 # web/build.sh, then the pages, into target/wiki/site
+    WIKI_ONLY=1 wiki/build.sh     # pages only, reusing target/web/site
+    BUCKET=... DISTRIBUTION=... wiki/deploy.sh
+
+`wiki/cloudfront-index.js` is the CloudFront Function that serves
+`/page/` as `/page/index.html`.
 
 ## Tests
 
