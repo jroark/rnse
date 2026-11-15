@@ -1388,6 +1388,22 @@ fn suite_runs_its_measurements() {
     assert!(m.panel_key("RETURN", true));
     m.run(300 * ms);
     assert!(m.panel_key("RETURN", false));
+    // No disc change (RETURN leaves it out), and of the battery-backed
+    // memory only the beginning (RETURN held down).
+    let until = |m: &mut Machine, what: &str| {
+        let mut waited = 0;
+        while !String::from_utf8_lossy(&m.console).contains(what) {
+            assert_eq!(m.run(200 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+            waited += 1;
+            assert!(waited < 300, "{}: {:?}", what, String::from_utf8_lossy(&m.console));
+        }
+    };
+    until(&mut m, "A DISC CHANGE");
+    m.run(500 * ms);
+    assert!(m.panel_key("RETURN", true));
+    until(&mut m, "BATTERY-BACKED MEMORY");
+    until(&mut m, "BYTES SENT");
+    assert!(m.panel_key("RETURN", false));
     // The watchdog test ends the run: the emulator's bites as a unit's does.
     let stop = m.run(8_000 * ms);
     let text = String::from_utf8_lossy(&m.console).into_owned();
@@ -1401,7 +1417,17 @@ fn suite_runs_its_measurements() {
     let value = |test: u8, item: u8| records.iter().find(|r| r.0 == test && r.1 == item).map(|r| r.2);
     // Every test was opened, in order.
     let opened: Vec<u8> = records.iter().filter(|r| r.1 == 0xfe).map(|r| r.0).collect();
-    assert_eq!(opened, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "{}", name);
+    assert_eq!(opened, [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 9, 17, 18, 10], "{}", name);
+    // The radio processor was asked its two questions.  (Its line is
+    // the installed software's to set up; started like this, without
+    // that software, the program hears nothing on it.)  And the first
+    // flash chip said what it is.
+    assert!(value(12, 62).is_some() && value(12, 126).is_some(), "{}", name);
+    assert_eq!((value(13, 0), value(13, 1)), (Some(0x04), Some(0x2253)), "{}", name);
+    // The drive's name once more, in the full answer.
+    assert_eq!(value(14, 2), Some(u32::from_be_bytes(*b"ALPI")), "{}", name);
+    // Some of the battery-backed memory went out on its own frames.
+    assert!(m.can().tx.iter().any(|f| f.id == 0x7f9), "{}", name);
     // The loop takes some 14 million instructions' time at 235.2 MHz.
     let spin = value(1, 0).unwrap();
     assert!((40_000..90_000).contains(&spin), "{}: the loop took {} us", name, spin);
