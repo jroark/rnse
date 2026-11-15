@@ -1791,6 +1791,292 @@ fn sdk_player_plays_an_mp3() {
     assert_eq!(m.radio.volume, 10, "{}: two detents louder", name);
 }
 
+/// The SD loader's menu (sdk/examples/sdboot): a card with several
+/// programs (NAME.BIN) offers them, a loader among them as RNSE.BIN
+/// left out; the select knob chooses, SELECT runs, the program comes
+/// back to the menu with it chosen, and RETURN runs it again.  And a
+/// loader chosen from the menu takes over from the one on the disc, as
+/// it does on a unit whose disc has an older loader that runs RNSE.BIN.
+#[test]
+fn sd_loader_offers_a_menu_of_programs() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    let loader = std::fs::read(sdk.join("out/sdboot-192.bin")).unwrap();
+    assert!(sdk_example(&image, Model::Rnse192, "returntest").is_some());
+    let r17 = std::fs::read(sdk.join("out/returntest-192.bin")).unwrap();
+    assert!(sdk_example(&image, Model::Rnse192, "returnapi").is_some());
+    let r23 = std::fs::read(sdk.join("out/returnapi-192.bin")).unwrap();
+    let flash = m.board.flash.clone();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    let press = |m: &mut Machine, key: &str| {
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(200 * m.cycles_per_ms()), Stop::Budget);
+        assert!(m.panel_key(key, false));
+        assert_eq!(m.run(300 * m.cycles_per_ms()), Stop::Budget);
+    };
+    let card = rnse::fat::card("TESTS", &[
+        rnse::fat::Entry::file("RNSE.BIN", loader.clone()),
+        rnse::fat::Entry::file("A17.BIN", r17.clone()),
+        rnse::fat::Entry::file("B23.BIN", r23),
+    ], None).unwrap();
+    let at = m.console.len();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let menu = until(&mut m, at, "> A17.BIN", 30).unwrap_or_else(|| panic!("{}: no menu: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    let shown = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    assert!(shown.contains("  B23.BIN") && !shown.contains("RNSE.BIN"), "{}: {}", name, shown);
+    assert!(!shown.contains("rnse sdk: returntest"), "{}: nothing runs by itself", name);
+    // The display key works with the menu up: open, then closed again
+    // (CLAUDE.md, "Mandatory hardware behavior").
+    press(&mut m, "EJECT");
+    assert_eq!(m.run(3000 * ms), Stop::Budget);
+    assert!(m.board.display_pos <= 94, "{}: the display did not open from the menu: {}", name, m.board.display_pos);
+    press(&mut m, "EJECT");
+    assert_eq!(m.run(3000 * ms), Stop::Budget);
+    assert!(m.board.display_pos >= 894, "{}: the display did not close: {}", name, m.board.display_pos);
+    // The knob to the second, SELECT: it runs and comes back to the
+    // menu, with it chosen.
+    assert!(m.panel_knob("main", 1));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    press(&mut m, "SELECT");
+    let back = until(&mut m, menu, "TEST RETURNED: 23", 60).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[menu..])));
+    until(&mut m, back, "> B23.BIN", 30).unwrap_or_else(|| panic!("{}: not back at the menu: {}", name, String::from_utf8_lossy(&m.console[back..])));
+    // RETURN: the same again.
+    assert_eq!(m.run(1500 * ms), Stop::Budget);
+    let at = m.console.len();
+    press(&mut m, "RETURN");
+    until(&mut m, at, "TEST RETURNED: 23", 60).unwrap_or_else(|| panic!("{}: RETURN does not rerun: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    // Back to the first.
+    let at = m.console.len();
+    assert_eq!(m.run(1500 * ms), Stop::Budget);
+    assert!(m.panel_knob("main", -1));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    press(&mut m, "SELECT");
+    until(&mut m, at, "TEST RETURNED: 17", 60).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    let text = String::from_utf8_lossy(&m.console).into_owned();
+    assert_eq!(text.matches("rnse sdk: returntest").count(), 3, "{}", name);
+    m.eject_card(0);
+    assert_eq!(m.run(500 * ms), Stop::Budget);
+
+    // A loader under another name, chosen from the menu, becomes the
+    // one programs return to.
+    let card = rnse::fat::card("CHAIN", &[
+        rnse::fat::Entry::file("LOADER.BIN", loader),
+        rnse::fat::Entry::file("A17.BIN", r17),
+    ], None).unwrap();
+    let at = m.console.len();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    // (A17, run last, is chosen: this card has it too.)
+    until(&mut m, at, "> A17.BIN", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    assert!(m.panel_knob("main", -1));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    let menu = until(&mut m, at, "> LOADER.BIN", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    press(&mut m, "SELECT");
+    // The loader from the card starts, finds the card in, and offers
+    // its menu; from there, A17.
+    let started = until(&mut m, menu, "rnse sdk: sdboot", 30).expect("the loader from the card starts");
+    until(&mut m, started, "> LOADER.BIN", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[started..])));
+    assert!(m.panel_knob("main", 1));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    press(&mut m, "SELECT");
+    until(&mut m, started, "TEST RETURNED: 17", 60).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[started..])));
+    assert_eq!(m.board.flash, flash, "{}", name);
+    let text = String::from_utf8_lossy(&m.console).into_owned();
+    assert!(!text.contains("unexpected") && !text.contains("LOAD ERROR"), "{}: {}", name, &text[text.len().saturating_sub(1500)..]);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
+/// Android Auto's video on the 192 (sdk/examples/h264bench): the
+/// stock software starts the SD loader, the loader the benchmark, which
+/// decodes an H.264 stream from the card as a phone would send it
+/// (tests/data/margin.264: twelve synthetic frames of 800x480 made by
+/// tools/aa-streams.sh) and finds every frame as ffmpeg decodes it
+/// (margin.crc, the CRC-32s ffmpeg's frames have), twice: with the
+/// caches as the stock software leaves them and the decoder as it came,
+/// and with the caches set up anew (`cache_setup`: index modes off, P1
+/// copy-back) and the decoder's direct copy, under the modelled caches.
+#[test]
+fn sdk_decodes_h264_from_a_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "h264bench").is_none() { return }
+    let bench = std::fs::read(sdk.join("out/h264bench-192.bin")).unwrap();
+    let entries = vec![
+        rnse::fat::Entry::file("RNSE.BIN", bench),
+        rnse::fat::Entry::file("MARGIN.264", include_bytes!("data/margin.264").to_vec()),
+        rnse::fat::Entry::file("MARGIN.CRC", include_bytes!("data/margin.crc").to_vec()),
+    ];
+    let card = rnse::fat::card("VIDEO", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let flash = m.board.flash.clone();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    let text = loop {
+        assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        if text.contains("DONE.") || m.cpu.cycles > 120_000 * ms {
+            break text;
+        }
+    };
+    let tail = &text[text.len().saturating_sub(1200)..];
+    assert!(text.contains("rnse sdk: h264bench"), "{}: {:?}", name, tail);
+    // Each frame's line is the CRC-32 of the frames up to it, which is
+    // what each line of the .CRC file has.
+    let want: Vec<&str> = std::str::from_utf8(include_bytes!("data/margin.crc")).unwrap().lines().collect();
+    assert_eq!(want.len(), 12);
+    for crc in &want {
+        assert_eq!(text.matches(&format!("{} ", crc)).count(), 2, "{}: frame CRC {} not seen once a pass: {:?}", name, crc, tail);
+    }
+    let rows: Vec<&str> = text.lines().filter(|l| l.contains("MARGIN ") && (l.starts_with("STOCK ") || l.starts_with("COPY+CB+NOIX "))).collect();
+    assert_eq!(rows.len(), 2, "{}: {:?}", name, tail);
+    for row in rows {
+        assert!(row.ends_with(" OK"), "{}: {}", name, row);
+    }
+    assert!(!text.contains("unexpected"), "{}: {:?}", name, tail);
+    // And back to the SD loader, with the caches as the program found
+    // them and the flash as it was.
+    let at = text.find("DONE.").unwrap();
+    until(&mut m, at, "TEST RETURNED: 0", 90).unwrap_or_else(|| panic!("{}: not back at the loader: {:?}", name, String::from_utf8_lossy(&m.console[at..])));
+    assert_eq!(m.board.flash, flash, "{}", name);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
+/// Sound as samples from a program of our own (sdk/src/pcm.c,
+/// sdk/examples/pcmtest): each card processor in turn gets the SDK's
+/// player and plays two tones, fed by one DMA transfer and by DMA in
+/// blocks, and the amplifier gives out each at its pitch, for its two
+/// seconds, at the converter's 44.1 kHz, without a break.
+#[test]
+fn sdk_pcm_plays_through_both_card_processors() {
+    use rnse::board::Model;
+    use rnse::dev::radio::Radio;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "pcmtest").is_none() { return }
+    let program = std::fs::read(sdk.join("out/pcmtest-192.bin")).unwrap();
+    let card = rnse::fat::card("SOUND", &[rnse::fat::Entry::file("RNSE.BIN", program)], None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let flash = m.board.flash.clone();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    m.speaker = Some(Vec::new());
+    let text = loop {
+        assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        if text.contains("DONE.") || m.cpu.cycles > 60_000 * ms {
+            break text;
+        }
+    };
+    // (What the converters sent last reaches the speaker a little later.)
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let tail = &text[text.len().saturating_sub(1500)..];
+    assert!(text.contains("rnse sdk: pcmtest"), "{}: {:?}", name, tail);
+    assert!(!text.contains("FAILED") && !text.contains("DID NOT START"), "{}: {:?}", name, tail);
+    let rates: Vec<u32> = text.lines().filter_map(|l| l.trim().strip_prefix("SAMPLES A SECOND ")).filter_map(|v| v.trim().parse().ok()).collect();
+    assert_eq!(rates.len(), 4, "{}: {:?}", name, tail);
+    assert!(rates.iter().all(|r| r.abs_diff(44_100) <= 20), "{}: every way at 44.1 kHz: {:?}", name, rates);
+    assert_eq!(m.radio.source, Radio::SOURCE_DECODER, "{}", name);
+    for d in &m.board.media.dsps {
+        assert_eq!(d.fault, None, "{}: {}", name, d.name);
+    }
+    // The pitch of each half second of the right channel: the six
+    // tones, in their order, each for its two seconds.
+    let heard = m.speaker.take().unwrap();
+    let right: Vec<i16> = heard.iter().skip(1).step_by(2).copied().collect();
+    let pitches: Vec<u32> = right.chunks(22_050).map(|c| 2 * c.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as u32).collect();
+    for want in [440, 550, 880, 1100] {
+        let halves = pitches.iter().filter(|&&p| p.abs_diff(want) <= 4).count();
+        assert!(halves >= 3, "{}: {} Hz heard for {} half seconds: {:?}", name, want, halves, pitches);
+    }
+    // No break in a tone: within each half second that is one tone
+    // throughout, no step between two samples larger than that tone's
+    // sine makes.  (Where one tone ends and the next starts, a step is
+    // what it is.)
+    let chunks: Vec<&[i16]> = right.chunks(22_050).collect();
+    for k in 1..chunks.len().saturating_sub(1) {
+        let (chunk, pitch) = (chunks[k], pitches[k]);
+        let Some(&hz) = [440u32, 550, 880, 1100].iter().find(|&&f| pitch.abs_diff(f) <= 4) else { continue };
+        // (The same tone on both sides: not where one starts or ends.)
+        if pitches[k - 1].abs_diff(hz) > 4 || pitches[k + 1].abs_diff(hz) > 4 {
+            continue;
+        }
+        let peak = chunk.iter().map(|v| i32::from(*v).abs()).max().unwrap();
+        let largest = chunk.windows(2).map(|w| (i32::from(w[1]) - i32::from(w[0])).abs()).max().unwrap();
+        // (pcmtest's sine takes eight bits of its phase: its steps are
+        // up to a fifth or so uneven.  A break is a step of the order of
+        // the whole amplitude.)
+        let slope = (1.4 * 2.0 * std::f64::consts::PI * f64::from(hz) / 44_100.0 * f64::from(peak)) as i32;
+        assert!(peak > 0 && largest <= slope + 2, "{}: {} Hz: a step of {} where its sine of {} has at most {}", name, hz, largest, peak, slope);
+    }
+    assert!(!text.contains("unexpected"), "{}: {:?}", name, tail);
+    // And back to the SD loader, with the flash as it was.
+    let at = text.find("DONE.").unwrap();
+    until(&mut m, at, "TEST RETURNED: 0", 60).unwrap_or_else(|| panic!("{}: not back at the loader: {:?}", name, String::from_utf8_lossy(&m.console[at..])));
+    assert_eq!(m.board.flash, flash, "{}", name);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
+/// RETURN held for two seconds (CLAUDE.md, "Mandatory hardware
+/// behavior"): in a program the SD loader started, back to the loader
+/// (and a RETURN still held then is not taken for a new one); in the
+/// loader, back to the stock software: the display opens, the disc is
+/// ejected, and the unit starts anew, its flash untouched.
+#[test]
+fn return_held_goes_back_to_the_loader_and_from_there_to_stock() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    assert!(sdk_example(&image, Model::Rnse192, "returntest2").is_some());
+    let second = std::fs::read(sdk.join("out/returntest2-192.bin")).unwrap();
+    let flash = m.board.flash.clone();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    let card = rnse::fat::card("HOLD", &[rnse::fat::Entry::file("SECOND.BIN", second)], None).unwrap();
+    let at = m.console.len();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let started = until(&mut m, at, "rnse sdk: returntest2", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    // Held within the program's five seconds: the loader again, before
+    // the program would have returned by itself (status 23).
+    assert!(m.panel_key("RETURN", true));
+    assert_eq!(m.run(2600 * ms), Stop::Budget);
+    let text = String::from_utf8_lossy(&m.console[started..]).into_owned();
+    assert!(text.contains("TEST ENDED BY HOLDING RETURN"), "{}: {}", name, text);
+    assert!(!text.contains("TEST RETURNED: 23"), "{}: {}", name, text);
+    // Still held, and for longer than two seconds: not the loader's own
+    // hold, which would leave for the stock software.
+    assert_eq!(m.run(2500 * ms), Stop::Budget);
+    assert!(m.panel_key("RETURN", false));
+    assert_eq!(m.run(1500 * ms), Stop::Budget);
+    assert!(!String::from_utf8_lossy(&m.console[started..]).contains("BACK TO THE STOCK SOFTWARE"), "{}", name);
+    assert!(m.atapi().image.is_some(), "{}: the disc is still in", name);
+    // A new hold in the loader: display open, disc out, a new start.
+    let at = m.console.len();
+    assert!(m.panel_key("RETURN", true));
+    let stop = m.run(2600 * ms);
+    assert!(m.panel_key("RETURN", false));
+    let stop = if stop == Stop::Budget { m.run(15_000 * ms) } else { stop };
+    let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    assert!(text.contains("BACK TO THE STOCK SOFTWARE"), "{}: {}", name, text);
+    assert!(text.contains("EJECTING THE DISC"), "{}: {}", name, text);
+    assert!(m.board.display_pos <= 94, "{}: the display is not open: {}", name, m.board.display_pos);
+    assert!(m.atapi().image.is_none(), "{}: the disc was not ejected", name);
+    assert!(stop != Stop::Budget && m.reset_requested, "{}: no new start: {:?} {:?}", name, stop, m.cpu.fault);
+    assert_eq!(m.board.flash, flash, "{}", name);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
 /// Programs from an SD card (sdk/examples/sdboot): the stock software
 /// starts the loader from the disc, the loader starts the card
 /// processor of a slot with the installed software's program out of
