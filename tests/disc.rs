@@ -1760,3 +1760,215 @@ fn programs_come_from_an_sd_card() {
         assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
     }
 }
+
+/// Resident shell: actual SH-4 app code, audio, persistence and malformed input.
+#[test]
+fn modern_resident_shell() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let (mut m, name, _) = sdk_example(&image, Model::Rnse192, "modern")
+        .expect("modern test requires the SH-4 compiler");
+    let variants = fw::load_variants(&image).unwrap();
+    let v = variants.iter().find(|v| v.name == name).unwrap();
+    m.install(v, &fw::IndexInfo::from_disc(&image, &name).unwrap());
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    assert!(std::process::Command::new("sh").arg(sdk.join("apps/build.sh")).arg("trip").status().unwrap().success());
+    let good = std::fs::read(sdk.join("out/app-trip.RNA")).unwrap();
+    let mut incompatible = good.clone();
+    incompatible[7] = 99;
+    let mut oversized = good.clone();
+    oversized[16..20].copy_from_slice(&0x80001u32.to_be_bytes());
+    let mut entry = good.clone();
+    entry[28..32].copy_from_slice(&0xffffffffu32.to_be_bytes());
+    let mut bad = good.clone();
+    *bad.last_mut().unwrap() ^= 1;
+    let entries = vec![
+        rnse::fat::Entry::file("TRIP.RNA", good),
+        rnse::fat::Entry::file("BAD.RNA", bad),
+        rnse::fat::Entry::file("ABI.RNA", incompatible),
+        rnse::fat::Entry::file("SIZE.RNA", oversized),
+        rnse::fat::Entry::file("ENTRY.RNA", entry),
+        rnse::fat::Entry::file("TONES.MP3", include_bytes!("data/tones.mp3").to_vec()),
+    ];
+    let card = rnse::fat::card("MODERN", &entries, None).unwrap();
+    m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap());
+    let ms = m.cycles_per_ms();
+    let run = |m: &mut Machine, n| assert_eq!(m.run(n * ms), Stop::Budget, "{:?} {}", m.cpu.fault, String::from_utf8_lossy(&m.console));
+    let press = |m: &mut Machine, key| {
+        assert!(m.panel_key(key, true)); run(m, 150);
+        assert!(m.panel_key(key, false)); run(m, 150);
+    };
+    run(&mut m, 2000);
+    assert!(String::from_utf8_lossy(&m.console).contains("modern: ready"));
+    let shot = |m: &mut Machine, name| {
+        let (w,h,rgb)=m.render();
+        std::fs::create_dir_all("out/modern").unwrap();
+        std::fs::write(format!("out/modern/{name}.png"), rnse::png::encode_rgb(w,h,&rgb)).unwrap();
+        rgb
+    };
+    let radio = shot(&mut m, "radio");
+    assert!(radio.chunks(3).any(|p| p[0]>100&&p[1]<50));
+    m.panel_knob("volume", 2); run(&mut m, 200);
+    assert_eq!(m.radio.volume, 10);
+    press(&mut m, "MEDIA"); press(&mut m, "SOFT_BL"); run(&mut m, 8000);
+    assert!(String::from_utf8_lossy(&m.console).contains("modern: card ready"));
+    shot(&mut m, "media");
+    press(&mut m, "SELECT"); run(&mut m, 2000);
+    assert!(m.board.media.dsps[0].loud_frames > 0);
+    press(&mut m, "INFO"); press(&mut m, "SELECT");
+    assert!(String::from_utf8_lossy(&m.console).contains("modern: app started"));
+    let before=shot(&mut m, "app");
+    m.panel_knob("main", 3); run(&mut m, 200);
+    assert_ne!(before, shot(&mut m, "app-adjusted"));
+    press(&mut m, "RETURN");
+    assert!(String::from_utf8_lossy(&m.console).contains("modern: app exited"));
+    m.panel_knob("main", 1); run(&mut m, 200);
+    let starts=String::from_utf8_lossy(&m.console).matches("modern: app started").count();
+    press(&mut m, "SELECT");
+    assert_eq!(starts, String::from_utf8_lossy(&m.console).matches("modern: app started").count());
+    shot(&mut m, "bad-app");
+    for _ in 0..3 {
+        m.panel_knob("main", 1); run(&mut m, 200);
+        press(&mut m, "SELECT");
+        assert_eq!(starts, String::from_utf8_lossy(&m.console).matches("modern: app started").count());
+    }
+    // Empty second slot is recoverable through physical controls.
+    press(&mut m, "SOFT_TR");
+    run(&mut m, 8000);
+    shot(&mut m, "no-card");
+    press(&mut m, "RADIO");
+    assert_eq!(m.radio.source, rnse::dev::radio::Radio::SOURCE_TUNER);
+    let saved=m.board.nvram.clone();
+    let (mut reboot,_,_)=sdk_example(&image, Model::Rnse192, "modern").unwrap();
+    reboot.install(v, &fw::IndexInfo::from_disc(&image, &name).unwrap());
+    reboot.board.nvram.copy_from_slice(&saved);
+    run(&mut reboot,2000);
+    assert_eq!(reboot.radio.volume,10);
+    let (mut invalid,_,_)=sdk_example(&image, Model::Rnse192, "modern").unwrap();
+    invalid.install(v, &fw::IndexInfo::from_disc(&image, &name).unwrap());
+    invalid.board.nvram.fill(0xa5);
+    run(&mut invalid,2000);
+    assert_eq!(invalid.radio.volume,8, "corrupt settings restore defaults");
+    assert_eq!(m.resets,0);
+}
+
+#[test]
+fn modern_installed_recovery() {
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let custom = firmware_disc(&image, "modern").expect("SH-4 toolchain required");
+    let mut m = rom_192(&image, &custom, &rom).unwrap();
+    until(&mut m,0,"modern: ready",600).expect("stock loader must install and boot modern");
+    let ms=m.cycles_per_ms();
+    assert_eq!(m.run(12_000*ms),Stop::Budget);
+    assert_eq!(m.resets,0);
+    assert_eq!(&m.board.nvram[0x3ff04..0x3ff08], &[0,0,0,0], "boot guard healthy");
+    m.atapi().load(image.clone());
+    for key in ["SETUP", "SELECT"] {
+        if key=="SELECT" {m.panel_knob("main",1);m.run(200*ms);}
+        m.panel_key(key,true);m.run(200*ms);m.panel_key(key,false);m.run(200*ms);
+    }
+    // RETURN from recovery cancels, never erases.
+    let directory=m.board.flash[0xc000..0xe000].to_vec();
+    m.panel_key("RETURN",true);m.run(200*ms);m.panel_key("RETURN",false);m.run(200*ms);
+    assert_eq!(directory,m.board.flash[0xc000..0xe000]);
+    m.panel_knob("main",1);m.run(200*ms);
+    m.panel_key("SELECT",true);m.run(200*ms);m.panel_key("SELECT",false);m.run(200*ms);
+    m.panel_key("SELECT",true);m.run(3000*ms);m.panel_key("SELECT",false);
+    until(&mut m,0,"[fw] SOUND_TSK START",600).expect("stock firmware restored");
+    stock_is_in_flash(&m,&image);
+}
+
+/// Built-ins exercise real firmware editing, SRAM and factory CAN transport.
+/// The peer below is a protocol fixture, not real Audi-module compatibility evidence.
+#[test]
+fn modern_builtins() {
+    use rnse::board::Model;
+    use rnse::dev::{hcan::Frame, tp20::Peer};
+    let Some(image) = disc() else { return };
+    let (mut m, name, _) = sdk_example(&image, Model::Rnse192, "modern")
+        .expect("modern built-in test requires SH-4 compiler");
+    let variants = fw::load_variants(&image).unwrap();
+    let v = variants.iter().find(|v| v.name == name).unwrap();
+    m.install(v, &fw::IndexInfo::from_disc(&image, &name).unwrap());
+    let ms=m.cycles_per_ms();
+    let run=|m:&mut Machine,n|assert_eq!(m.run(n*ms),Stop::Budget,"{:?}",m.cpu.fault);
+    let press=|m:&mut Machine,key|{m.panel_key(key,true);run(m,150);m.panel_key(key,false);run(m,150);};
+    let turn=|m:&mut Machine,n|{m.panel_knob("main",n);run(m,100);};
+    let shot=|m:&mut Machine,name|{let(w,h,rgb)=m.render();std::fs::create_dir_all("out/modern").unwrap();std::fs::write(format!("out/modern/{name}.png"),rnse::png::encode_rgb(w,h,&rgb)).unwrap();rgb};
+    run(&mut m,2000);
+    press(&mut m,"CAR");
+    let unknown=shot(&mut m,"vehicle-no-data");
+    m.can_send_cyclic(Frame::new(0x271,&[3]),100);
+    run(&mut m,1200);
+    assert!(unknown != shot(&mut m,"vehicle"), "vehicle data must refresh");
+    // Six persistent local contacts, empty by default. Write AB / 01 through rotary editor.
+    press(&mut m,"NAME");press(&mut m,"SELECT");press(&mut m,"SOFT_TL");
+    turn(&mut m,1);press(&mut m,"SELECT");turn(&mut m,1);press(&mut m,"SELECT");press(&mut m,"SOFT_BR");
+    press(&mut m,"SOFT_TR");press(&mut m,"SELECT");turn(&mut m,1);press(&mut m,"SELECT");press(&mut m,"SOFT_BR");
+    shot(&mut m,"contact");
+    let latest=|m:&Machine| {let a=&m.board.nvram[0x3fc00..0x3fd80];let b=&m.board.nvram[0x3fd80..0x3ff00];if u32::from_be_bytes(a[4..8].try_into().unwrap())>u32::from_be_bytes(b[4..8].try_into().unwrap()){a.to_vec()}else{b.to_vec()}};
+    let book=latest(&m);
+    assert_eq!(&book[8..11],b"AB\0");assert_eq!(&book[28..31],b"01\0");
+    // Cancel leaves the original name. Delete requires explicit soft-key confirmation.
+    press(&mut m,"SOFT_TL");press(&mut m,"SOFT_TR");press(&mut m,"RETURN");
+    assert_eq!(book,latest(&m));
+    press(&mut m,"SOFT_BL");press(&mut m,"RETURN");assert_eq!(book,latest(&m));
+    // Saved latitude and longitude, with bounds checked before saving.
+    let enter=|m:&mut Machine,text:&str| {let chars="0123456789-.";let mut at=0;press(m,"SOFT_TR");for c in text.chars(){let next=chars.find(c).unwrap() as i32;turn(m,next-at);press(m,"SELECT");at=next;}press(m,"SOFT_BR");};
+    press(&mut m,"NAV");press(&mut m,"SOFT_BR");press(&mut m,"SOFT_TR");
+    enter(&mut m,"90.0001");assert_eq!(book,latest(&m));
+    shot(&mut m,"invalid-coordinate");
+    press(&mut m,"RETURN");press(&mut m,"SOFT_TR");enter(&mut m,"37.7749");
+    press(&mut m,"SOFT_BR");enter(&mut m,"-122.4194");
+    let location=latest(&m);
+    assert_eq!(i32::from_be_bytes(location[268..272].try_into().unwrap()),377749);
+    assert_eq!(i32::from_be_bytes(location[272..276].try_into().unwrap()),-1224194);
+    shot(&mut m,"destination");
+    // Original fixed CAN IDs, acknowledged segmented commands and actual module replies.
+    m.can_peers.push(Peer::new(0x6c4,0x6c5));
+    let mut handled=0usize;
+    let mut call=-1i32;
+    let pump=|m:&mut Machine,handled:&mut usize,call:&mut i32,n:u64|{
+        for _ in 0..n/100 {
+            run(m,100);
+            let blocks=m.can_peers[0].received[*handled..].to_vec();
+            *handled+=blocks.len();
+            for block in blocks {
+                let cmd=String::from_utf8(block).unwrap();
+                let response=if cmd=="AT\r" {"\r\nOK\r\n".to_string()}
+                    else if cmd=="AT+CLCC\r" {if *call<0 {"\r\nOK\r\n".to_string()} else {format!("\r\n+CLCC: 1,0,{},0,0,\"01\",129\r\nOK\r\n",*call)}}
+                    else if cmd=="ATD01;\r" {*call=2;"\r\nOK\r\n".to_string()}
+                    else if cmd=="ATA\r" {*call=0;"\r\nOK\r\n".to_string()}
+                    else if cmd=="AT+CHUP\r" {*call=-1;"\r\nOK\r\n".to_string()}
+                    else {panic!("unexpected telephone command {cmd:?}")};
+                let frames=m.can_peers[0].send(response.as_bytes());
+                for f in frames {m.can_frame(f);}
+            }
+        }
+    };
+    press(&mut m,"TEL");press(&mut m,"SOFT_TL");pump(&mut m,&mut handled,&mut call,800);
+    assert!(m.can_peers[0].open);
+    assert!(m.can_peers[0].received.iter().any(|c|c==b"AT\r"));
+    press(&mut m,"NAME");press(&mut m,"SELECT");press(&mut m,"SOFT_BR");
+    pump(&mut m,&mut handled,&mut call,500);
+    // Let the current query finish, then make one explicit request.
+    press(&mut m,"SOFT_BR");pump(&mut m,&mut handled,&mut call,1000);
+    assert!(m.can_peers[0].received.iter().any(|c|c==b"ATD01;\r"));
+    assert_eq!(call,2);
+    shot(&mut m,"telephone-dialling");
+    call=0;pump(&mut m,&mut handled,&mut call,1500);shot(&mut m,"telephone-active");
+    pump(&mut m,&mut handled,&mut call,200);press(&mut m,"SOFT_BL");pump(&mut m,&mut handled,&mut call,1500);
+    assert!(m.can_peers[0].received.iter().any(|c|c==b"AT+CHUP\r"));
+    // Incoming call and answer use replies, rather than local connected flags.
+    call=4;pump(&mut m,&mut handled,&mut call,1500);shot(&mut m,"telephone-ringing");
+    press(&mut m,"SOFT_BR");pump(&mut m,&mut handled,&mut call,1500);
+    assert!(m.can_peers[0].received.iter().any(|c|c==b"ATA\r"));
+    assert_eq!(call,0);
+    // Fresh boot restores notebook independently of shell settings and guard.
+    let saved=m.board.nvram.clone();
+    let(mut reboot,_,_)=sdk_example(&image,Model::Rnse192,"modern").unwrap();
+    reboot.board.nvram.copy_from_slice(&saved);run(&mut reboot,2000);
+    press(&mut reboot,"NAME");press(&mut reboot,"SELECT");shot(&mut reboot,"contact-restored");
+    assert_eq!(latest(&reboot),location);
+    assert_eq!(m.resets,0);
+}
