@@ -1359,3 +1359,73 @@ fn beacon_reports_its_progress_on_the_bus() {
     // The state it was started in, and the latch and port A as found.
     assert_eq!(m.can().tx.iter().filter(|f| f.id == 0x7f7).count(), 9, "{}", name);
 }
+
+/// The suite (sdk/examples/suite): a row of measurements in one run,
+/// every answer a record on the CAN bus.  Here against the emulator's
+/// own models, which shows that the program asks properly; on a unit
+/// the answers are what the models are corrected by.
+#[test]
+fn suite_runs_its_measurements() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some((mut m, name, custom)) = sdk_example(&image, Model::Rnse192, "suite") else { return };
+    let ms = m.cycles_per_ms();
+    m.atapi().load(custom);
+    m.atapi().times = true;
+    // Up to the thirty seconds for hands.
+    let mut waited = 0;
+    while !String::from_utf8_lossy(&m.console).contains("KEYS AND KNOBS") {
+        assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        waited += 1;
+        assert!(waited < 60, "{}: {:?}", name, String::from_utf8_lossy(&m.console));
+    }
+    m.run(500 * ms);
+    assert!(m.panel_key("NAV", true));
+    m.run(300 * ms);
+    assert!(m.panel_key("NAV", false));
+    assert!(m.panel_knob("main", 3));
+    m.run(500 * ms);
+    assert!(m.panel_key("RETURN", true));
+    m.run(300 * ms);
+    assert!(m.panel_key("RETURN", false));
+    // The watchdog test ends the run: the emulator's bites after 1.5 s.
+    let stop = m.run(8_000 * ms);
+    let text = String::from_utf8_lossy(&m.console).into_owned();
+    assert_eq!(stop, Stop::Fault, "{}: {:?}", name, text);
+    assert!(m.reset_requested, "{}: {:?}", name, m.cpu.fault);
+    assert!(!text.contains("unexpected"), "{}: {:?}", name, text);
+    let records: Vec<(u8, u8, u32, u16)> = m.can().tx.iter().filter(|f| f.id == 0x7f8).map(|f| {
+        let d = f.data;
+        (d[0], d[1], u32::from_be_bytes([d[2], d[3], d[4], d[5]]), u16::from_be_bytes([d[6], d[7]]))
+    }).collect();
+    let value = |test: u8, item: u8| records.iter().find(|r| r.0 == test && r.1 == item).map(|r| r.2);
+    // Every test was opened, in order.
+    let opened: Vec<u8> = records.iter().filter(|r| r.1 == 0xfe).map(|r| r.0).collect();
+    assert_eq!(opened, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10], "{}", name);
+    // The loop takes some 14 million instructions' time at 235.2 MHz.
+    let spin = value(1, 0).unwrap();
+    assert!((40_000..90_000).contains(&spin), "{}: the loop took {} us", name, spin);
+    assert!(value(1, 1).unwrap() > 2_000, "{}: adding up took {:?} us", name, value(1, 1));
+    // The display is closed: input 3 at its top.
+    assert_eq!(value(2, 3), Some(1023), "{}", name);
+    // Port 0 is the strobe's, an output; the latch is as the ROM and
+    // board_init leave it.
+    assert_eq!(records.iter().find(|r| r.0 == 3 && r.1 == 0).map(|r| r.3), Some(1), "{}", name);
+    assert_eq!(value(3, 17), Some(0x3f9f), "{}", name);
+    // The clock chip's counter is a 64 Hz one.
+    assert_eq!(value(4, 0), Some(64), "{}", name);
+    assert!(value(5, 0).unwrap() < 1_000, "{}: faceplate after {:?} ms", name, value(5, 0));
+    // The drive: the disc's size, and 64 sectors at 5.5 ms each.
+    assert_eq!(value(7, 9), Some(image.len() as u32 / 2048), "{}", name);
+    for item in 10..=13 {
+        let t = value(7, item).unwrap();
+        assert!((340_000..500_000).contains(&t), "{}: read {} took {} us", name, item, t);
+    }
+    // The key and the knob were seen.
+    assert!(records.iter().any(|r| r.0 == 9 && r.1 == 0 && r.2 & 1 << 2 != 0), "{}: NAV not seen", name);
+    let knob: Vec<i32> = records.iter().filter(|r| r.0 == 9 && r.1 == 2).map(|r| r.2 as i32).collect();
+    assert!(knob.last().is_some_and(|v| v.abs() == 3), "{}: the knob's three steps not seen: {:?}", name, knob);
+    // And the watchdog: records every 10 ms up to the emulator's 1.5 s.
+    let last = records.iter().filter(|r| r.0 == 10 && r.1 == 0).map(|r| r.2).max().unwrap();
+    assert!((1_400..=1_600).contains(&last), "{}: reset {} ms after the last strobe", name, last);
+}
