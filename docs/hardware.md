@@ -340,12 +340,18 @@ them five times and stretched the start-up by most of a minute.  The firmware al
 
 Volume and source go to this processor too: `19 [01 level]`, level 0
 to 30, and `81 [08 source level ..]`, 3 the tuner and 1 the CD drive.
-(One such block as a real radio processor sent it unasked, as far as
-the receiver's 32 bytes of buffer held it, heard by a program that
-only listened: `00 88 00 39`, that is from the radio, command 0x88, 57
-bytes, then `20 10 0c 14 07 fa 3d 0e`, `00 00 00 00`, `23 31 20 66 6f
-72 20 20`, which is the text "#1 for  " of the station it was tuned
-to, `00 00 00 0a`, `0a 20 01 65`.)
+A real radio processor, asked by a program as its own software asks
+(`sdk/examples/suite`), answered the version request with
+`A2220141-080807` and a zero byte, and the status request with 57
+bytes: `20 10 0c 14 07 fa 3d 0e`, `00 00 00 00`, `23 31 20 66 6f 72 20
+20`, which is the text "#1 for  " of the station it was tuned to,
+`00 00 00 0a 0a 20 01 65 00 00 00 01 ff`, then from offset 33 `03 07
+01 00 00 00 01 00 00 00 00 00 03 00 00 00` (the tuner as source,
+volume 7) and eight zero bytes.  The first eight bytes hold what the
+tuner is tuned to: given this block the emulated unit shows 102.1 on
+its radio screen, which was that unit's station.  The stand-in sends
+this block now, with its own source and volume and the text blank; it
+had 49 bytes of zeroes around those two.
 Its status block, the answer to request 0x88 and also sent unasked,
 carries four fields in its first eight bytes (not understood) and
 sixteen bytes of amplifier state from offset 33: source, volume, and

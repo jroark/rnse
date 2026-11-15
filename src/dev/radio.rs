@@ -43,6 +43,14 @@
 //! expects does not come; everything else queued for the radio waits
 //! behind it.
 
+/// A status block as a unit's radio processor sent it; see
+/// [`Radio::status`].  (It had source 3 and volume 7 at 33 and 34, and
+/// "#1 for  " where the blanks are.)
+const STATUS: [u8; 57] = [
+    0x20, 0x10, 0x0c, 0x14, 0x07, 0xfa, 0x3d, 0x0e, 0x00, 0x00, 0x00, 0x00, b' ', b' ', b' ', b' ', b' ', b' ', b' ', b' ', 0x00, 0x00, 0x00, 0x0a, 0x0a, 0x20, 0x01, 0x65, 0x00,
+    0x00, 0x00, 0x01, 0xff, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
 /// Command number of the radio's acknowledgement of a setting.
 pub const ACK: u8 = 0x20;
 
@@ -185,12 +193,16 @@ impl Radio {
         10f32.powf(-((30 - self.volume.min(30)) as f32) * 2.0 / 20.0)
     }
 
-    /// The status block (see the module's notes): 33 bytes of which
-    /// the first eight are four fields, then sixteen of amplifier
-    /// state.  Its real length is not known; this is as far as the
-    /// main unit reads.
+    /// The status block (see the module's notes): 57 bytes, of which
+    /// the first eight are four fields and sixteen from offset 33 the
+    /// amplifier's state.  The rest is as a real radio processor sent
+    /// it to a program that asked (`sdk/examples/suite` on a unit: a
+    /// North American one, tuned to an FM station, the unit's software
+    /// not running): what the bytes mean is not known beyond source
+    /// and volume, and the eight characters of the station's text are
+    /// left blank here.
     fn status(&self) -> Frame {
-        let mut d = [0u8; 49];
+        let mut d = STATUS;
         d[33] = self.source;
         d[34] = self.volume;
         Frame::new(0x88, &d)
@@ -200,8 +212,10 @@ impl Radio {
         match f.cmd {
             // Version request: 16 bytes, the first eight are the version
             // string the main unit checks against the installed software.
+            // A unit's answered `A2220141-080807` and a zero: the rest
+            // is taken to be a date, and is that one's here.
             0x0b => {
-                let mut id = [b' '; 16];
+                let mut id = *b"        -080807\0";
                 id[..8].copy_from_slice(&self.version);
                 vec![Frame::new(0x0b, &id)]
             }
@@ -243,8 +257,8 @@ mod tests {
         assert_eq!(r.cd_gain(), 0.0);
         let got = say(&mut r, Frame::new(0x19, &[1, 12]));
         assert_eq!(got[0], Frame::new(ACK, &[0]));
-        assert_eq!((got[1].cmd, got[1].data.len(), got[1].data[33], got[1].data[34]), (0x88, 49, 0, 12));
-        assert!(got[1].data[35..].iter().all(|b| *b == 0), "the rest of the amplifier's state is zero");
+        assert_eq!((got[1].cmd, got[1].data.len(), got[1].data[33], got[1].data[34]), (0x88, 57, 0, 12));
+        assert_eq!(got[1].data[42], 0, "the byte that would make the main unit ignore its volume knob");
         assert_eq!(r.cd_gain(), 0.0, "the tuner is not the CD drive");
         let got = say(&mut r, Frame::new(0x81, &[8, 1, 12, 0, 0, 0, 0, 1, 3]));
         assert_eq!((got[1].data[33], got[1].data[34]), (1, 12));
