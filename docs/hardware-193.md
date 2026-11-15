@@ -306,6 +306,10 @@ and 18 drive the display motor (assumed: 19 towards closed), input bit
 be high or the OS stops itself after four and a half seconds, waiting for the
 watchdog: presumably the supply voltage monitor.
 
+The SDK's display driver (`sdk/src/hw193.c`) runs the motor on that
+assumption, and the emulator's model agrees with it by construction;
+it has not been tried on a 193.
+
 ## Watchdog
 
 External, strobed through bit 0 of the port at 0xffc44008 from the

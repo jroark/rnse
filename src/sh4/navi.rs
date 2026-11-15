@@ -477,6 +477,17 @@ impl Navi {
         self.step_display(16);
     }
 
+    /// What the display's motor is driven to do: -1 towards open, 1
+    /// towards closed, 0 nothing (or both lines at once).
+    pub fn display_motor(&self) -> i32 {
+        let drive = self.raw_read(MOTOR_PORT + 8, 4) & self.raw_read(MOTOR_PORT + 4, 4);
+        match (drive >> 18) & 3 {
+            2 => 1,
+            1 => -1,
+            _ => 0,
+        }
+    }
+
     /// Move the fold-down display by `ms` milliseconds of motor time (a
     /// full sweep takes about 1.5 s) and update its sensors.
     pub fn step_display(&mut self, ms: u32) {
