@@ -663,6 +663,21 @@ has been seen so far:
 | play: where the file's data is on the card, as a byte address and a length (8000 bytes at a time) | `c701 001f` when it wants the next piece | the program reads the sectors itself, finds the MP3 frames, decodes, and sends the samples out of the audio serial interface; `c500` ends it (also on an error of the decoder) |
 | others | `f000`, or `ee01 code` for an error | port pins, clock stop (the processor's STOP instruction), status |
 
+Playing, word for word, as the North American driver does it (and
+`sdk/src/sd.c` after it): read register 0x3801 (`2203 0000 3801 0001`,
+answered `d301 0001 value`) and write it back with bit 6 set (`2303
+0000 3801 0001`, `f000`, the value): the audio output on; `3301 0081`
+and `3101 0001`, each `f000`; data word 0x0a5c cleared the same way;
+then `3400`, answered `f000` and at once `c701 001f`: "more".  To each
+`c701 n` the driver says `0401 0001` (`f000`) and eight words: the
+place on the card in bytes, 32 bits, the length in bytes, 32 bits
+(5000 at a time, not on sector boundaries), and four zeros.  When the
+file is at its end it says `0401 0000` instead (`f000`), and `c400`
+comes when the last of it has been played, to which the driver says
+`3901 0000`.  To stop in the middle it says `3500` (`f000`) and a
+second later takes bit 6 of 0x3801 back.  What the place looks like
+for a card that counts in sectors has not been seen.
+
 The file system is the main processor's business: it reads the
 partition table, the FAT and the directories through the sector
 command, lists the files in its own format, and tells the processor

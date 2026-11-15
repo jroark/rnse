@@ -1461,6 +1461,52 @@ fn suite_runs_its_measurements() {
     assert!((90..=130).contains(&last), "{}: reset {} ms after the last strobe", name, last);
 }
 
+/// Sound from a program of the SDK (sdk/examples/player): started from
+/// a card by the loader, it has the card processor play an MP3 file of
+/// that card and the radio processor's amplifier take the converter as
+/// its source, and what leaves the speaker is the file's two tones.
+#[test]
+fn sdk_player_plays_an_mp3() {
+    use rnse::board::Model;
+    use rnse::dev::radio::Radio;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "player").is_none() { return }
+    let player = std::fs::read(sdk.join("out/player-192.bin")).unwrap();
+    let song = include_bytes!("data/tones.mp3").to_vec();
+    let entries = vec![rnse::fat::Entry::file("RNSE.BIN", player), rnse::fat::Entry::file("TONES.MP3", song)];
+    let card = rnse::fat::card("MUSIC", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    assert_eq!(m.run(12_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = String::from_utf8_lossy(&m.console).into_owned();
+    let tail = &text[text.len().saturating_sub(400)..];
+    assert!(text.contains("rnse sdk: player"), "{}: {:?}", name, tail);
+    assert!(text.contains("playing: TONES   MP3"), "{}: {:?}", name, tail);
+    assert!(!text.contains("not played"), "{}: {:?}", name, tail);
+    let dsp = &m.board.media.dsps[0];
+    assert_eq!(dsp.fault, None, "{}", name);
+    assert!(dsp.loud_frames > 0, "{}: the card processor sends its converter only silence: {:?}", name, tail);
+    assert_eq!((m.radio.source, m.radio.volume), (Radio::SOURCE_DECODER, 8), "{}: the amplifier's source and volume", name);
+    // A second of it, and the tones where they belong.
+    m.speaker = Some(Vec::new());
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let heard = m.speaker.take().unwrap();
+    assert!(heard.len() > 80_000, "{}: {} samples in a second", name, heard.len());
+    for (channel, want) in [(0usize, 440.0f64), (1, 880.0)] {
+        let samples: Vec<f64> = heard.iter().skip(channel).step_by(2).map(|&v| f64::from(v)).collect();
+        let crossings = samples.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count() as f64;
+        let pitch = crossings / (samples.len() as f64 / 44_100.0);
+        assert!((pitch - want).abs() < want * 0.05, "{}: channel {} sounds at {} Hz, not {}", name, channel, pitch, want);
+    }
+    // The volume knob is the amplifier's.
+    assert!(m.panel_knob("volume", 2));
+    assert_eq!(m.run(1_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert_eq!(m.radio.volume, 10, "{}: two detents louder", name);
+}
+
 /// Programs from an SD card (sdk/examples/sdboot): the stock software
 /// starts the loader from the disc, the loader starts the card
 /// processor of a slot with the installed software's program out of
