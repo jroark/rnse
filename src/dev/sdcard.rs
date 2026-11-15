@@ -45,6 +45,14 @@ pub struct SdCard {
     pub old: bool,
     illegal: bool,
     busy: u32,
+    /// So many starts (CMD0) after which the card answers nothing: a
+    /// card that is not awake yet when the host first asks.
+    pub deaf: u32,
+    asleep: bool,
+    /// A MultiMediaCard: no application commands (CMD55 goes
+    /// unanswered, and CMD8), CMD1 in ACMD41's place, and an address
+    /// the host gives it with CMD3.
+    pub mmc: bool,
 }
 
 fn crc7(bytes: &[u8]) -> u8 {
@@ -82,7 +90,7 @@ impl Response {
 
 impl SdCard {
     pub fn new(card: Card) -> Self {
-        SdCard { card, state: IDLE, rca: 0, app: false, stream: None, commands: 0, sectors_read: 0, old: false, illegal: false, busy: 0 }
+        SdCard { card, state: IDLE, rca: 0, app: false, stream: None, commands: 0, sectors_read: 0, old: false, illegal: false, busy: 0, deaf: 0, asleep: false, mmc: false }
     }
 
     fn status(&self) -> u32 {
@@ -97,16 +105,39 @@ impl SdCard {
         // An illegal command is reported once, in the next response.
         let status = self.status() | if std::mem::take(&mut self.illegal) { 0x0040_0000 } else { 0 };
         let r1 = |v: u32| Response::Short(cmd, v);
+        if cmd == 0 {
+            self.asleep = self.deaf > 0;
+            self.deaf = self.deaf.saturating_sub(1);
+        } else if self.asleep {
+            return (Response::None, None);
+        }
         match (app, cmd) {
             (_, 0) => {
                 self.state = IDLE;
                 self.stream = None;
-                self.busy = if self.old { 3 } else { 0 };
+                self.busy = if self.old || self.mmc { 3 } else { 0 };
                 (Response::None, None)
             }
-            (false, 8) if self.old => {
+            (false, 8) if self.old || self.mmc => {
                 self.illegal = true;
                 (Response::None, None)
+            }
+            (_, 55) if self.mmc => {
+                self.illegal = true;
+                (Response::None, None)
+            }
+            (false, 1) if self.mmc => {
+                let waited = self.busy == 0;
+                self.busy = self.busy.saturating_sub(1);
+                if waited && arg & 0x00ff_8000 != 0 {
+                    self.state = READY;
+                }
+                (Response::Short(0x3f, 0x00ff_8000 | if waited { 0x8000_0000 } else { 0 }), None)
+            }
+            (false, 3) if self.mmc && (self.state == IDENT || self.state == STANDBY) => {
+                self.rca = (arg >> 16) as u16;
+                self.state = STANDBY;
+                (r1(status), None)
             }
             // A card of version 2 of the specification answers this one.
             (false, 8) if self.state == IDLE => (r1(arg & 0xfff), None),
@@ -138,7 +169,7 @@ impl SdCard {
                 (r1(r), None)
             }
             (false, 7) => {
-                if (arg >> 16) as u16 == self.rca && self.rca != 0 && self.state >= STANDBY {
+                if (arg >> 16) as u16 == self.rca && (self.rca != 0 || self.mmc) && self.state >= STANDBY {
                     self.state = TRANSFER;
                     (r1(status), None)
                 } else {

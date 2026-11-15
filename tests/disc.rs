@@ -1484,8 +1484,11 @@ fn programs_come_from_an_sd_card() {
         let entries = vec![rnse::fat::Entry::file("RNSE.BIN", probe)];
         let card = rnse::fat::card("RNSE", &entries, None).unwrap();
         // In the second slot an old card, of version 1 of the
-        // specification: no answer to CMD8, and busy for a while.
+        // specification: no answer to CMD8, and busy for a while; and
+        // one that is not awake at the first start, which the driver
+        // has to make as the stock driver does.
         m.board.media.old_cards = slot == 1;
+        m.board.media.deaf_cards = if slot == 1 { 2 } else { 0 };
         assert!(m.insert_card(slot, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
         let ms = m.cycles_per_ms();
         m.cpu.breakpoints.clear();

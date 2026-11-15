@@ -673,6 +673,13 @@ What is not modelled, or assumed:
   In HALT the real part runs on a divided clock; whether that slows
   its timer is not clear from the manual, and the emulator does not
   slow it.
+* Cards other than a plain SD card are the model's guesses made to
+  see what the stock driver does with them, not measurements:
+  `--sd-old` (no answer to CMD8, busy for three rounds), `--sd-deaf N`
+  (no answer to anything after the first N starts) and `--sd-mmc` (a
+  MultiMediaCard: no CMD8, no CMD55, CMD1, the host's address, and
+  selected by the address 0 the stock driver gives it, which the
+  specification reserves).
 * **A word sent too soon after another is lost, by the program's own
   design.**  It takes the words of a message's head in its host
   interrupt (0x0230, into a ring of 32 words at 0x0a64), but the words

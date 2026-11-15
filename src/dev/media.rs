@@ -35,6 +35,10 @@ const AHEAD: u64 = 4096;
 pub struct Media {
     /// Cards that go in are of version 1 of the specification (`SdCard::old`).
     pub old_cards: bool,
+    /// Cards that go in answer nothing after their first so many starts (`SdCard::deaf`).
+    pub deaf_cards: u32,
+    /// Cards that go in are MultiMediaCards (`SdCard::mmc`).
+    pub mmc_cards: bool,
     pub dsps: [Dsp; 2],
     /// Cycles of the main processor in a second.
     pub per_second: u64,
@@ -60,7 +64,7 @@ impl Media {
         let mut dsps = [Dsp::new(), Dsp::new()];
         dsps[0].name = "dsp0";
         dsps[1].name = "dsp1";
-        Media { dsps, per_second: 235_200_000, time: 0, rest: [0; 2], ahead: [0; 2], trace: false, old_cards: false }
+        Media { dsps, per_second: 235_200_000, time: 0, rest: [0; 2], ahead: [0; 2], trace: false, old_cards: false, deaf_cards: 0, mmc_cards: false }
     }
 
     /// Bring the processors up to cycle `now` of the main processor.
@@ -158,6 +162,8 @@ impl Media {
     pub fn insert(&mut self, slot: usize, card: Card) {
         let mut card = SdCard::new(card);
         card.old = self.old_cards;
+        card.deaf = self.deaf_cards;
+        card.mmc = self.mmc_cards;
         self.dsps[slot].card = Some(card);
     }
 
