@@ -141,21 +141,34 @@ impl Media {
     /// Whether a host port asks for a DMA transfer in the given
     /// direction: the "may write" pin for a transfer to the processor,
     /// the "may read" pin for one from it.  The processor runs on for
-    /// this, ahead of its time, as far as it is allowed.
+    /// this, ahead of its time, as far as it is allowed: first as far
+    /// as it gets without the passing of time, and then, if it still
+    /// cannot take or give the word, on through its own time (a program
+    /// that waits for its audio output's next sample takes a word each
+    /// period of it, all through a transfer that the burst stands for).
     pub fn dma_request(&mut self, address: u32, write: bool) -> bool {
         let channel = match address & 0x1fff_ffff {
             0x1500_0002 => 0,
             0x1500_004a => 1,
             _ => return false,
         };
+        let ready = |d: &Dsp| if write { d.host_can_write() } else { d.host_can_read() };
         if self.ahead[channel] < AHEAD {
             let d = &mut self.dsps[channel];
             let before = d.cycles;
             d.settle(SETTLE);
             self.ahead[channel] += d.cycles - before;
         }
-        let d = &self.dsps[channel];
-        if write { d.host_can_write() } else { d.host_can_read() }
+        while !ready(&self.dsps[channel]) && self.ahead[channel] < AHEAD {
+            let d = &mut self.dsps[channel];
+            let before = d.cycles;
+            d.run(SETTLE.min(AHEAD - self.ahead[channel]));
+            self.ahead[channel] += d.cycles - before;
+            if d.cycles == before {
+                break;
+            }
+        }
+        ready(&self.dsps[channel])
     }
 
     /// Put a card into a slot (0 or 1).

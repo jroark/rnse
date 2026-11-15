@@ -470,6 +470,7 @@ impl Cpu {
             return Err(Exc::mem(ExcKind::AddrErrWrite, addr));
         }
         if (0xf000_0000..0xf800_0000).contains(&addr) {
+            self.cache.array_write(bus, addr, v);
             self.mmu.array_write(addr, v);
             return Ok(());
         }
