@@ -1844,9 +1844,11 @@ fn programs_come_from_an_sd_card() {
 /// sdboot from the disc, sdboot starts linuxboot (RNSE.BIN) from the
 /// card, and linuxboot loads the kernel (VMLINUX.BIN, as linux/build.sh
 /// makes it; RNSE_LINUX names the file) and enters it.  The kernel comes
-/// up on the 192's own processor with its caches modelled, runs its
-/// /init, keeps the board's watchdog served with room to spare, and puts
-/// its console on the screen.  The controls work throughout (CLAUDE.md,
+/// up on the 192's own processor with its caches modelled, starts
+/// BusyBox, keeps the board's watchdog served with room to spare, and puts
+/// its console on the screen.  A command typed with nothing but the knob,
+/// SELECT and the soft keys ("rotary typing") runs in the screen's shell.
+/// The controls work throughout (CLAUDE.md,
 /// "Mandatory hardware behavior"): EJECT folds the display down and up
 /// while linuxboot reads the card and under Linux, CD EJECT pushes the
 /// disc out, a short RETURN does nothing of the kind, and RETURN held for
@@ -1898,14 +1900,33 @@ fn linux_boots_from_an_sd_card() {
     assert!(text.contains("CPU: SH7750R"), "{}: {:?}", name, tail);
     assert!(text.contains("fb0: 400x235"), "{}: {:?}", name, tail);
     assert!(text.contains("return to the loader with RETURN held"), "{}: {:?}", name, tail);
-    assert!(text.contains("/init running"), "{}: {:?}", name, tail);
+    assert!(text.contains("rnse: Linux on the RNS-E 192, BusyBox shell"), "{}: {:?}", name, tail);
     assert!(!text.contains("Kernel panic") && !text.contains("Oops"), "{}: {:?}", name, tail);
-    // The kernel's time goes on, and with it the watchdog's strobe.
-    let ups = text.matches("rnse: up ").count();
+
+    // Typed on the screen's shell with the knob: a command whose answer
+    // comes out on the serial console, the kernel's log.
+    const RING: &str = "abcdefghijklmnopqrstuvwxyz0123456789-./_|>&;=*~$'\"<()[]{}!?#@%+:,\\^`ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let edges = m.board.watchdog_edges;
-    assert_eq!(m.run(6_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
-    assert!(console(&m).matches("rnse: up ").count() > ups, "{}: /init has stopped", name);
-    assert!(m.board.watchdog_edges > edges + 500, "{}: {} edges in 6 s", name, m.board.watchdog_edges - edges);
+    let mut at = 0;
+    for c in "echo rotary>/dev/kmsg".chars() {
+        if c == ' ' {
+            press(&mut m, "SOFT_BL", 100);
+        } else {
+            let target = RING.find(c).unwrap();
+            // The first detent shows the character where the ring stands.
+            let detents = (target + RING.len() - at) % RING.len() + 1;
+            assert!(m.panel_knob("main", detents as i32));
+            assert_eq!(m.run(100 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+            press(&mut m, "SELECT", 100);
+            at = target;
+        }
+        assert_eq!(m.run(50 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    }
+    press(&mut m, "SOFT_BR", 100);
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = console(&m);
+    assert!(text.lines().any(|l| l.trim_end().ends_with("] rotary")), "{}: the typed command did not run: {:?}", name, &text[text.len().saturating_sub(600)..]);
+    assert!(m.board.watchdog_edges > edges + 500, "{}: {} edges while typing", name, m.board.watchdog_edges - edges);
     let (_, _, pixels) = m.render();
     assert!(pixels.iter().any(|&p| p != 0), "{}: the screen is dark", name);
 
