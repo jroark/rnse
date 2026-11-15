@@ -1860,6 +1860,13 @@ fn sd_loader_offers_a_menu_of_programs() {
     assert_eq!(text.matches("rnse sdk: returntest").count(), 3, "{}", name);
     m.eject_card(0);
     assert_eq!(m.run(500 * ms), Stop::Budget);
+    // The card out: the menu goes, all of it (a blank of the wrong
+    // height left the glyphs' bottom row behind, on a unit).
+    let (w, _, rgb) = m.render();
+    let w = w as usize;
+    for y in 30 + 14 * 2..30 + 14 * 13 {
+        assert!(rgb[3 * w * y..3 * w * (y + 1)].iter().all(|&c| c == 0), "{}: the menu left something on line {} of the screen", name, y);
+    }
 
     // A loader under another name, chosen from the menu, becomes the
     // one programs return to.
