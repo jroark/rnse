@@ -542,8 +542,25 @@ the converter at 0 therefore gets a unit that ignores its keys.
 
 The motor is driven from port 3 (see "Ports"); the OS watches the
 position while it runs and stops when the reading no longer changes.
-The key that opens the display is honoured only once the CD drive's
-state is known to the OS, which is not the case in the emulator yet.
+What the North American software 0371 does on the key next to the power
+button (traced in the emulator with `--io-log`, port 3 reading 0xe5
+before): it writes 0xed to port 3 twice (bit 3, towards open;
+0x80186dae and 0x80186db4 in V2220371), and once input 3 has come down
+to the end and stayed there, some 180 ms later, 0xe1 (both motor bits
+clear; 0x80186b3e).  To close, 0xf1 (bit 4), and 0xe5 some 350 ms after
+the reading has settled at the top.  It never sets both bits, and it
+stops neither at the open switch (port 3 bit 2) nor at the thresholds
+above: only when the reading no longer changes.  Whether the mechanism
+has end switches that cut the motor by themselves is not known, so
+software that runs the motor must stop it itself.  (The times are the
+emulator's: its model sweeps in 1.5 s; a unit's sweep has not been
+timed yet.)
+
+The SDK does the same (`sdk/src/display.c`, `display_open` and
+`display_close`): the 10 ms tick stops the motor once the reading has
+moved by no more than 8 for 300 ms, and after 8 s in any case.
+`sdk/examples/suite`, test 19, times the sweep on a unit and records
+the readings along the way.
 
 ## Software structure
 
