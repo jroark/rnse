@@ -137,6 +137,23 @@ Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2
 | 0x19fd0000            | Coral display controller registers | certain |
 | 0x19ff0000            | Coral drawing engine registers | by the chip's documentation; unused by the loader |
 
+What an access to each part takes was measured on a unit
+(`sdk/examples/timing`): 8192 accesses in a loop of five instructions,
+of which the loop itself is some 20 ns each.  The emulator has no time
+for the bus at all (every one of these takes it 21 ns), so a program
+that waits by reading a register waits five to fifteen times as long
+on a unit.
+
+| what | ns an access |
+|---|---|
+| main memory written, uncached | 95 |
+| display memory written | 131 |
+| a port of the companion chip (0x12300001), the card processors' status (0x12400001) | 171 |
+| a register of the graphics chip (host interface, +0x20) | 188 |
+| display memory read | 279 |
+| the drive's status (0x0790000d) | 308 |
+| a register of the CAN controller | 342 |
+
 ### Ports
 
 The OS addresses its byte-wide ports through a table of eight (index 0-7
@@ -259,6 +276,13 @@ firmware's own strings name it ("wait_coral_draw_begin").
   within and between surfaces (0x0D, 0x0F/0x1F), bitmap drawing (0x0B)
   and the control words.  Triangle set-up (0x40-0x46) is skipped: the 3D
   half of the chip is not emulated.
+* A frame takes 16716 us (59.82 Hz): the time from one vertical sync
+  flag of the host interface (+0x20, bit 2) to the next on a unit,
+  16715 to 16717 in eight, 120 in two seconds, under the SDK's display
+  settings, which are the loader's.  The emulator still gives every
+  frame a 60th of a second (16667 us) whatever the display registers
+  say; the period ought to come from those registers and the dot
+  clock, which would also say what the OS's settings make of it.
 * Six layers.  The OS runs them in the chip's extended mode: the order
   comes from the layer select register (+0x180), each layer has a
   transparent colour (+0x1a0 + 4n), and bit 0 of its extended mode
@@ -680,6 +704,12 @@ What is not modelled, or assumed:
   MultiMediaCard: no CMD8, no CMD55, CMD1, the host's address, and
   selected by the address 0 the stock driver gives it, which the
   specification reserves).
+* The time a card takes.  On a unit a sector from a 32 MB card came in
+  1.29 ms (64 one after the other in 82.6 ms, 64 a thousand sectors
+  apart in 80.7 ms, a single one in 1.30 ms), through the SDK's driver
+  with its 20 us before each word; the same driver gets one in 0.72 ms
+  from the emulator's card, which answers at once.  The card's start
+  took 4.61 s there against 3.96 s here.
 * **A word sent too soon after another is lost, by the program's own
   design.**  It takes the words of a message's head in its host
   interrupt (0x0230, into a ring of 32 words at 0x0a64), but the words
