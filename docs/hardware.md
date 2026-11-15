@@ -363,7 +363,17 @@ them five times and stretched the start-up by most of a minute.  The firmware al
 (`68 L L 68 ... CS 16`) for this processor's boot loader.
 
 Volume and source go to this processor too: `19 [01 level]`, level 0
-to 30, and `81 [08 source level ..]`, 3 the tuner and 1 the CD drive.
+to 30, and `81 [08 source level 00 00 00 00 01 03]`, 3 the tuner, 1 the
+CD drive and 4 the card processors' converter.  The tuner goes to a
+frequency with `82 [03 02 hi lo]`, in steps of 50 kHz on FM (0x07fa is
+102.1 MHz), which a real radio processor acknowledges like a setting.
+All three were sent to a unit's by a program of the SDK
+(`sdk/examples/player`, `tuner`), with the sound to hear for it: they
+are all it wants, from the state the stock software leaves it in.
+Asked for its status (0x88) 50 ms after a new frequency it answered
+with an acknowledgement that was not zero: busy, presumably.  (The
+software sends more under 0x82 that is not understood: `03 04`, and
+`09 01 28 01`.)
 A real radio processor, asked by a program as its own software asks
 (`sdk/examples/suite`), answered the version request with
 `A2220141-080807` and a zero byte, and the status request with 57

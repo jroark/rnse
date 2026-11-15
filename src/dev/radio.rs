@@ -137,6 +137,9 @@ pub struct Radio {
     /// (1 the CD drive, 3 the tuner) and the volume, 0 to 30.
     pub source: u8,
     pub volume: u8,
+    /// The frequency the tuner was last sent to, in steps of 50 kHz on
+    /// FM (2042: 102.1 MHz); None until it is sent anywhere.
+    pub frequency: Option<u16>,
     /// Commands seen, for statistics: (command, first data byte or 0xff).
     pub seen: std::collections::BTreeMap<(u8, u8), u32>,
 }
@@ -149,7 +152,7 @@ impl Default for Radio {
 
 impl Radio {
     pub fn new() -> Self {
-        Radio { parser: Parser::new(0x01), version: *b"A0000000", trace: false, source: 0, volume: 0, seen: Default::default() }
+        Radio { parser: Parser::new(0x01), version: *b"A0000000", trace: false, source: 0, volume: 0, frequency: None, seen: Default::default() }
     }
 
     /// Bytes from the main unit; returns the bytes the radio sends back.
@@ -205,6 +208,9 @@ impl Radio {
         let mut d = STATUS;
         d[33] = self.source;
         d[34] = self.volume;
+        if let Some(f) = self.frequency {
+            d[4..6].copy_from_slice(&f.to_be_bytes());
+        }
         Frame::new(0x88, &d)
     }
 
@@ -231,6 +237,19 @@ impl Radio {
                 self.source = f.data[1];
                 self.volume = f.data[2];
                 vec![Frame::new(ACK, &[0]), self.status()]
+            }
+            // The tuner to a frequency (`03 02`, 16 bits in steps of
+            // 50 kHz on FM), and the tuner's other commands: a unit's
+            // radio processor acknowledges the frequency like a
+            // setting (`sdk/examples/tuner`), and the station is heard.
+            // (This stand-in answered with an empty frame of the same
+            // command before, which the main software repeated five
+            // times.)
+            0x82 => {
+                if f.data.len() == 4 && f.data[0] == 3 && f.data[1] == 2 {
+                    self.frequency = Some(u16::from_be_bytes([f.data[2], f.data[3]]));
+                }
+                vec![Frame::new(ACK, &[0])]
             }
             // Other settings the main software has been seen to send:
             // acknowledged.
