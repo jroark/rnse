@@ -18,7 +18,12 @@ RNSE_DISC=disc.iso cargo test --release --test disc os_draws_193   # a single en
 cargo test --release sh4::tests       # CPU instruction unit tests only
 ```
 
-The tests in `tests/disc.rs` return early (and report success) when `RNSE_DISC` is unset, so a green run without it proves nothing about boot behaviour. A local update disc image may be sitting in the repository root as an ignored `*.iso`; use it for `RNSE_DISC` if present. The end-to-end tests run whole firmware updates and boots and take minutes.
+The tests in `tests/disc.rs` return early (and report success) when `RNSE_DISC` is unset, so a green run without it proves nothing about boot behaviour. The same goes for the SDK's tests without an SH-4 GCC on the PATH (on macOS: `PATH=$PWD/tools/sh4-docker:$PATH`, which runs one in a container) and for the comparisons with a real 192 boot ROM without `RNSE_BOOT_ROM=file` (the file `rnse report --rom` writes; firmware, never committed). A run that tests everything for the 192:
+
+```sh
+PATH=$PWD/tools/sh4-docker:$PATH RNSE_DISC=disc.iso RNSE_BOOT_ROM=rom.bin cargo test --release --test disc
+```
+ A local update disc image may be sitting in the repository root as an ignored `*.iso`; use it for `RNSE_DISC` if present. The end-to-end tests run whole firmware updates and boots and take minutes.
 
 CPU core differential testing against QEMU (needs `qemu-sh4eb-static` from `qemu-user-static`, i.e. Linux; uses the `sh4run` binary from the release build):
 

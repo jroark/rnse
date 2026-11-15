@@ -282,12 +282,18 @@ itself still have to arrive on a disc.  On the 192 the cards are behind
 the two SD card processors (`docs/hardware.md`), whose program and
 host protocol would be needed first.
 
-Whether the boot ROM can also start a loader from a disc by itself, as
-it would have to after an update that was cut short, has not been
-tried.  The 192's has what it takes: a driver for the drive and for the
-display, and a path of its own for when the software has failed ten
-times or the module directory does not verify.  It has nothing for the
-SD cards.
+The 192's boot ROM starts a loader from a disc by itself when there is
+no software to start.  In the emulator, with a unit's ROM, a flash that
+is empty but for the ROM (`--flash` with a file of 0xff, `--boot-rom`)
+and the update disc in the drive: the ROM reads the loader from the
+disc and calls it (with language 1; the loader's log has `ROMに
+プログラム存在しない`, "no program in the ROM"), the loader writes all
+of the software and jumps to the reset code, and the ROM starts what
+was written.  So a unit whose software is gone, after an update that
+was cut short or after software of one's own that does not start, is
+brought back by an update disc for as long as the first 48 KiB of the
+flash are whole, which no update and no loader touches.  Not tried on a
+unit.  It has nothing for the SD cards.
 `rnse loader` starts one directly, with interrupts masked and zeroes in
 r4-r6 unless told otherwise (`--args`).
 

@@ -244,9 +244,9 @@ impl Intc {
             ipra: 0,
             iprb: 0,
             iprc: 0,
-            iprd: 0,
+            iprd: 0xda74, // its value after a reset
             intpri00: 0,
-            intmsk00: 0x0000_03ff,
+            intmsk00: 0x0000_0300, // the two bits it has
             pending: 0,
             irl: 0,
             level: 0,
@@ -719,6 +719,21 @@ impl OnChip {
         n
     }
 
+    /// A transfer whose data has been moved but whose end is still to
+    /// come (it is given the time its bus cycles take) ends now.  For
+    /// when the software looks at the channel or sets it up again in
+    /// the meantime: the end, when it came, would otherwise be marked
+    /// on the next transfer, which then never starts.  That happened
+    /// to the drive's channel when the 192's software read two long
+    /// pieces of a disc one right after the other.
+    fn dma_finish(&mut self, ch: usize) {
+        if self.dma[ch].busy {
+            self.dma[ch].busy = false;
+            self.dma[ch].chcr |= 2; // TE
+            self.dma_irq();
+        }
+    }
+
     fn dma_kick<B: Bus>(&mut self, bus: &mut B, now: u64) {
         for ch in 0..8 {
             let c = self.dma[ch].chcr;
@@ -810,9 +825,15 @@ impl OnChip {
             0xff00_0020 => self.tra,
             0xff00_0024 => self.expevt,
             0xff00_0028 => self.intevt,
-            0xff00_0030 => 0x0405_0005, // PVR: SH7750R
-            0xff00_0040 => 0x3510_0000, // CVR
-            0xff00_0044 => 0x0000_0100, // PRR: SH7750R
+            // What a 192 answers (its report, docs/custom-firmware.md,
+            // "On a real unit"); the emulator used to say 0x04050005,
+            // 0x35100000 and 0x100, an SH7750R's by the book.
+            0xff00_0030 => 0x0405_0086, // PVR
+            0xff00_0040 => 0x2048_0000, // CVR
+            0xff00_0044 => 0x0000_0200, // PRR
+            // Timer channels 3 and 4, which nothing uses: the reload
+            // and the counter as after a reset.
+            0xfe10_0008 | 0xfe10_000c | 0xfe10_0014 | 0xfe10_0018 => 0xffff_ffff,
 
             // BSC
             0xff80_0028 => {
@@ -859,6 +880,7 @@ impl OnChip {
             0xffa0_0000..=0xffa0_008f => {
                 let off = addr & 0xff;
                 let ch = if off < 0x40 { (off >> 4) as usize } else { (off >> 4) as usize - 1 };
+                self.dma_finish(ch);
                 let d = &self.dma[ch];
                 match off & 0xc {
                     0 => d.sar,
@@ -1040,13 +1062,18 @@ impl OnChip {
             0xffa0_0000..=0xffa0_008f => {
                 let off = addr & 0xff;
                 let ch = if off < 0x40 { (off >> 4) as usize } else { (off >> 4) as usize - 1 };
+                self.dma_finish(ch);
                 match off & 0xc {
                     0 => self.dma[ch].sar = v,
                     4 => self.dma[ch].dar = v,
                     8 => self.dma[ch].tcr = v & 0x00ff_ffff,
                     _ => {
-                        // TE can only be cleared by software.
+                        // TE can only be cleared by software.  Bit 3 on
+                        // the SH7750R clears the request queue and
+                        // reads as 0: the 192's software sets it after
+                        // every transfer.
                         let te = self.dma[ch].chcr & v & 2;
+                        let v = if self.navi.is_none() { v & !8 } else { v };
                         self.dma[ch].chcr = (v & !2) | te;
                         self.dma_irq();
                         self.dma_kick(bus, now);
@@ -1097,7 +1124,7 @@ impl OnChip {
                 self.intc.intpri00 = v;
                 self.intc.recalc();
             }
-            0xfe08_0040 => self.intc.intmsk00 |= v,
+            0xfe08_0040 => self.intc.intmsk00 |= v & 0x300,
             0xfe08_0060 => self.intc.intmsk00 &= !v,
 
             // TMU

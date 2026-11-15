@@ -215,6 +215,10 @@ impl Machine {
             m.board.atapi.spin_up_micros = 2_700_000;
             m.board.atapi.settle_micros = 10_000_000;
             m.board.atapi.eject_micros = 3_600_000;
+            // The levels on the processor's own port pins, all inputs,
+            // as a unit's report has them.  What they are is not known.
+            m.cpu.io.pdtra_in = 0x3d24;
+            m.cpu.io.pdtrb_in = 0xf97f;
         }
         m
     }
@@ -312,6 +316,49 @@ impl Machine {
     pub fn install_boot_stub(&mut self, project: &str) {
         bootrom::install(&mut self.board, project);
         self.cpu.hypercalls_enabled = true;
+        if self.board.model == crate::board::Model::Rnse192 {
+            // What a 192's ROM sets in its reset code before anything
+            // else runs (docs/boot-rom.md, "The real one"): the ten
+            // registers at 0x16000000, the latch among them, and the
+            // data and direction of the eight ports.  The software
+            // that comes after it changes single bits of these and
+            // sets no directions.
+            use crate::sh4::Bus;
+            for (addr, v) in [
+                (0x1600_0000u32, 0xffff_ffc0u32),
+                (0x1600_0004, 0x0000_3f8f),
+                (0x1600_0008, 0x7e00_0004),
+                (0x1600_000c, 0x0003_0000),
+                (0x1600_0010, 0x0200_0000),
+                (0x1600_0014, 0x0155_0000),
+                (0x1600_0018, 0x0caa_0000),
+                (0x1600_001c, 0x8068_98c0),
+                (0x1600_0020, 0x0001_280b),
+                (0x1600_0024, 0x4000_0000),
+            ] {
+                self.board.write32(addr, v);
+            }
+            for (port, data, dir) in [(0u32, 0x00u8, 0x01u8), (1, 0x80, 0x80), (2, 0x02, 0x02), (3, 0x18, 0x18), (4, 0x00, 0x00), (5, 0x60, 0xfe), (6, 0x00, 0x20), (7, 0x10, 0x1f)] {
+                let base = 0x1230_0000 + port * 0x10_0000;
+                self.board.write8(base + 1, data);
+                self.board.write8(base, dir);
+            }
+            self.board.watchdog_edges = 0;
+            // And the bus controller, which nothing after the ROM
+            // touches: what a unit's report has there.
+            let now = self.cpu.cycles;
+            for (addr, size, v) in [
+                (0xff80_0000u32, 4u32, 0x0100_0008u32), // BCR1
+                (0xff80_0004, 2, 0xfd38),               // BCR2
+                (0xff80_0008, 4, 0x1111_1011),          // WCR1
+                (0xff80_000c, 4, 0x2082_624d),          // WCR2
+                (0xff80_0014, 4, 0x0002_901c),          // MCR
+                (0xff80_0024, 2, 0xa5e7),               // RTCOR
+                (0xff80_001c, 2, 0xa508),               // RTCSR: the refresh timer runs
+            ] {
+                self.cpu.io.write(&mut self.board, addr, size, v, now, 0);
+            }
+        }
     }
 
     /// Put a real boot ROM (read from a unit; never on a disc) where
@@ -895,8 +942,17 @@ impl Machine {
             // The media driver preserves DMAOR.DME while selecting its
             // transfer mode; it never sets master enable itself.
             self.cpu.io.dmaor = 0xc001;
-            // The three timers at levels 7, 6 and 5.
-            self.cpu.io.intc.ipra = 0x7650;
+            // Timers 0 and 2 at levels 7 and 5.  Timer 1, which the
+            // ROM's own CAN software uses for half a second at level 6,
+            // is left as that leaves it: running at 5 ms like the
+            // others, without a level.
+            self.cpu.io.intc.ipra = 0x7050;
+            let now = self.cpu.cycles;
+            for (addr, size, v) in [(0xffd8_0014u32, 4u32, 0x0001_1f1bu32), (0xffd8_0018, 4, 0x0001_1f1b), (0xffd8_001c, 2, 0x0020)] {
+                self.cpu.io.write(&mut self.board, addr, size, v, now, 0);
+            }
+            let started = self.cpu.io.read(&mut self.board, 0xffd8_0004, 1, now, 0);
+            self.cpu.io.write(&mut self.board, 0xffd8_0004, 1, started | 2, now, 0);
             self.cpu.r[15] = 0x8fff_ffb0;
             self.bios_break = [0x8c00_0100, 0x9000_0000, 0, 0, 0, 0, 0, 0];
             // The start of the battery-backed memory is the ROM's: it

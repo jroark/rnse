@@ -61,7 +61,10 @@ documented part, which is now emulated: see "SD card processors".
 
 ## CPU
 
-Hitachi/Renesas SH-4, big-endian.  The firmware uses DMAC channels 4-7
+Hitachi/Renesas SH-4, big-endian.  A unit's processor identifies itself
+with PVR 0x04050086, PRR 0x00000200 and CVR 0x20480000, and the
+emulator's does the same now (it had an SH7750R's values by the book:
+0x04050005, 0x100, 0x35100000).  The firmware uses DMAC channels 4-7
 and their interrupt codes (0x780-0x7e0), which exist on the SH7750R and
 SH7751R but not on the original SH7750.
 
@@ -140,6 +143,14 @@ The OS addresses its byte-wide ports through a table of eight (index 0-7
 | 4 (0x12700001) | 7 | in  | polled every tick, unknown |
 | 6 (0x12900001) | 0 | in  | switch of the second SD card slot (DSP 1) |
 | 7 (0x12a00001) | 3, 2 | out | mode lines of the CAN transceiver: both high = awake.  The OS clears bit 3 and then bit 2 when it lets the bus sleep and sets both at once to wake it (0x801c57f8-0x801c581e in V2220371); the loader sets both.  Both lines are on test pads of the main board and follow these bits on a logic analyser, bit 3 falling some 9 ms before bit 2 at a sleep |
+
+What a unit's eight data registers read with its software running, the
+radio on and nothing else going on (`sdk/examples/report`): 0xef, 0x75,
+0xbf, 0xe5, 0x3f, 0x61, 0xde, 0xe0 for ports 0 to 7, with the
+directions 0x01, 0x80, 0x02, 0x18, 0x80, 0xfe, 0x20, 0x1f.  The
+emulator's inputs read those levels (`board::PORT_IDLE`) where no model
+moves them; before, an input without a model read 0.  The processor's
+own port pins, all inputs, read 0x3d24 (PDTRA) and 0xf97f (PDTRB).
 
 A port has more registers than the two: the card driver writes +2 and
 +4 of ports 2 and 6 (0x40 and 0x01 to +2: the bits of the two card

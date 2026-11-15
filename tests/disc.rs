@@ -6,6 +6,12 @@
 //!
 //!     RNSE_DISC=/path/to/disc.iso cargo test --release -- --nocapture
 //!
+//! The tests of the SDK (`sdk/`) build its examples and are skipped
+//! without an SH-4 GCC on the PATH (`tools/sh4-docker` has one in a
+//! container).  Those that compare with a real boot ROM need
+//! `RNSE_BOOT_ROM`, the file `rnse report --rom` writes: firmware, like
+//! the disc, and not in the repository.
+//!
 //! The navigation test further needs `RNSE_NAV_DISC`, a navigation DVD
 //! for the 193 (an ISO image, or the image of an SD card that carries
 //! one), and, if that disc is tied to a unit, `RNSE_SERIAL` with the
@@ -636,7 +642,9 @@ fn custom_program_reads_the_disc() {
         // time over seeks and reads.
         m.atapi().times = true;
         m.atapi().insert(Some(custom.clone()));
-        assert_eq!(m.run(12_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        // (The 192's drive is not ready for some 13 seconds, as a
+        // unit's was measured.)
+        assert_eq!(m.run(20_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
         // What the program should have found, from the image itself.
         let iso = fw::Iso::new(&custom).unwrap();
@@ -669,24 +677,37 @@ fn drive_program_logs_the_drive() {
             assert!(m.panel_key(key, false));
         };
         press(&mut m, "CD_EJECT");
-        assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        // (The 192's drive takes 3.6 s over it and says "tray closed"
+        // for three more.)
+        assert_eq!(m.run(8_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let ejects = m.atapi().ejects;
         assert_eq!(ejects, 1, "{}: {:?}", name, String::from_utf8_lossy(&m.console));
-        // Back in: not ready for the model's six seconds, the notice
-        // that the medium may have changed, ready.
+        // Back in: not ready while the drive loads the disc, the notice
+        // that the medium may have changed, and ready; on the 192, as
+        // a unit's drive was seen to do it, not ready in another way
+        // for a while in between.
         assert!(m.atapi().reinsert());
-        assert_eq!(m.run(8_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert_eq!(m.run(15_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
         let lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| l.len() > 8 && l.as_bytes()[7] == b' ' && l[..7].bytes().all(|b| b.is_ascii_digit())).collect();
         let states: Vec<&str> = lines.iter().map(|l| &l[8..]).collect();
-        assert_eq!(states, ["READY", "2/3A/00", "2/04/00", "6/28/00", "READY"], "{}: {:?}", name, text);
         let time = |i: usize| lines[i][..7].parse::<u64>().unwrap();
-        assert!((5_900..=6_200).contains(&(time(3) - time(2))), "{}: not ready from {} to {}", name, time(2), time(3));
+        let loading = if model == Model::Rnse192 {
+            assert_eq!(states, ["READY", "2/04/00", "6/28/00", "2/3A/01", "2/3A/00", "2/04/00", "6/28/00", "2/04/04", "READY"], "{}: {:?}", name, text);
+            assert!((3_500..=3_800).contains(&(time(2) - time(1))), "{}: going out from {} to {}", name, time(1), time(2));
+            assert!((9_800..=10_200).contains(&(time(8) - time(7))), "{}: settling from {} to {}", name, time(7), time(8));
+            assert!((2_600..=2_900).contains(&(time(6) - time(5))), "{}: not ready from {} to {}", name, time(5), time(6));
+            5
+        } else {
+            assert_eq!(states, ["READY", "2/3A/00", "2/04/00", "6/28/00", "READY"], "{}: {:?}", name, text);
+            assert!((5_900..=6_200).contains(&(time(3) - time(2))), "{}: not ready from {} to {}", name, time(2), time(3));
+            2
+        };
         assert!(!text.contains("unexpected"), "{}: {:?}", name, text);
-        // The line went out on the bus as well.
+        // The lines went out on the bus as well.
         let frames: Vec<_> = m.can().tx.iter().filter(|f| f.id == 0x7f5).cloned().collect();
-        assert_eq!(frames.len(), 5, "{}", name);
-        assert_eq!(&frames[2].data[4..8], &[2, 4, 0, 0], "{}", name);
+        assert_eq!(frames.len(), states.len(), "{}", name);
+        assert_eq!(&frames[loading].data[4..8], &[2, 4, 0, 0], "{}", name);
         press(&mut m, "SETUP");
         m.run(1_000 * ms);
         let text = String::from_utf8_lossy(&m.console).into_owned();
@@ -775,7 +796,8 @@ fn report_program_sends_the_boot_rom() {
             for base in [0x10, 0x20] {
                 assert_eq!(report.value(base), Some(1), "{}: {}", name, report.describe());
                 assert_eq!(report.value(base + 1), Some(0x3f), "{}: {}", name, report.describe());
-                assert_eq!(report.value(base + 2), Some(0), "{}", name);
+                // (Clock control: 0x0100 after a reset, as on a unit.)
+                assert_eq!(report.value(base + 2), Some(0x100), "{}", name);
                 let (t1, t2) = (report.value(base + 4).unwrap() as f64, report.value(base + 5).unwrap() as f64);
                 // 1024 x 32768 clocks of 22.5792 MHz, in counts of 14.7 MHz.
                 let want = 1024.0 * 32768.0 / 22_579_200.0 * 14_700_000.0;
@@ -1192,4 +1214,135 @@ fn navigation_shows_the_map() {
     if gps.is_some() {
         assert!(m.gps_fixes > 10, "the application was given a GPS fix {} times", m.gps_fixes);
     }
+}
+
+/// A boot ROM read from a 192 (`rnse report --rom`; firmware, so not in
+/// the repository): `RNSE_BOOT_ROM` names the file.
+fn boot_rom() -> Option<Vec<u8>> {
+    let path = std::env::var_os("RNSE_BOOT_ROM")?;
+    Some(std::fs::read(path).expect("RNSE_BOOT_ROM is not readable"))
+}
+
+/// The 192 with its installed software, started the stand-in's way or,
+/// with a ROM, from reset with nothing done for it.
+fn started_192(image: &[u8], rom: Option<&[u8]>) -> Option<Machine> {
+    use rnse::board::Model;
+    let variants = fw::load_variants(image).unwrap();
+    let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192))?;
+    let index = fw::IndexInfo::from_disc(image, &v.name).unwrap();
+    let mut m = Machine::new();
+    m.echo_console = false;
+    m.scramble_ram();
+    m.install_boot_stub(&v.name);
+    m.install(v, &index);
+    m.atapi().load(image.to_vec());
+    m.set_ignition(true);
+    if let Some(address) = Machine::known_printf(&v.module("OSM").unwrap().version) {
+        m.hook_printf(address);
+    }
+    match rom {
+        Some(rom) => m.start_from_reset(rom).unwrap(),
+        None => m.start_os(v).unwrap(),
+    }
+    Some(m)
+}
+
+/// The stand-in against the real thing: the same software, started by
+/// a unit's boot ROM from reset and by the stand-in, says the same in
+/// its log, line for line, and shows the same picture, with arbitrary
+/// data in RAM at the start.  What the stand-in does for the 192 was
+/// taken from that ROM (docs/boot-rom.md, "The real one").
+#[test]
+fn stand_in_starts_the_software_as_a_real_boot_rom_does() {
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let Some(mut real) = started_192(&image, Some(&rom)) else { return };
+    let mut stand_in = started_192(&image, None).unwrap();
+    let ms = real.cycles_per_ms();
+    for m in [&mut real, &mut stand_in] {
+        assert_eq!(m.run(17_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    }
+    let log = |m: &Machine| String::from_utf8_lossy(&m.console).lines().filter(|l| l.starts_with("[fw]")).map(String::from).collect::<Vec<_>>();
+    let (a, b) = (log(&real), log(&stand_in));
+    assert!(a.len() > 100, "the software said little under the real ROM: {:?}", a);
+    assert_eq!(a, b);
+    assert!(real.render() == stand_in.render(), "the pictures differ");
+    // What the ROM leaves and the stand-in is to leave as well.
+    for m in [&real, &stand_in] {
+        assert_eq!(m.cpu.io.intc.ipra, 0x7050);
+        assert_eq!(m.cpu.io.dmaor & 0xc001, 0xc001);
+    }
+}
+
+/// A 192 with nothing in its flash but the boot ROM, and an update
+/// disc in the drive: the ROM starts the loader from the disc by
+/// itself, the loader installs the software and jumps to the ROM's
+/// reset code, and the software starts.
+#[test]
+fn real_boot_rom_brings_an_empty_unit_back_from_a_disc() {
+    use rnse::board::Model;
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    let Some(v) = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192)) else { return };
+    let mut m = Machine::new();
+    m.echo_console = false;
+    m.install_boot_stub(&v.name);
+    m.board.flash.fill(0xff);
+    m.atapi().load(image.clone());
+    m.set_ignition(true);
+    if let Some(address) = Machine::known_printf(&v.module("OSM").unwrap().version) {
+        m.hook_printf(address);
+    }
+    m.start_from_reset(&rom).unwrap();
+    let ms = m.cycles_per_ms();
+    let mut done = false;
+    for _ in 0..40 {
+        assert_eq!(m.run(5_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console);
+        if let Some(at) = text.find("*** Jump User RESET ***") {
+            // And then the software that was just written.
+            if text[at..].contains("[fw] ") {
+                done = true;
+                break;
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&m.console).into_owned();
+    assert!(done, "no update, or nothing after it: {:?}", &text[text.len().saturating_sub(400)..]);
+    for module in v.modules.iter().filter(|x| x.kind != "LDR") {
+        let at = module.phys_addr() as usize;
+        assert!(m.board.flash[at..at + module.size as usize] == module.data[..module.size as usize], "{} is not in the flash", module.name);
+    }
+}
+
+/// The beacon (sdk/examples/beacon), the probe that says on the CAN bus
+/// how far it has got: its frames in order, the faceplate controller
+/// taking its settings, and the hand-over at the end.
+#[test]
+fn beacon_reports_its_progress_on_the_bus() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some((mut m, name, _)) = sdk_example(&image, Model::Rnse192, "beacon") else { return };
+    let ms = m.cycles_per_ms();
+    assert_eq!(m.run(24_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = String::from_utf8_lossy(&m.console).into_owned();
+    assert!(text.contains("starting the stock loader"), "{}: {:?}", name, text);
+    assert!(!text.contains("unexpected"), "{}: {:?}", name, text);
+    let frames: Vec<_> = m.can().tx.iter().filter(|f| f.id == 0x7f6).cloned().collect();
+    let stages: Vec<u8> = frames.iter().map(|f| f.data[0]).collect();
+    // Up; eight seconds without the faceplate; its start; fourteen with.
+    let mut want = vec![1u8];
+    want.extend([2; 8]);
+    want.push(5);
+    want.extend([2; 14]);
+    // And the one it leaves in the controller for the hand-over.
+    want.push(3);
+    assert_eq!(stages, want, "{}", name);
+    // A second apart, by the program's own clock in the frames.
+    let at = |i: usize| u32::from(frames[i].data[2]) << 8 | u32::from(frames[i].data[3]);
+    assert_eq!(at(22) - at(12), 1000, "{}", name);
+    // The faceplate controller has its settings a second after it was started.
+    assert_eq!(frames[9].data[7] & 2, 0, "{}", name);
+    assert_eq!(frames[12].data[7] & 2, 2, "{}", name);
+    // The state it was started in, and the latch and port A as found.
+    assert_eq!(m.can().tx.iter().filter(|f| f.id == 0x7f7).count(), 9, "{}", name);
 }

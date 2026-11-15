@@ -359,6 +359,8 @@ impl Dsp {
         self.frame_at = u64::MAX;
         self.sd = Sd { idx: 0x4800, ctl: 0x0200, ..Sd::default() };
         self.io = [0; 64];
+        // CLKCNTL reads 0x0100 after a reset on a unit's two.
+        self.io[0x2e] = 0x0100;
         self.next_event = u64::MAX;
     }
 

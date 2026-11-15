@@ -103,6 +103,15 @@ impl Model {
     }
 }
 
+/// What the data registers of the 192's eight ports (0x12300001 to
+/// 0x12a00001) read on a unit with its software running, the radio on
+/// and nothing else going on: `sdk/examples/report` on a North American
+/// unit.  Of this the emulator takes the pins that are inputs; what
+/// most of them are is not known (docs/hardware.md, "Ports").  Bit 2 of
+/// port 3 and the two card switches (port 2 bit 6, port 6 bit 0) have
+/// models that move them.
+pub const PORT_IDLE: [u8; 8] = [0xef, 0x75, 0xbf, 0xe5, 0x3f, 0x61, 0xde, 0xe0];
+
 pub struct Board {
     pub model: Model,
     /// Physical address of the first byte of `ram`.
@@ -200,7 +209,7 @@ impl Board {
             nvram_watch: None,
             now: 0,
             uart: Default::default(),
-            gpio_in: [0, 0, 0x10, 0x04, 0, 0, 0, 0],
+            gpio_in: [0, 0, PORT_IDLE[2], PORT_IDLE[3], PORT_IDLE[4], 0, 0, 0],
             gpio_out: [0; 8],
             gpio_dir: [0; 8],
             adc: Adc::with_inputs([0, 0, 0, 1023, 0, 0, 0, 0]),
@@ -431,7 +440,10 @@ impl Board {
             return v;
         }
         if addr == 0x1240_0001 && size == 1 {
-            let v = self.unmapped.get(&(addr >> 12)).map_or(0, |p| p[1]);
+            // Port 1: the card processors' handshake lines in the low
+            // half; above them as on the other ports.
+            let (dir, out) = self.unmapped.get(&(addr >> 12)).map_or((0, 0), |p| (p[0], p[1]));
+            let v = out & dir | PORT_IDLE[1] & !dir;
             let v = u32::from((v & !0x0f) | self.media.status(self.now));
             self.media_edges();
             self.log.log("media", false, addr, size, v, self.pc);
@@ -465,10 +477,19 @@ impl Board {
                 self.log.log("gpio", false, addr, size, v, self.pc);
                 return v;
             }
-            0x1290_0000 if size == 1 && addr & 0xf_ffff == 1 => {
-                // Port 6: bit 0 is the switch of the second card slot.
-                let v = self.unmapped.get(&(addr >> 12)).map_or(0, |p| p[1]);
-                let v = u32::from(v & !1 | u8::from(self.media.present(1)));
+            0x1230_0000 | 0x1240_0000 | 0x1280_0000 | 0x1290_0000 | 0x12a0_0000 if size == 1 && addr & 0xf_ffff == 1 => {
+                // The data register of a port without a model of its
+                // own: what was written, on the pins that are outputs,
+                // and on the others what a unit's pins read with
+                // nothing going on (PORT_IDLE).  Port 6: bit 0 is the
+                // switch of the second card slot.
+                let i = ((addr >> 20) & 0xf) as usize - 3;
+                let (dir, out) = self.unmapped.get(&(addr >> 12)).map_or((0, 0), |p| (p[0], p[1]));
+                let mut pins = PORT_IDLE[i];
+                if i == 6 {
+                    pins = pins & !1 | u8::from(self.media.present(1));
+                }
+                let v = u32::from(out & dir | pins & !dir);
                 self.log.log("gpio", false, addr, size, v, self.pc);
                 return v;
             }
