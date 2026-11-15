@@ -307,8 +307,11 @@ of the software and jumps to the reset code, and the ROM starts what
 was written.  So a unit whose software is gone, after an update that
 was cut short or after software of one's own that does not start, is
 brought back by an update disc for as long as the first 48 KiB of the
-flash are whole, which no update and no loader touches.  Not tried on a
-unit.  It has nothing for the SD cards.
+flash are whole, which no update and no loader touches.  A unit has
+done it: with the directory's sector erased and the drive empty its
+ROM asked for a disc on the screen, and installed the stock update
+disc when that went in (`docs/custom-firmware.md`, "A program in
+flash").  It has nothing for the SD cards.
 What the ROM takes for "no software" was tried the same way, with a
 flash image of the installed North American software and one thing
 wrong in it at a time:
