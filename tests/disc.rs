@@ -1761,6 +1761,99 @@ fn programs_come_from_an_sd_card() {
     }
 }
 
+/// Three cooperative tests run with one disc launch and no flash writes.
+#[test]
+fn sd_loader_returns_and_rearms_on_reinsertion() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    for slot in [0, 1] {
+        let Some((mut m, _, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+        assert!(sdk_example(&image, Model::Rnse192, "returntest").is_some(), "returntest build failed");
+        let bin = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk/out/returntest-192.bin")).unwrap();
+        assert!(sdk_example(&image, Model::Rnse192, "returnapi").is_some());
+        let api = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk/out/returnapi-192.bin")).unwrap();
+        let cards: Vec<_> = [bin, api].into_iter().map(|b| rnse::fat::card("TEST", &[rnse::fat::Entry::file("RNSE.BIN", b)], None).unwrap()).collect();
+        let flash = m.board.flash.clone();
+        let ms = m.cycles_per_ms();
+        let mut from = 0;
+        assert_eq!(m.run(2000 * ms), Stop::Budget);
+        assert!(String::from_utf8_lossy(&m.console).contains("WAITING FOR CARD"));
+        for cycle in 0..3 {
+            assert!(m.insert_card(slot, rnse::dev::sdhi::Card::from_bytes(cards[cycle % 2].clone()).unwrap()));
+            let expected = if cycle % 2 == 0 { "TEST RETURNED: 17" } else { "TEST RETURNED: 23" };
+            let _end = until(&mut m, from, expected, 60).unwrap_or_else(|| panic!("slot {} cycle {}: {}", slot, cycle, String::from_utf8_lossy(&m.console)));
+            assert_eq!(m.run(1000 * ms), Stop::Budget);
+            let text = String::from_utf8_lossy(&m.console);
+            assert_eq!(text.matches("rnse sdk: returntest").count(), cycle + 1);
+            assert_eq!(text.matches("rnse sdk: sdboot").count(), cycle + 2);
+            assert!(!text[text.find("rnse sdk: sdboot").unwrap()..].contains("[fw]"));
+            assert_eq!(m.board.flash, flash);
+            assert!(!text.contains("unexpected"));
+            assert_eq!(m.cpu.cache.trouble.stale_fetches, 0);
+            assert_eq!(m.cpu.cache.trouble.dirty_discarded, 0);
+            if cycle == 2 {
+                let at = m.console.len();
+                assert!(m.panel_key("RETURN", true));
+                assert_eq!(m.run(200 * ms), Stop::Budget);
+                assert!(m.panel_key("RETURN", false));
+                until(&mut m, at, "TEST RETURNED: 17", 60).expect("RETURN reruns the card");
+                assert_eq!(String::from_utf8_lossy(&m.console).matches("rnse sdk: returntest").count(), 4);
+            }
+            from = m.console.len();
+            m.eject_card(slot);
+            assert_eq!(m.run(500 * ms), Stop::Budget);
+        }
+        // Bad cards leave the loader available for the next insertion.
+        for bad in [None, Some(vec![0; 32]), Some(vec![0; 0x1c001])] {
+            let entries = bad.map(|b| vec![rnse::fat::Entry::file("RNSE.BIN", b)]).unwrap_or_default();
+            let card = rnse::fat::card("BAD", &entries, None).unwrap();
+            let at = m.console.len();
+            assert!(m.insert_card(slot, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+            until(&mut m, at, "LOAD ERROR:", 60).expect("invalid card must not execute");
+            assert_eq!(m.board.flash, flash);
+            m.eject_card(slot);
+            assert_eq!(m.run(500 * ms), Stop::Budget);
+        }
+        let at = m.console.len();
+        assert!(m.insert_card(slot, rnse::dev::sdhi::Card::from_bytes(cards[0].clone()).unwrap()));
+        assert_eq!(m.run(500 * ms), Stop::Budget);
+        m.eject_card(slot);
+        until(&mut m, at, "LOAD ERROR:", 60).expect("removal during initialization must fail");
+        assert!(!String::from_utf8_lossy(&m.console[at..]).contains("rnse sdk: returntest"));
+        assert_eq!(m.run(500 * ms), Stop::Budget);
+        let at = m.console.len();
+        for both in [0, 1] {
+            assert!(m.insert_card(both, rnse::dev::sdhi::Card::from_bytes(cards[0].clone()).unwrap()));
+        }
+        let first = until(&mut m, at, "TEST RETURNED: 17", 60).expect("first simultaneous card");
+        until(&mut m, first + 1, "TEST RETURNED: 17", 60).expect("second simultaneous card");
+        assert_eq!(m.run(2000 * ms), Stop::Budget);
+        let log = String::from_utf8_lossy(&m.console[at..]);
+        assert_eq!(log.matches("rnse sdk: returntest").count(), 2, "cards must not alternate forever");
+        assert!(log.find("SLOT 1").unwrap() < log.find("SLOT 2").unwrap());
+        assert_eq!(m.board.flash, flash);
+        assert_eq!(m.cpu.cache.trouble.stale_fetches, 0);
+        assert_eq!(m.cpu.cache.trouble.dirty_discarded, 0);
+    }
+}
+
+#[test]
+fn second_sd_test_returns_status_23() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some((mut m, _, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    assert!(sdk_example(&image, Model::Rnse192, "returntest2").is_some(), "second test must build");
+    let bin = std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk/out/returntest2-192.bin")).unwrap();
+    let card = rnse::fat::card("SECOND", &[rnse::fat::Entry::file("RNSE.BIN", bin)], None).unwrap();
+    let flash = m.board.flash.clone();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    until(&mut m, 0, "TEST RETURNED: 23", 60).expect("second test must return directly");
+    assert!(String::from_utf8_lossy(&m.console).contains("rnse sdk: returntest2"));
+    assert_eq!(m.board.flash, flash);
+    assert_eq!(m.cpu.cache.trouble.stale_fetches, 0);
+    assert_eq!(m.cpu.cache.trouble.dirty_discarded, 0);
+}
+
 /// Resident shell: actual SH-4 app code, audio, persistence and malformed input.
 #[test]
 fn modern_resident_shell() {
