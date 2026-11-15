@@ -1474,9 +1474,14 @@ fn programs_come_from_an_sd_card() {
     for slot in [0, 1] {
         let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
         // (Built by sdk_example for the two tests of it.)
-        if sdk_example(&image, Model::Rnse192, "hello").is_none() { return }
-        let hello = std::fs::read(sdk.join("out/hello-192.bin")).unwrap();
-        let entries = vec![rnse::fat::Entry::file("RNSE.BIN", hello)];
+        // The probe, because it draws and leaves the faceplate
+        // controller alone: the screen's light is the controller's, and
+        // a loader that starts the controller anew and then reads a
+        // card instead of talking to it hands over a dark screen (as a
+        // unit showed).
+        if sdk_example(&image, Model::Rnse192, "probe").is_none() { return }
+        let probe = std::fs::read(sdk.join("out/probe-192.bin")).unwrap();
+        let entries = vec![rnse::fat::Entry::file("RNSE.BIN", probe)];
         let card = rnse::fat::card("RNSE", &entries, None).unwrap();
         // In the second slot an old card, of version 1 of the
         // specification: no answer to CMD8, and busy for a while.
@@ -1490,8 +1495,10 @@ fn programs_come_from_an_sd_card() {
         let tail = &text[text.len().saturating_sub(400)..];
         assert!(text.contains("rnse sdk: sdboot"), "{}: {:?}", name, tail);
         assert!(text.contains("STARTING IT"), "{}, slot {}: {:?}", name, slot, tail);
-        assert!(text.contains("rnse sdk: hello"), "{}, slot {}: {:?}", name, slot, tail);
+        assert!(text.contains("rnse sdk: probe"), "{}, slot {}: {:?}", name, slot, tail);
         assert!(!text.contains("unexpected"), "{}: {:?}", name, tail);
+        let (_, _, pixels) = m.render();
+        assert!(pixels.iter().any(|&p| p != 0), "{}, slot {}: the screen is dark", name, slot);
         let cache = &m.cpu.cache.trouble;
         assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
     }
