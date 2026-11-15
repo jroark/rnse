@@ -371,7 +371,12 @@ All three were sent to a unit's by a program of the SDK
 (`sdk/examples/player`, `tuner`), with the sound to hear for it: they
 are all it wants, from the state the stock software leaves it in.
 Asked for its status (0x88) 50 ms after a new frequency it answered
-with an acknowledgement that was not zero: busy, presumably.  (The
+with an acknowledgement that was not zero: busy, presumably.  The
+same at a start: of the stock software's start-up frames sent back to
+back by a program, a unit's processor refused about half with `20 [07]`
+(`dd`, `17 [01]`, `19 [07 03 0a]`, the second `d1`, `d9`, `81 [0a 0d]`,
+`80 [08 00]`, `81 [0a 02]`) and one, `d0`, with `20 [08]`, took each
+when it was sent again 100 ms later, and answered nothing to `8a`.  (The
 software sends more under 0x82 that is not understood: `03 04`, and
 `09 01 28 01`.)
 A real radio processor, asked by a program as its own software asks
