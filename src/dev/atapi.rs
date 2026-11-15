@@ -295,8 +295,16 @@ pub struct Atapi {
     settle: u64,
     pub settle_micros: u64,
     pub settle_sense: (u8, u8, u8),
-    /// With [`times`](Self::times): microseconds a sector takes to read.
+    /// With [`times`](Self::times): microseconds a sector takes to read,
+    /// what getting to another place on the disc costs at least, and
+    /// what it costs more for every sector of the way (in nanoseconds,
+    /// up to 300 ms).
     pub sector_micros: u64,
+    pub seek_micros: u64,
+    pub seek_nanos_per_sector: u64,
+    /// Vendor, product and revision as the drive gives them to INQUIRY
+    /// (28 characters), when they are known from a unit.
+    pub identity: Option<&'static [u8; 28]>,
     /// An eject takes time as well: the drive is "not ready" (2/04/00)
     /// while the disc goes out, then says that the medium may have
     /// changed, then "no medium, tray closed" (2/3A/01) for a while
@@ -399,6 +407,9 @@ impl Atapi {
             settle: 0,
             settle_micros: 0,
             sector_micros: SECTOR_MICROS,
+            seek_micros: SEEK_MICROS,
+            seek_nanos_per_sector: 0,
+            identity: None,
             settle_sense: (2, 0x04, 0x04),
             ejecting: 0,
             tray: 0,
@@ -863,7 +874,11 @@ impl Atapi {
             return;
         };
         if self.times {
-            let jump = if lba.abs_diff(self.head) > 16 { SEEK_MICROS } else { 0 };
+            let way = u64::from(lba.abs_diff(self.head));
+            // (Any way at all on a drive whose seeks were measured:
+            // its first read after a pause cost as much as a jump.)
+            let near = if self.seek_nanos_per_sector > 0 { 0 } else { 16 };
+            let jump = if way > near { self.seek_micros + (way * self.seek_nanos_per_sector / 1000).min(300_000) } else { 0 };
             self.busy = jump + u64::from(n) * self.sector_micros;
             self.head = lba + n;
         }
@@ -948,6 +963,15 @@ impl Atapi {
                 d[8..16].copy_from_slice(b"RNSE    ");
                 d[16..32].copy_from_slice(b"EMULATED DVD-ROM");
                 d[32..36].copy_from_slice(b"1.00");
+                if let Some(name) = self.identity {
+                    // A drive that was asked: its first 36 bytes (it
+                    // says there are 96; what the rest holds was not
+                    // read).
+                    d[3] = 0x31;
+                    d[4] = 0x5b;
+                    d[8..36].copy_from_slice(name);
+                    d.resize(96, 0);
+                }
                 self.data_in(d, p[4] as usize);
             }
             0x1b | 0x2b => {

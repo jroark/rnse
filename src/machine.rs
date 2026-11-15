@@ -57,6 +57,13 @@ const PULSES_PER_METRE: f64 = 2.5;
 const GYRO_REST: f64 = 418.0;
 const GYRO_PER_DPS: f64 = 5.12;
 
+/// How long the external watchdog waits for an edge on its strobe
+/// before it resets the unit, in milliseconds.  Measured on a 192
+/// (`sdk/examples/suite`): the strobe was left alone and the unit was
+/// reset between 105 and 115 ms after its last edge.  The emulator
+/// had 1.5 s, a guess.  The 193's is taken to be the same.
+pub const WATCHDOG_MS: u64 = 105;
+
 /// What the machine keeps about the external watchdog.
 #[derive(Default, Clone, Copy)]
 pub struct Watchdog {
@@ -217,7 +224,21 @@ impl Machine {
             m.board.atapi.needs_start = true;
             m.board.atapi.settle_micros = 5_650_000;
             m.board.atapi.eject_micros = 3_600_000;
-            m.board.atapi.sector_micros = 5_500;
+            // (`sdk/examples/suite` on a unit: 256 sectors in a row in
+            // 1342 ms; 64 sectors 529 to 612 ms after a jump, shorter
+            // or longer with the way.  Its name is its own.)
+            m.board.atapi.sector_micros = 5_240;
+            m.board.atapi.seek_micros = 200_000;
+            m.board.atapi.seek_nanos_per_sector = 3_500;
+            m.board.atapi.identity = Some(b"ALPINE  DV33M01B/       2912");
+            // The A/D converter's inputs with the display closed and
+            // nothing going on, as a unit's read (input 3 is the
+            // display's position and has its model).
+            for (i, v) in [459u16, 331, 933, 0, 424, 589, 423].into_iter().enumerate() {
+                if i != 3 {
+                    m.board.adc.input[i] = v;
+                }
+            }
             // The levels on the processor's own port pins, all inputs,
             // as a unit's report has them.  What they are is not known.
             m.cpu.io.pdtra_in = 0x3d24;
@@ -1617,7 +1638,7 @@ impl Machine {
                     }
                     self.watchdog.edges = edges;
                     self.watchdog.last = now;
-                } else if (edges >= 2 || self.watchdog_always) && now - self.watchdog.last > 1500 * self.cycles_per_ms() {
+                } else if (edges >= 2 || self.watchdog_always) && now - self.watchdog.last > WATCHDOG_MS * self.cycles_per_ms() {
                     self.watchdog.last = now;
                     eprintln!("[boot] the watchdog was not served: reset");
                     self.reset_requested = true;
@@ -1899,12 +1920,12 @@ mod tests {
         let mut m = strobe_then_hang(0);
         let ms = m.cycles_per_ms();
         assert_eq!(m.run(3_000 * ms), Stop::Budget);
-        // Strobed and then abandoned: reset after 1.5 s.
+        // Strobed and then abandoned: reset after WATCHDOG_MS.
         let mut m = strobe_then_hang(3);
         assert_eq!(m.board.watchdog_edges, 0);
-        assert_eq!(m.run(1_400 * ms), Stop::Budget);
+        assert_eq!(m.run(90 * ms), Stop::Budget);
         assert_eq!(m.board.watchdog_edges, 3);
-        assert_eq!(m.run(300 * ms), Stop::Fault);
+        assert_eq!(m.run(50 * ms), Stop::Fault);
         assert!(m.reset_requested);
     }
 }

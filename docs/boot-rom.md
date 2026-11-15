@@ -204,7 +204,7 @@ says (`Atapi::loading_sense`), followed as before by one "the medium
 may have changed" when the disc is ready.
 
 It was an inference; it has since been measured, on a North American
-192 (its drive an Alpine DV35M110) with `sdk/examples/drive`, which
+192 (its drive calls itself an Alpine DV33M01B) with `sdk/examples/drive`, which
 asks the drive ten times a second and logs every change, here with a
 CD-R, ejected by command and pushed back in by hand (times in ms from
 the program's start; the same lines came over the CAN bus):
@@ -243,7 +243,8 @@ s from a reset to starting a program from the disc, the emulator with
 The emulated 192's drive now does all this by default: 2.7 s of
 loading, the attention, 2/04/04 until it is told to start and for
 5.65 s after, 3.6 s for an eject and 3 s of 2/3A/01, and
-with `--drive-times` 5.5 ms a sector.  The program's log in the
+with `--drive-times` 5.24 ms a sector and 200 ms and more for a jump
+(`sdk/examples/suite` measured both more closely).  The program's log in the
 emulator is the unit's, line for line, the failed reads included.  The
 North American 192 software still takes a disc that goes in while it
 runs.  The 193's drive, which nobody has measured, is as it was: 6 s

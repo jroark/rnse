@@ -167,8 +167,10 @@ impl Parser {
 /// How long to wait for the unit to acknowledge a frame.
 const ACK_TIMEOUT_MS: u64 = 300;
 const RETRIES: u32 = 3;
-/// From the release of the reset line to the start-up frame (assumed).
-pub const START_MS: u64 = 20;
+/// From the release of the reset line to the start-up frame.  With 60
+/// ms the SDK's start of the controller takes the 340 ms it took on a
+/// unit (20 ms were assumed before, which made it 300).
+pub const START_MS: u64 = 60;
 
 pub struct Panel {
     parser: Parser,
@@ -387,12 +389,12 @@ mod tests {
         p.set_reset(false, 200);
         assert_eq!(p.poll(200 + START_MS - 1), None, "still starting");
         assert_eq!(p.poll(200 + START_MS), Some(vec![0x0f, 0x02, 0x11]));
-        assert!(p.receive(&[ACK], 230).is_empty());
+        assert!(p.receive(&[ACK], 270).is_empty());
         assert!(p.online);
         assert_eq!(p.resets, 0);
         // The key held since before the start is reported.
-        assert_eq!(p.poll(240).unwrap(), frame(CMD_KEYS, &[0, 2, 0, 0, 0, 0]));
-        p.receive(&[ACK], 250);
+        assert_eq!(p.poll(280).unwrap(), frame(CMD_KEYS, &[0, 2, 0, 0, 0, 0]));
+        p.receive(&[ACK], 290);
         // A pulse on the line starts it all over.
         p.set_reset(true, 300);
         p.set_reset(false, 302);

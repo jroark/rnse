@@ -1388,7 +1388,7 @@ fn suite_runs_its_measurements() {
     assert!(m.panel_key("RETURN", true));
     m.run(300 * ms);
     assert!(m.panel_key("RETURN", false));
-    // The watchdog test ends the run: the emulator's bites after 1.5 s.
+    // The watchdog test ends the run: the emulator's bites as a unit's does.
     let stop = m.run(8_000 * ms);
     let text = String::from_utf8_lossy(&m.console).into_owned();
     assert_eq!(stop, Stop::Fault, "{}: {:?}", name, text);
@@ -1412,20 +1412,23 @@ fn suite_runs_its_measurements() {
     // board_init leave it.
     assert_eq!(records.iter().find(|r| r.0 == 3 && r.1 == 0).map(|r| r.3), Some(1), "{}", name);
     assert_eq!(value(3, 17), Some(0x3f9f), "{}", name);
-    // The clock chip's counter is a 64 Hz one.
-    assert_eq!(value(4, 0), Some(64), "{}", name);
+    // The clock chip is not running, as on a unit.
+    assert_eq!(value(4, 0), Some(0), "{}", name);
     assert!(value(5, 0).unwrap() < 1_000, "{}: faceplate after {:?} ms", name, value(5, 0));
     // The drive: the disc's size, and 64 sectors at 5.5 ms each.
     assert_eq!(value(7, 9), Some(image.len() as u32 / 2048), "{}", name);
     for item in 10..=13 {
         let t = value(7, item).unwrap();
-        assert!((340_000..500_000).contains(&t), "{}: read {} took {} us", name, item, t);
+        assert!((330_000..650_000).contains(&t), "{}: read {} took {} us", name, item, t);
     }
+    // Its name, as a unit's drive gave it.
+    assert_eq!(value(7, 2), Some(u32::from_be_bytes(*b"ALPI")), "{}", name);
     // The key and the knob were seen.
     assert!(records.iter().any(|r| r.0 == 9 && r.1 == 0 && r.2 & 1 << 2 != 0), "{}: NAV not seen", name);
     let knob: Vec<i32> = records.iter().filter(|r| r.0 == 9 && r.1 == 2).map(|r| r.2 as i32).collect();
     assert!(knob.last().is_some_and(|v| v.abs() == 3), "{}: the knob's three steps not seen: {:?}", name, knob);
-    // And the watchdog: records every 10 ms up to the emulator's 1.5 s.
+    // And the watchdog: records every 10 ms until it bites, after some
+    // 110 ms as on a unit.
     let last = records.iter().filter(|r| r.0 == 10 && r.1 == 0).map(|r| r.2).max().unwrap();
-    assert!((1_400..=1_600).contains(&last), "{}: reset {} ms after the last strobe", name, last);
+    assert!((90..=130).contains(&last), "{}: reset {} ms after the last strobe", name, last);
 }

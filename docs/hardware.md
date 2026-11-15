@@ -36,7 +36,10 @@ own end): the two card slots, two NEC `D77115A` (IC2002, IC2003), a
 22.5792 MHz crystal (512 x 44.1 kHz) and three multiplexers (two
 74VHC153, one 74VHC157).  These are the "SD card processors" below.
 
-**Drive**: an Alpine DV35M110, a DVD mechanism that pulls the disc in
+**Drive**: an Alpine DV35M110 by its label in the photographs; the
+drive of another unit names itself `ALPINE  DV33M01B/` with revision
+`2912` when asked (INQUIRY; type 5, removable, 96 bytes of which the
+first 36 were read).  A DVD mechanism that pulls the disc in
 by motor (its board has test points named `LOADOUT`, `PLAYA`, `PLAYB`),
 with a Panasonic `MN103S26EDC` controller, a Panasonic `AN8703FH` and a
 chip with Alpine's own marking.
@@ -82,7 +85,15 @@ SH7751R but not on the original SH7750.
   take the tick for 2 ms and the clock for 29.4 MHz.)
 * CPU clock: taken as four times that, 235 MHz (the SH7750R is a
   240 MHz part), and the emulator counts one instruction per cycle.
-  That is an estimate of the real speed, not a measurement.  The OS's
+  That is an estimate of the real speed, and a unit has shown how good:
+  a loop of 2 000 000 rounds of multiply, add and count took 51.0 ms
+  there and takes 59.5 ms here (the processor does two instructions
+  in a cycle where it can); adding up a megabyte of words through the
+  cache took 8.7 ms there and 7.8 ms here; and 8192 words read past
+  the cache took 915 us there, 112 ns a word, against 245 us here,
+  where memory costs nothing: the emulator has no times for the bus.
+  The processor's clock chip is not running on a unit (RCR2 0, the
+  64 Hz counter standing still), and neither is the emulator's now.  The OS's
   calibrated delay routine (0x800ab794 in V2200815) runs 304
   instructions per unit of its argument.
 * FPSCR is 0x00040001 in every task: round to zero, denormals as zero.
@@ -133,7 +144,7 @@ The OS addresses its byte-wide ports through a table of eight (index 0-7
 
 | port (data register) | bit | direction | meaning |
 |----------------------|-----|-----------|---------|
-| 0 (0x12300001) | 0 | out | watchdog strobe, toggled every 10 ms from the tick; the longest pause the OS leaves is about 220 ms, while it starts.  The emulator resets the unit when, after the first two edges, 1.5 s pass without one (the real period is not known) |
+| 0 (0x12300001) | 0 | out | watchdog strobe, toggled every 10 ms from the tick; and the watchdog is quick: a unit was reset between 105 and 115 ms after the last edge of a strobe that was then left alone (`sdk/examples/suite`).  The emulator resets the unit when, after the first two edges, 105 ms pass without one; it had 1.5 s, and its stock software, which strobes every 10 ms and never pauses for more than about 30 ms once it runs, did not notice the difference |
 | 2 (0x12500001) | 6 | in  | switch of the first SD card slot (the one of DSP 0): high with a card in it |
 | 2 (0x12500001) | 4 | in  | supply voltage good.  Low for about three seconds and the OS masks all interrupts and waits for the watchdog to reset it |
 | 3 (0x12600001) | 4 | out | display motor, towards closed |
@@ -323,6 +334,12 @@ them five times and stretched the start-up by most of a minute.  The firmware al
 
 Volume and source go to this processor too: `19 [01 level]`, level 0
 to 30, and `81 [08 source level ..]`, 3 the tuner and 1 the CD drive.
+(One such block as a real radio processor sent it unasked, as far as
+the receiver's 32 bytes of buffer held it, heard by a program that
+only listened: `00 88 00 39`, that is from the radio, command 0x88, 57
+bytes, then `20 10 0c 14 07 fa 3d 0e`, `00 00 00 00`, `23 31 20 66 6f
+72 20 20`, which is the text "#1 for  " of the station it was tuned
+to, `00 00 00 0a`, `0a 20 01 65`.)
 Its status block, the answer to request 0x88 and also sent unasked,
 carries four fields in its first eight bytes (not understood) and
 sixteen bytes of amplifier state from offset 33: source, volume, and
@@ -456,7 +473,9 @@ averages eight samples of each (dropping the lowest and highest).
 Input 3 is the display position: at most 94 means fully open, at least
 894 closed (the OS prints `init_dsp_pos = 1` or `2` accordingly at
 start-up; 0 means somewhere in between).  The other inputs are not
-identified; they read 0 in the emulator.
+identified.  On a unit with the display closed and nothing going on
+the seven read 459, 331, 933, 982, 424, 589 and 423, and that is what
+the emulator's read now (input 3 by its model: 1023 closed).
 
 This matters more than it seems.  While the display is open the screen
 cannot be seen, so the OS shows only the media overview and turns every

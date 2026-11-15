@@ -402,6 +402,8 @@ pub struct OnChip {
 
     // RTC
     pub rtc: [u8; 16],
+    /// RCR2: bit 3 the oscillator, bit 0 the counters running.
+    pub rcr2: u8,
     rtc_last: u64,
 
     pub next_event: u64,
@@ -468,6 +470,7 @@ impl OnChip {
             wtcnt: 0,
             wtcsr: 0,
             rtc: [0; 16],
+            rcr2: 0,
             rtc_last: 0,
             next_event: u64::MAX,
             tcpr2: 0,
@@ -900,13 +903,19 @@ impl OnChip {
             // RTC
             0xffc8_0000..=0xffc8_003f => {
                 let i = ((addr & 0x3f) >> 2) as usize;
-                if i == 0 {
+                if i == 0 && self.navi.is_none() && self.rcr2 & 0x09 != 0x09 {
+                    // The 192's clock is not running: on a unit this
+                    // counter stood still for a second, with RCR2 0.
+                    0
+                } else if i == 0 {
                     // R64CNT: sub-second counter
                     ((now / (self.rtc_period() / 64).max(1)) & 0x7f) as u32
                 } else {
                     self.rtc[i] as u32
                 }
             }
+
+            0xffc8_0040 => self.rcr2 as u32,
 
             // INTC
             // ICR.  Bit 15 is the level on the NMI pin, which is high
@@ -1101,6 +1110,7 @@ impl OnChip {
                 let i = ((addr & 0x3f) >> 2) as usize;
                 self.rtc[i] = v as u8;
             }
+            0xffc8_0040 => self.rcr2 = v as u8,
 
             // INTC
             0xffd0_0000 => self.intc.icr = v as u16,
