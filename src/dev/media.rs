@@ -33,6 +33,8 @@ const SETTLE: u64 = 400;
 const AHEAD: u64 = 4096;
 
 pub struct Media {
+    /// Cards that go in are of version 1 of the specification (`SdCard::old`).
+    pub old_cards: bool,
     pub dsps: [Dsp; 2],
     /// Cycles of the main processor in a second.
     pub per_second: u64,
@@ -58,7 +60,7 @@ impl Media {
         let mut dsps = [Dsp::new(), Dsp::new()];
         dsps[0].name = "dsp0";
         dsps[1].name = "dsp1";
-        Media { dsps, per_second: 235_200_000, time: 0, rest: [0; 2], ahead: [0; 2], trace: false }
+        Media { dsps, per_second: 235_200_000, time: 0, rest: [0; 2], ahead: [0; 2], trace: false, old_cards: false }
     }
 
     /// Bring the processors up to cycle `now` of the main processor.
@@ -101,7 +103,7 @@ impl Media {
         self.sync(now);
         let v = self.dsps[channel].host_read();
         if self.trace {
-            eprintln!("[dsp{}] host R {:04x}", channel, v);
+            eprintln!("[dsp{}] host R {:04x}  at {} ms", channel, v, now / (self.per_second / 1000));
         }
         v
     }
@@ -109,7 +111,7 @@ impl Media {
     pub fn write(&mut self, channel: usize, word: u16, now: u64) {
         self.sync(now);
         if self.trace {
-            eprintln!("[dsp{}] host W {:04x}", channel, word);
+            eprintln!("[dsp{}] host W {:04x}  at {} ms", channel, word, now / (self.per_second / 1000));
         }
         self.dsps[channel].host_write(word);
     }
@@ -154,7 +156,9 @@ impl Media {
 
     /// Put a card into a slot (0 or 1).
     pub fn insert(&mut self, slot: usize, card: Card) {
-        self.dsps[slot].card = Some(SdCard::new(card));
+        let mut card = SdCard::new(card);
+        card.old = self.old_cards;
+        self.dsps[slot].card = Some(card);
     }
 
     /// Take the card out of a slot.  The slot's switch is on the

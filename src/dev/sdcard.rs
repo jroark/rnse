@@ -38,6 +38,13 @@ pub struct SdCard {
     /// Commands received, for tests and traces.
     pub commands: u64,
     pub sectors_read: u64,
+    /// A card of version 1 of the specification: it does not answer
+    /// CMD8 (which counts as an illegal command, and shows in the
+    /// status of the next response), and like a real card it is busy
+    /// for a few rounds of ACMD41 before it is ready.
+    pub old: bool,
+    illegal: bool,
+    busy: u32,
 }
 
 fn crc7(bytes: &[u8]) -> u8 {
@@ -75,7 +82,7 @@ impl Response {
 
 impl SdCard {
     pub fn new(card: Card) -> Self {
-        SdCard { card, state: IDLE, rca: 0, app: false, stream: None, commands: 0, sectors_read: 0 }
+        SdCard { card, state: IDLE, rca: 0, app: false, stream: None, commands: 0, sectors_read: 0, old: false, illegal: false, busy: 0 }
     }
 
     fn status(&self) -> u32 {
@@ -87,12 +94,18 @@ impl SdCard {
     pub fn command(&mut self, cmd: u8, arg: u32) -> (Response, Option<Vec<u8>>) {
         self.commands += 1;
         let app = std::mem::take(&mut self.app);
-        let status = self.status();
+        // An illegal command is reported once, in the next response.
+        let status = self.status() | if std::mem::take(&mut self.illegal) { 0x0040_0000 } else { 0 };
         let r1 = |v: u32| Response::Short(cmd, v);
         match (app, cmd) {
             (_, 0) => {
                 self.state = IDLE;
                 self.stream = None;
+                self.busy = if self.old { 3 } else { 0 };
+                (Response::None, None)
+            }
+            (false, 8) if self.old => {
+                self.illegal = true;
                 (Response::None, None)
             }
             // A card of version 2 of the specification answers this one.
@@ -105,7 +118,9 @@ impl SdCard {
                 // Ready, 2.7-3.6 V.  A high-capacity card comes up only
                 // for a host that says it knows about such cards.
                 let high = self.card.high_capacity();
-                let ready = !high || arg & 0x4000_0000 != 0;
+                let waited = self.busy == 0;
+                self.busy = self.busy.saturating_sub(1);
+                let ready = (!high || arg & 0x4000_0000 != 0) && waited;
                 if ready && arg & 0x00ff_8000 != 0 {
                     self.state = READY;
                 }

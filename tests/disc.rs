@@ -1478,11 +1478,14 @@ fn programs_come_from_an_sd_card() {
         let hello = std::fs::read(sdk.join("out/hello-192.bin")).unwrap();
         let entries = vec![rnse::fat::Entry::file("RNSE.BIN", hello)];
         let card = rnse::fat::card("RNSE", &entries, None).unwrap();
+        // In the second slot an old card, of version 1 of the
+        // specification: no answer to CMD8, and busy for a while.
+        m.board.media.old_cards = slot == 1;
         assert!(m.insert_card(slot, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
         let ms = m.cycles_per_ms();
         m.cpu.breakpoints.clear();
         if let Some(address) = Machine::known_printf("V2220371") { m.hook_printf(address); }
-        assert_eq!(m.run(25_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert_eq!(m.run(40_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
         let tail = &text[text.len().saturating_sub(400)..];
         assert!(text.contains("rnse sdk: sdboot"), "{}: {:?}", name, tail);
