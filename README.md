@@ -112,6 +112,13 @@ missing boot ROM is replaced.
 
 There are no dependencies outside the Rust standard library.
 
+## Native macOS app
+
+Build with `./macos/build.sh`, then open `out/macos/RNS-E.app`. The native
+app uses the photographed faceplate with clickable keys and rotating knobs,
+live sound, media mounting, screenshots, and firmware logs. See
+[macOS instructions](macos/README.md) for requirements and controls.
+
 ## Using it
 
 Make an ISO image of a firmware update CD (2048-byte sectors, e.g.
