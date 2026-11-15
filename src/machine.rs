@@ -783,6 +783,11 @@ impl Machine {
         let ms = self.cpu.cycles / self.cycles_per_ms();
         let now = self.cpu.cycles;
         let char_time = self.cycles_per_ms() * 10 / 96 * 10;
+        // The 192's radio processor hears eight bits and no parity (mode
+        // 0, which the boot ROM and the OS both set); in the
+        // faceplate's format, with a parity bit, a unit's did not
+        // answer one frame of a program that had set that by mistake.
+        let format_ok = self.cpu.io.navi.is_some() || self.board.uart[1].mode() == 0;
         let uart: &mut dyn SerialPort = match self.cpu.io.navi.as_mut() {
             Some(navi) => &mut navi.radio_uart,
             None => &mut self.board.uart[1],
@@ -791,9 +796,9 @@ impl Machine {
         let bytes = uart.take_tx();
         if !bytes.is_empty() {
             if self.trace_serial {
-                eprintln!("[radio] {:>7} ms  unit -> {}", ms, hex(&bytes));
+                eprintln!("[radio] {:>7} ms  unit -> {}{}", ms, hex(&bytes), if format_ok { "" } else { "  (not in the line's format: unheard)" });
             }
-            if self.radio_present {
+            if self.radio_present && format_ok {
                 let reply = self.radio.from_unit(&bytes);
                 if !reply.is_empty() {
                     // As with the faceplate: an answer takes at least

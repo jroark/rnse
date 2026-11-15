@@ -435,6 +435,13 @@ is before the timer was started, which left the timer running after the
 last frame and produced such a reset a few seconds after every start.  It now
 answers after the time the bytes take on the line.)
 
+Format.  The radio processor's channel has mode 0 (eight bits, no
+parity), the faceplate's 0x0011 (a parity bit).  The boot ROM and the
+OS set channel 1 the same way: control 0, mode 0, divisor 0x5f, 0 to
++0x0c and +0x0e, 0x0104 to the status, 0x8000 and then 0 to +0x0c,
+and control 0x0058.  A unit's radio processor answered nothing that
+was sent in the faceplate's format.
+
 Bit rates.  All four serial channels in use have divisor 0x5f (channels
 1 and 3 and the loader's use of 5) or 0x1f (the application's use of
 channel 5), a ratio of three as between 9600 and 28800, or 38400 and

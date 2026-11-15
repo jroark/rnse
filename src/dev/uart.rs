@@ -71,6 +71,11 @@ impl Uart {
     }
 
     /// Interrupt request line.
+    /// The mode register: the line's format.
+    pub fn mode(&self) -> u16 {
+        self.mode
+    }
+
     pub fn irq(&self) -> bool {
         let c = self.control;
         (c & 0x80 != 0 && c & 0x20 != 0) || (c & 0x04 != 0 && c & 0x20 != 0) || (c & 0x40 != 0 && !self.rx.is_empty())
