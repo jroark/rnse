@@ -708,6 +708,11 @@ fn drive_program_logs_the_drive() {
         let frames: Vec<_> = m.can().tx.iter().filter(|f| f.id == 0x7f5).cloned().collect();
         assert_eq!(frames.len(), states.len(), "{}", name);
         assert_eq!(&frames[loading].data[4..8], &[2, 4, 0, 0], "{}", name);
+        // NEXT: the drive's reading speed, 256 sectors timed.
+        press(&mut m, "NEXT");
+        m.run(3_000 * ms);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        assert!(text.contains(" READ 256 IN 000"), "{}: {:?}", name, text);
         press(&mut m, "SETUP");
         m.run(1_000 * ms);
         let text = String::from_utf8_lossy(&m.console).into_owned();
