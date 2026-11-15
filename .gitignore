@@ -11,3 +11,5 @@
 *.img
 /out/
 __pycache__/
+
+/macos/bridge/target/
