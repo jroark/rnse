@@ -227,9 +227,9 @@ for 23 s and for 24 s, reading failed all the while, and whoever
 watched saw the disc stand still.  The stock software does not leave
 it alone: whenever the drive is not ready it sends START STOP UNIT with
 the start bit, again and again, between its questions (it can be seen
-doing so in the emulator).  The program had only asked.  How long the
-drive takes from that command to READY is not measured yet; the
-program has a key for it now (PREV).
+doing so in the emulator).  The program had only asked.  A third run,
+with a key for the command (PREV): the drive said 2/04/04 for 51 s,
+was told to start, and was READY 5.65 s later.
 
 On the way out the drive says 2/04/00 for 2.8 to 3.7 s, then the
 attention, then 2/3A/01 for 2 to 5.5 s before 2/3A/00.
@@ -241,8 +241,8 @@ s from a reset to starting a program from the disc, the emulator with
 1.5 ms a sector needed 15 s, and with 5.5 ms it needs 46.
 
 The emulated 192's drive now does all this by default: 2.7 s of
-loading, the attention, 2/04/04 until it is told to start and for 2 s
-after (the 2 s are a guess), 3.6 s for an eject and 3 s of 2/3A/01, and
+loading, the attention, 2/04/04 until it is told to start and for
+5.65 s after, 3.6 s for an eject and 3 s of 2/3A/01, and
 with `--drive-times` 5.5 ms a sector.  The program's log in the
 emulator is the unit's, line for line, the failed reads included.  The
 North American 192 software still takes a disc that goes in while it

@@ -211,11 +211,11 @@ impl Machine {
             // disc that goes in while the unit runs"): 2.7 s to load a
             // disc, 3.6 s to push one out, 5.5 ms to read a sector
             // (when its times are on).  A disc it has loaded it does
-            // not turn until it is told to start; how long it then
-            // takes to be ready is not measured, two seconds are taken.
+            // not turn until it is told to start, and is ready 5.65 s
+            // after that.
             m.board.atapi.spin_up_micros = 2_700_000;
             m.board.atapi.needs_start = true;
-            m.board.atapi.settle_micros = 2_000_000;
+            m.board.atapi.settle_micros = 5_650_000;
             m.board.atapi.eject_micros = 3_600_000;
             m.board.atapi.sector_micros = 5_500;
             // The levels on the processor's own port pins, all inputs,
