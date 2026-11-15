@@ -1493,6 +1493,9 @@ fn programs_come_from_an_sd_card() {
         assert_eq!(m.run(40_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
         let tail = &text[text.len().saturating_sub(400)..];
+        for d in &m.board.media.dsps {
+            assert_eq!(d.fault, None, "{}, slot {}: {} stopped", name, slot, d.name);
+        }
         assert!(text.contains("rnse sdk: sdboot"), "{}: {:?}", name, tail);
         assert!(text.contains("STARTING IT"), "{}, slot {}: {:?}", name, slot, tail);
         assert!(text.contains("rnse sdk: probe"), "{}, slot {}: {:?}", name, slot, tail);

@@ -673,6 +673,23 @@ What is not modelled, or assumed:
   In HALT the real part runs on a divided clock; whether that slows
   its timer is not clear from the manual, and the emulator does not
   slow it.
+* **A word sent too soon after another is lost, by the program's own
+  design.**  It takes the words of a message's head in its host
+  interrupt (0x0230, into a ring of 32 words at 0x0a64), but the words
+  that follow a head it fetches itself with that interrupt masked
+  (0x0381: it waits on the status register and reads the data register
+  directly), sets a flag (0x0a61) and lets the next host interrupt pass
+  without reading, as the one the fetched word had raised.  A word the
+  host writes between that fetch and the unmasking eight instructions
+  later raises no second request, the one interrupt is let pass, and
+  the word stays in the register for good: the processor halts in its
+  main loop and the host waits on "cannot take a word".  This is in
+  the program, not the model; the emulator met it with a driver of the
+  SDK that wrote each word the moment the status allowed, at one
+  alignment of the two processors' time and not at others.  Whether a
+  real main processor can be fast enough is not known (two accesses to
+  the port against eight instructions of the card processor: about the
+  same time).  The SDK's driver waits 20 us before each word.
 * Writing to a card (the image is never changed: a write command gets
   the card's "write protect violation"), the copy protection ROM, the
   serial input, the processor's stop mode beyond stopping (what wakes
