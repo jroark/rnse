@@ -309,6 +309,28 @@ was cut short or after software of one's own that does not start, is
 brought back by an update disc for as long as the first 48 KiB of the
 flash are whole, which no update and no loader touches.  Not tried on a
 unit.  It has nothing for the SD cards.
+What the ROM takes for "no software" was tried the same way, with a
+flash image of the installed North American software and one thing
+wrong in it at a time:
+
+| what is wrong | what the ROM does |
+|---|---|
+| nothing | starts the software |
+| the directory's first tag (`.OS ` at 0xc000) gone, or the whole directory erased | reads the loader from the disc and calls it ("no program in the ROM") |
+| one byte of the OS module changed | the same: it adds the OS module up and does not start one whose sum is wrong |
+| one byte of the application module changed | starts the software: it checks the OS module only |
+| the `.IDX` tag of the directory gone | starts the software |
+
+So the OS module's place is the one the ROM guards, and a program put
+there with a right checksum is started like the stock OS, at every
+start, for good.  The way back from such a program that needs nothing
+but one sector erased: take the directory away (the 8 KiB sector at
+0xc000) and restart with an update disc in the drive.  And a program
+there that does not get as far as that is not taken away by anything
+found so far: the ROM does not look at keys, and whether its count of
+failed starts (service 6) ever leads to the loader has not been looked
+for.  Emulator only, all of it.
+
 `rnse loader` starts one directly, with interrupts masked and zeroes in
 r4-r6 unless told otherwise (`--args`).
 
