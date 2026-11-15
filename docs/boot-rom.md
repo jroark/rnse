@@ -326,10 +326,13 @@ there with a right checksum is started like the stock OS, at every
 start, for good.  The way back from such a program that needs nothing
 but one sector erased: take the directory away (the 8 KiB sector at
 0xc000) and restart with an update disc in the drive.  And a program
-there that does not get as far as that is not taken away by anything
-found so far: the ROM does not look at keys, and whether its count of
-failed starts (service 6) ever leads to the loader has not been looked
-for.  Emulator only, all of it.
+there that does not get as far as that is not taken away by the ROM:
+one that hangs at once was reset by the watchdog and started again
+1276 times in three minutes, and the ROM never went to the disc.  It
+does not look at keys either.  So a program that goes there brings its
+own guard (`sdk/src/flash.c`; `docs/custom-firmware.md`, "A program in
+flash").  Emulator only, all of it; `rnse boot` goes on through a
+watchdog reset when it runs a real ROM.
 
 `rnse loader` starts one directly, with interrupts masked and zeroes in
 r4-r6 unless told otherwise (`--args`).

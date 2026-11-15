@@ -83,6 +83,11 @@ pub struct Machine {
     pub echo_console: bool,
     /// CPU cycles per display frame.
     pub frame_cycles: u64,
+    /// Resets by the watchdog that the run went on through (with a
+    /// real boot ROM, which is what such a reset starts).
+    pub resets: u32,
+    /// A unit's boot ROM is in the stand-in's place (`start_from_reset`).
+    pub real_rom: bool,
     /// The drive's audio output since it was last taken away: 44.1 kHz
     /// stereo, a sample for every moment of emulated time (silence while
     /// nothing plays).  `None`: nobody is listening.  It is the signal
@@ -212,7 +217,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
+        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
         if model == crate::board::Model::Rnse192 {
             // The 192's drive as one was measured (docs/boot-rom.md, "A
             // disc that goes in while the unit runs"): 2.7 s to load a
@@ -404,6 +409,7 @@ impl Machine {
         }
         self.board.flash[..rom.len()].copy_from_slice(rom);
         self.cpu.hypercalls_enabled = false;
+        self.real_rom = true;
         self.cpu.trace_services = self.trace_bios;
         self.boot_calls.clear();
         self.cpu.reset();
@@ -1527,7 +1533,7 @@ impl Machine {
             }
             // `bra .` with every interrupt masked: the firmware has given
             // up and is waiting for the watchdog.
-            if self.cpu.imask() == 15 && self.peek16(self.cpu.pc) == Some(0xaffe) {
+            if self.cpu.imask() == 15 && self.peek16(self.cpu.pc) == Some(0xaffe) && !self.real_rom {
                 self.cpu.fault = Some(format!("the firmware stopped itself at {:08x} with interrupts off (it expects the watchdog to reset the unit)", self.cpu.pc));
                 return Stop::Fault;
             }
@@ -1641,6 +1647,16 @@ impl Machine {
                 } else if (edges >= 2 || self.watchdog_always) && now - self.watchdog.last > WATCHDOG_MS * self.cycles_per_ms() {
                     self.watchdog.last = now;
                     eprintln!("[boot] the watchdog was not served: reset");
+                    if self.real_rom {
+                        // With a real boot ROM a reset is a reset: the
+                        // processor starts at the ROM again, with the
+                        // memories as they are, and the run goes on.
+                        self.cpu.reset();
+                        self.watchdog.edges = 0;
+                        self.board.watchdog_edges = 0;
+                        self.resets += 1;
+                        continue;
+                    }
                     self.reset_requested = true;
                     self.cpu.fault = Some("reset requested".into());
                     return Stop::Fault;

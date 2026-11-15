@@ -638,6 +638,145 @@ pub fn custom_loader(image: &[u8], variant: &str, payload: &[u8]) -> Result<(Vec
     Ok((out, places))
 }
 
+/// A module to go in the operating system's place in flash: the stock
+/// module's header and length, and inside it a program of the SDK (the
+/// image `sdk/build.sh` writes, linked for the loader's place in RAM)
+/// behind a few instructions that copy it there and start it.  All
+/// three entry points lead to those instructions; the boot ROM calls
+/// the first and nothing comes back from it, so no other module is
+/// called.  The 192 only.
+///
+/// What the instructions do, at the module's offset 0x90: exceptions
+/// and interrupts off (the ROM's own handlers are at work when it
+/// calls), one edge on the watchdog's strobe, the copy through the
+/// uncached address of RAM, a mark in the first of the three arguments
+/// a loader gets ("FLSH": the SDK's start-up code counts the starts of
+/// a program that comes with it, `sdk/src/flash.c`) and zeroes in the
+/// others, and a jump to the program's first entry point.
+pub fn firmware_module(stock: &[u8], payload: &[u8], ram_load: u32) -> Result<Vec<u8>, FwError> {
+    const AT: usize = 0x90;
+    const PROGRAM: usize = 0x100;
+    let size = be32(stock, 0x74) as usize;
+    let load = be32(stock, 0x70) & 0x1fff_ffff;
+    if size > stock.len() || PROGRAM + payload.len() > size {
+        return bad(format!("the program is {:#x} bytes; the module's place holds {:#x}", payload.len(), size.saturating_sub(PROGRAM)));
+    }
+    if payload.len() < 0x20 || &payload[0x10..0x14] != SDK_MARK {
+        return bad("not a program of the SDK (no mark behind its entry points)");
+    }
+    let entry = be32(payload, 0);
+    if !(ram_load + 0x90..ram_load + 0x80 + payload.len() as u32).contains(&entry) {
+        return bad(format!("the program's first entry point, {:08x}, is not inside the place it is linked for at {:08x}", entry, ram_load));
+    }
+    let words = payload.len().div_ceil(4) as u32;
+    // Instructions, then the long words they load: (register, value).
+    let literals: [(u16, u32); 7] = [
+        (0, 0x5000_00f0),                              // SR
+        (5, 0xb230_0001),                              // port 0: the watchdog's strobe
+        (1, 0x8000_0000 | (load + PROGRAM as u32)),    // from: the program in flash
+        (2, 0xa000_0000 | ((ram_load & 0x1fff_ffff) + 0x80)), // to: RAM, uncached
+        (3, words),
+        (1, ram_load + 0x80),                          // where its entry points are then
+        (4, 0x464c_5348),                              // "FLSH": started from flash (sdk/src/flash.c)
+    ];
+    let mut code: Vec<u16> = Vec::new();
+    let mut fix: Vec<(usize, usize)> = Vec::new();    // (instruction index, literal index)
+    let mut load_literal = |code: &mut Vec<u16>, n: usize| {
+        fix.push((code.len(), n));
+        code.push(0xd000 | literals[n].0 << 8);
+    };
+    load_literal(&mut code, 0);
+    code.push(0x400e);              // ldc r0, sr
+    load_literal(&mut code, 1);
+    code.push(0x6050);              // mov.b @r5, r0
+    code.push(0xca01);              // xor #1, r0
+    code.push(0x2500);              // mov.b r0, @r5
+    load_literal(&mut code, 2);
+    load_literal(&mut code, 3);
+    load_literal(&mut code, 4);
+    let top = code.len();
+    code.push(0x6016);              // mov.l @r1+, r0
+    code.push(0x2202);              // mov.l r0, @r2
+    code.push(0x7204);              // add #4, r2
+    code.push(0x4310);              // dt r3
+    let back = top as i32 - (code.len() as i32 + 2);
+    code.push(0x8b00 | (back as u16 & 0xff)); // bf top
+    load_literal(&mut code, 5);
+    code.push(0x6012);              // mov.l @r1, r0
+    load_literal(&mut code, 6);
+    code.push(0xe500);              // mov #0, r5
+    code.push(0xe600);              // mov #0, r6
+    code.push(0x402b);              // jmp @r0
+    code.push(0x0009);              // nop
+    if code.len() % 2 == 1 {
+        code.push(0x0009);
+    }
+    let pool = AT + 2 * code.len();
+    for (at, n) in fix {
+        // mov.l @(disp, PC): the long word at (PC & ~3) + 4 + 4 * disp.
+        let pc = AT + 2 * at;
+        let disp = (pool + 4 * n - ((pc & !3) + 4)) / 4;
+        code[at] |= disp as u16;
+    }
+    if pool + 4 * literals.len() > PROGRAM {
+        return bad("the start-up instructions do not fit below the program");
+    }
+    let mut new = stock[..size].to_vec();
+    new[0x80..].fill(0);
+    let start = (0x8000_0000 | load) + AT as u32;
+    for i in 0..3 {
+        new[0x80 + 4 * i..0x84 + 4 * i].copy_from_slice(&start.to_be_bytes());
+    }
+    for (i, w) in code.iter().enumerate() {
+        new[AT + 2 * i..AT + 2 * i + 2].copy_from_slice(&w.to_be_bytes());
+    }
+    for (i, (_, v)) in literals.iter().enumerate() {
+        new[pool + 4 * i..pool + 4 * i + 4].copy_from_slice(&v.to_be_bytes());
+    }
+    new[PROGRAM..PROGRAM + payload.len()].copy_from_slice(payload);
+    // (The module on the disc may be stored longer than its size says.)
+    let mut out = stock.to_vec();
+    out[..size].copy_from_slice(&new);
+    fix_checksum(&mut out)?;
+    Ok(out)
+}
+
+/// A copy of an update disc on which a variant's operating system
+/// module is a program of the SDK ([`firmware_module`]).  The disc's
+/// own loader installs it like any software; every other module is the
+/// disc's, and stays in flash unused (the card processors' program is
+/// in one of them, where the SDK's card driver looks for it).
+pub fn firmware_disc(image: &[u8], variant: &str, payload: &[u8]) -> Result<Vec<u8>, FwError> {
+    let variants = load_variants(image)?;
+    let v = variants.iter().find(|v| v.name == variant).ok_or_else(|| FwError::Format(format!("no variant {} on this disc", variant)))?;
+    let loader = v.module("LDM").ok_or_else(|| FwError::Format("the variant has no loader".into()))?;
+    if loader.load_addr != 0x8df0_0000 {
+        return bad("a program can be installed on the 192 only, so far");
+    }
+    let ram_load = loader.load_addr;
+    let error = std::cell::RefCell::new(None);
+    let (out, changed) = repack(image, &|var, name| {
+        if var != variant || name != "OSM" {
+            return None;
+        }
+        let stock = &v.module("OSM")?.data;
+        match firmware_module(stock, payload, ram_load) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                error.borrow_mut().get_or_insert(e);
+                None
+            }
+        }
+    })?;
+    if let Some(e) = error.into_inner() {
+        return Err(e);
+    }
+    if changed.is_empty() {
+        return bad("the disc's operating system module was not replaced");
+    }
+    Ok(out)
+}
+
 /// Give a variant's software on the disc another software index: the
 /// four digits after `SOFIDX:` in its index file.  The installed
 /// application takes a program disc for an update only when this number

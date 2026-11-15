@@ -1327,6 +1327,133 @@ fn real_boot_rom_brings_an_empty_unit_back_from_a_disc() {
     }
 }
 
+/// A 192 as `started_192` makes it, under a unit's boot ROM, with the
+/// software of `flash` installed and `drive` in the drive.
+fn rom_192(flash: &[u8], drive: &[u8], rom: &[u8]) -> Option<Machine> {
+    use rnse::board::Model;
+    let variants = fw::load_variants(flash).unwrap();
+    let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192))?;
+    let index = fw::IndexInfo::from_disc(flash, &v.name).unwrap();
+    let mut m = Machine::new();
+    m.echo_console = false;
+    m.scramble_ram();
+    m.cache_model();
+    m.install_boot_stub(&v.name);
+    m.install(v, &index);
+    m.atapi().load(drive.to_vec());
+    m.set_ignition(true);
+    if let Some(address) = Machine::known_printf("V2220371") {
+        m.hook_printf(address);
+    }
+    m.start_from_reset(rom).unwrap();
+    Some(m)
+}
+
+/// Run until the log has `what` after `from`, in steps of five seconds.
+fn until(m: &mut Machine, from: usize, what: &str, seconds: u64) -> Option<usize> {
+    let ms = m.cycles_per_ms();
+    for _ in 0..seconds / 5 {
+        assert_eq!(m.run(5_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console);
+        if let Some(at) = text.get(from..).and_then(|t| t.find(what)) {
+            return Some(from + at);
+        }
+    }
+    None
+}
+
+fn stock_is_in_flash(m: &Machine, image: &[u8]) {
+    use rnse::board::Model;
+    let variants = fw::load_variants(image).unwrap();
+    let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192)).unwrap();
+    for module in v.modules.iter().filter(|x| x.kind != "LDR") {
+        let at = module.phys_addr() as usize;
+        assert!(m.board.flash[at..at + module.size as usize] == module.data[..module.size as usize], "{} is not the stock module", module.name);
+    }
+}
+
+/// The disc `rnse firmware` makes of an SDK program, with a higher
+/// index than the stock disc's.
+fn firmware_disc(image: &[u8], example: &str) -> Option<Vec<u8>> {
+    use rnse::board::Model;
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let variants = fw::load_variants(image).unwrap();
+    let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192))?;
+    sdk_example(image, Model::Rnse192, example)?;
+    let program = std::fs::read(sdk.join(format!("out/{}-192.bin", example))).unwrap();
+    let mut disc = fw::firmware_disc(image, &v.name, &program).unwrap();
+    let index = fw::IndexInfo::from_disc(image, &v.name).unwrap();
+    let middle: u32 = index.sofidx[1..3].parse().unwrap();
+    let higher = format!("{}{:02}{}", &index.sofidx[..1], middle + 1, &index.sofidx[3..]);
+    fw::set_disc_index(&mut disc, &v.name, &higher).unwrap();
+    Some(disc)
+}
+
+/// A program in flash (`rnse firmware`, sdk/examples/installed), all the
+/// way round under a unit's boot ROM: the stock software takes the disc
+/// for an update, its loader writes the program into the operating
+/// system's place, the ROM starts it; and when RETURN is held the
+/// program takes the directory away, the ROM finds no software and
+/// installs from the disc that is in the drive by then, the stock one.
+#[test]
+fn a_program_is_installed_in_flash_and_taken_out_again() {
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let Some(custom) = firmware_disc(&image, "installed") else { return };
+    let Some(mut m) = rom_192(&image, &custom, &rom) else { return };
+    let ms = m.cycles_per_ms();
+    let tail = |m: &Machine| { let t = String::from_utf8_lossy(&m.console).into_owned(); t[t.len().saturating_sub(300)..].to_string() };
+    let jump = until(&mut m, 0, "*** Jump User RESET ***", 600).unwrap_or_else(|| panic!("the stock software did not install the disc: {:?}", tail(&m)));
+    let started = until(&mut m, jump, "rnse sdk: installed", 60).unwrap_or_else(|| panic!("the ROM did not start the program: {:?}", tail(&m)));
+    // It runs, shows a picture, and counts itself healthy.
+    assert_eq!(m.run(12_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    let (_, _, pixels) = m.render();
+    assert!(pixels.iter().any(|&p| p != 0), "the screen is dark");
+    assert_eq!(m.resets, 0, "the watchdog reset the unit");
+    // The way out, with the stock disc in the drive.
+    m.atapi().load(image.clone());
+    assert!(m.panel_key("RETURN", true));
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert!(m.panel_key("RETURN", false));
+    let removed = until(&mut m, started, "removed, restarting", 10).unwrap_or_else(|| panic!("not removed: {:?}", tail(&m)));
+    let back = until(&mut m, removed, "*** Jump User RESET ***", 600).unwrap_or_else(|| panic!("the ROM did not install the stock disc: {:?}", tail(&m)));
+    until(&mut m, back, "[fw] SOUND_TSK START", 60).unwrap_or_else(|| panic!("the stock software did not start: {:?}", tail(&m)));
+    stock_is_in_flash(&m, &image);
+}
+
+/// The guard of a program in flash (sdk/src/flash.c): starts that end
+/// before the program has called itself healthy are counted, and the
+/// fifth in a row takes the program out, after which the boot ROM
+/// installs the stock disc.  That is the way out of a program that
+/// hangs, and the one by hand: off and on four times.
+#[test]
+fn a_program_in_flash_that_never_gets_going_takes_itself_out() {
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let Some(custom) = firmware_disc(&image, "installed") else { return };
+    // The program installed already, the stock disc in the drive.
+    let Some(mut m) = rom_192(&custom, &image, &rom) else { return };
+    let ms = m.cycles_per_ms();
+    let count = |m: &Machine| String::from_utf8_lossy(&m.console).matches("rnse sdk: installed").count();
+    // Four starts that are cut short, three seconds in.
+    for n in 1..=4 {
+        assert_eq!(m.run(3_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert_eq!(count(&m), n, "start {}", n);
+        m.cpu.reset();
+    }
+    // The fifth does not get to the program's main.
+    let back = until(&mut m, 0, "*** Jump User RESET ***", 600).expect("the ROM did not install the stock disc");
+    assert_eq!(count(&m), 4, "the program was started a fifth time");
+    until(&mut m, back, "[fw] SOUND_TSK START", 60).expect("the stock software did not start");
+    stock_is_in_flash(&m, &image);
+    // And one that does get going is not counted out: installed anew,
+    // it runs through any number of starts once it has been healthy.
+    let Some(mut m) = rom_192(&custom, &image, &rom) else { return };
+    for n in 1..=6 {
+        assert_eq!(m.run(13_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert_eq!(count(&m), n, "start {}", n);
+        m.cpu.reset();
+    }
+}
+
 /// The beacon (sdk/examples/beacon), the probe that says on the CAN bus
 /// how far it has got: its frames in order, the faceplate controller
 /// taking its settings, and the hand-over at the end.
