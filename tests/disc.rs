@@ -626,6 +626,75 @@ fn custom_program_reads_the_faceplate() {
     }
 }
 
+/// The SDK's display driver (sdk/examples/display) against the
+/// display's model: the key next to the power button opens the display
+/// and closes it again, and the motor is off once it has got there,
+/// stopped by the driver because the position no longer changes.  On
+/// the 193 this checks the driver against the emulator's assumption of
+/// which motor line closes, and nothing more.
+#[test]
+fn sdk_display_opens_and_closes() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    for model in [Model::Rnse192, Model::Rnse193] {
+        let Some((mut m, name, _)) = sdk_example(&image, model, "display") else { continue };
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert!(m.display_pos() >= 894, "{}: starts closed", name);
+        let press = |m: &mut Machine, key: &str| {
+            assert!(m.panel_key(key, true));
+            m.run(200 * ms);
+            assert!(m.panel_key(key, false));
+        };
+        let text = |m: &Machine| String::from_utf8_lossy(&m.console).into_owned();
+        press(&mut m, "EJECT");
+        assert_eq!(m.display_motor(), -1, "{}: opening: {:?}", name, text(&m));
+        assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert!(m.display_pos() <= 94, "{}: open: {} {:?}", name, m.display_pos(), text(&m));
+        assert_eq!(m.display_motor(), 0, "{}: the motor stops when open", name);
+        assert!(text(&m).contains("display open, "), "{}: {:?}", name, text(&m));
+        press(&mut m, "EJECT");
+        assert_eq!(m.display_motor(), 1, "{}: closing", name);
+        assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert!(m.display_pos() >= 894, "{}: closed: {}", name, m.display_pos());
+        assert_eq!(m.display_motor(), 0, "{}: the motor stops when closed", name);
+        // Opened again and stopped half-way by SELECT: in between, not
+        // stuck, and the motor off.
+        press(&mut m, "NEXT");
+        m.run(400 * ms);
+        press(&mut m, "SELECT");
+        m.run(500 * ms);
+        assert_eq!(m.display_motor(), 0, "{}: stopped by SELECT", name);
+        assert!(m.display_pos() > 94 && m.display_pos() < 894, "{}: in between: {}", name, m.display_pos());
+        assert!(text(&m).contains("display between, "), "{}: {:?}", name, text(&m));
+        // CD EJECT, behind the display, ejects the disc (panel_service).
+        let ejects = m.atapi().ejects;
+        press(&mut m, "CD_EJECT");
+        m.run(500 * ms);
+        let after = m.atapi().ejects;
+        assert_eq!(after, ejects + 1, "{}: CD EJECT did not eject: {:?}", name, text(&m));
+        // A short RETURN does nothing; held for two seconds it would go
+        // back to the SD loader, and with none (started from a disc
+        // here) the program says so and goes on, keys still answered.
+        press(&mut m, "RETURN");
+        m.run(500 * ms);
+        assert!(!text(&m).contains("display: done"), "{}: {:?}", name, text(&m));
+        assert!(m.panel_key("RETURN", true));
+        m.run(2_500 * ms);
+        assert!(m.panel_key("RETURN", false));
+        m.run(300 * ms);
+        let t = text(&m);
+        assert!(t.contains("display: done") && t.contains("return unavailable"), "{}: {:?}", name, t);
+        press(&mut m, "PREV");
+        m.run(3_000 * ms);
+        assert!(m.display_pos() >= 894, "{}: closed after all that: {}", name, m.display_pos());
+        assert_eq!(m.display_motor(), 0, "{}", name);
+        let t = text(&m);
+        assert!(t.contains("display closed, "), "{}: {:?}", name, t);
+        assert!(!t.contains("unexpected"), "{}: {:?}", name, t);
+    }
+}
+
 /// The SDK's drive code against the drive's model: the program waits
 /// for the disc, reads the volume descriptor, finds a file in the root
 /// directory and adds up its first megabyte.
@@ -1622,7 +1691,17 @@ fn suite_runs_its_measurements() {
     let value = |test: u8, item: u8| records.iter().find(|r| r.0 == test && r.1 == item).map(|r| r.2);
     // Every test was opened, in order.
     let opened: Vec<u8> = records.iter().filter(|r| r.1 == 0xfe).map(|r| r.0).collect();
-    assert_eq!(opened, [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 9, 17, 18, 10], "{}", name);
+    assert_eq!(opened, [1, 2, 3, 4, 5, 6, 7, 8, 11, 12, 13, 14, 15, 16, 9, 19, 17, 18, 10], "{}", name);
+    // The display folded down, stopped by the driver at its end and
+    // open (state 1), its switch saying so; and up again (state 0).
+    let second = |test: u8, item: u8| records.iter().find(|r| r.0 == test && r.1 == item).map(|r| r.3);
+    assert_eq!(second(19, 2), Some(1), "{}: {:?}", name, records.iter().filter(|r| r.0 == 19).collect::<Vec<_>>());
+    assert!(value(19, 3).is_some_and(|p| p <= 94) && second(19, 3) == Some(1), "{}: open at {:?}", name, value(19, 3));
+    assert!(value(19, 2).is_some_and(|t| (1_000..3_000).contains(&t)), "{}: the motor ran {:?} ms", name, value(19, 2));
+    assert!(records.iter().filter(|r| r.0 == 19 && r.1 == 1).count() >= 10, "{}: samples while it moved", name);
+    assert_eq!(second(19, 5), Some(0), "{}", name);
+    assert!(value(19, 6).is_some_and(|p| p >= 894) && second(19, 6) == Some(0), "{}: closed at {:?}", name, value(19, 6));
+    assert_eq!(m.display_motor(), 0, "{}", name);
     // The radio processor was asked its two questions.  (Its line is
     // the installed software's to set up; started like this, without
     // that software, the program hears nothing on it.)  And the first

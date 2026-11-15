@@ -693,6 +693,19 @@ impl Machine {
         }
     }
 
+    /// What the display's motor is driven to do: -1 towards open, 1
+    /// towards closed, 0 nothing (or both lines at once).
+    pub fn display_motor(&self) -> i32 {
+        match self.cpu.io.navi.as_ref() {
+            Some(navi) => navi.display_motor(),
+            None => match self.board.gpio_out[3] & self.board.gpio_dir[3] & 0x18 {
+                0x08 => -1,
+                0x10 => 1,
+                _ => 0,
+            },
+        }
+    }
+
     /// Summary of the display hardware's state, for diagnostics.
     pub fn describe_display(&self) -> String {
         match self.cpu.io.navi.as_ref() {
