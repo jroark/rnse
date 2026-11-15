@@ -29,6 +29,8 @@ enum State {
     /// AA 55 A0 seen: next write programs a word
     Program,
     Autoselect,
+    /// The common flash interface query (98 at 0x55)
+    Query,
     /// Unlock bypass mode (AA 55 20)
     Bypass,
     BypassProgram,
@@ -55,15 +57,28 @@ impl Default for Flash {
     }
 }
 
-/// Erase block containing `addr` in a chip that starts at address 0:
-/// eight 8 KiB boot sectors at the bottom, 64 KiB sectors above.
-pub fn sector(addr: u32) -> (u32, u32) {
-    if addr < 0x1_0000 {
+/// Erase block containing `addr` in a chip of `size` bytes that starts
+/// at address 0: eight 8 KiB sectors at the bottom, eight more at the
+/// top, 64 KiB sectors between.  That is what the 192's chips say of
+/// themselves ([`QUERY`]); a `size` of 0 leaves the top ones out.
+pub fn sector(addr: u32, size: u32) -> (u32, u32) {
+    if addr < 0x1_0000 || (size != 0 && addr >= size - 0x1_0000) {
         (addr & !0x1fff, 0x2000)
     } else {
         (addr & !0xffff, 0x1_0000)
     }
 }
+
+/// What a 192's flash chips answer to the common flash interface query,
+/// word 0x10 onwards, read from a unit (`sdk/examples/suite`): "QRY",
+/// the AMD command set, 2.7 to 3.6 V, **a word written in 16 us as a
+/// rule (2^4) and in 512 at most, a sector erased in 256 ms as a rule
+/// (2^8) and in 16 s at most**, 16 MiB (2^0x18), and three regions of
+/// sectors: 8 of 8 KiB, 254 of 64 KiB, 8 of 8 KiB.
+pub const QUERY: [u8; 48] = [
+    0x51, 0x52, 0x59, 0x02, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x27, 0x36, 0x00, 0x00, 0x04, 0x00, 0x08, 0x00, 0x05, 0x00, 0x06, 0x00, 0x18,
+    0x05, 0x00, 0x00, 0x00, 0x03, 0x07, 0x00, 0x20, 0x00, 0xfd, 0x00, 0x00, 0x01, 0x07, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 
 impl Flash {
     pub fn new() -> Self {
@@ -91,16 +106,20 @@ impl Flash {
 
     /// True when reads must not all come straight from the array.
     pub fn special_read(&self) -> bool {
-        self.state.contains(&State::Autoselect)
+        self.state.contains(&State::Autoselect) || self.state.contains(&State::Query)
     }
 
     pub fn read(&mut self, mem: &[u8], addr: u32, size: u32) -> u32 {
-        if self.state[self.chip_of(addr).0] == State::Autoselect {
+        let chip_state = self.state[self.chip_of(addr).0];
+        if chip_state == State::Autoselect || chip_state == State::Query {
             // Word address within the chip selects the ID.
             let word = (addr >> 2) & 0xff;
-            let v: u32 = match word {
-                0 => 0x04,   // manufacturer: Fujitsu
-                1 => 0x2253, // device
+            let v: u32 = match (chip_state, word) {
+                (State::Autoselect, 0) => 0x04, // manufacturer: Fujitsu
+                // The device, as a unit's two chips say (the emulator
+                // had 0x2253).
+                (State::Autoselect, 1) => 0x2222_227e,
+                (State::Query, 0x10..=0x3f) if self.chip != 0 => QUERY[word as usize - 0x10] as u32,
                 _ => 0,
             };
             return match size {
@@ -129,9 +148,17 @@ impl Flash {
         self.state[c] = match state {
             State::Read | State::Autoselect => match (key, cmd) {
                 (0x555, 0xaa) => State::Unlock1,
+                (0x55, 0x98) => State::Query,
                 (_, 0xf0) | (_, 0xff) => State::Read,
                 _ => state,
             },
+            State::Query => {
+                if cmd == 0xf0 || cmd == 0xff {
+                    State::Read
+                } else {
+                    State::Query
+                }
+            }
             State::Unlock1 => {
                 if key == 0x2aa && cmd == 0x55 {
                     State::Unlock2
@@ -164,7 +191,7 @@ impl Flash {
                 match cmd {
                     0x30 => {
                         let (start, len) = match self.uniform {
-                            0 => sector(addr - base),
+                            0 => sector(addr - base, self.chip),
                             size => ((addr - base) / size * size, size),
                         };
                         let start = (base + start) as usize;
@@ -240,6 +267,20 @@ mod tests {
         assert!(mem[(CHIP + 0x2000) as usize..(CHIP + 0x4000) as usize].iter().all(|b| *b == 0xff));
         assert_eq!(mem[(CHIP + 0x1fff) as usize], 0x11);
         assert_eq!(mem[(CHIP + 0x4000) as usize], 0x11);
+        // And at the top of a chip, where the sectors are small again.
+        mem[(2 * CHIP - 0x4000) as usize..].iter_mut().for_each(|b| *b = 0x33);
+        unlock(&mut f, &mut mem, CHIP, 0x80);
+        f.write(&mut mem, CHIP + 0x555 * 4, 4, 0xaa);
+        f.write(&mut mem, CHIP + 0x2aa * 4, 4, 0x55);
+        f.write(&mut mem, 2 * CHIP - 0x2000, 4, 0x30);
+        assert!(mem[(2 * CHIP - 0x2000) as usize..].iter().all(|b| *b == 0xff));
+        assert_eq!(mem[(2 * CHIP - 0x2001) as usize], 0x33);
+        // What the chip says of itself.
+        f.write(&mut mem, CHIP + 0x55 * 4, 4, 0x98);
+        assert_eq!([f.read(&mem, CHIP + 0x40, 4), f.read(&mem, CHIP + 0x44, 4), f.read(&mem, CHIP + 0x48, 4)], [0x51, 0x52, 0x59]);
+        assert_eq!(f.read(&mem, CHIP + 0x21 * 4, 4), 8);
+        f.write(&mut mem, CHIP, 4, 0xf0);
+        assert!(!f.special_read());
         // A chip erase takes that chip and leaves the other.
         unlock(&mut f, &mut mem, CHIP, 0x80);
         f.write(&mut mem, CHIP + 0x555 * 4, 4, 0xaa);

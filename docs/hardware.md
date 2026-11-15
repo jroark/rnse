@@ -16,7 +16,7 @@ parts carry date codes from late 2006 to mid 2007).
 |------|---------|------------|
 | IC1 | `76C401AH03BT`, `AISIN AW 0707`, `EB28120 JAPAN` | the processor: a lidded ball-grid package with Aisin AW's own number, some 29 balls a side by the silk screen, which is not one of the SH7750R's catalogue packages.  No separate companion chip appears in the photographs, so the companion functions (serial channels, CAN controller, ports) are probably in the same package, there being no other large part on either side of the board; not established |
 | X1 | `19600` | 19.6 MHz crystal next to IC1.  Twelve times that is the 235.2 MHz taken for the CPU clock, and 58.8 MHz is three times it |
-| IC6, IC7 | Fujitsu `29XL12DF-70PFV` | two NOR flash chips of 128 Mbit: the 32 MiB at address 0.  IC6 has a paper label (`00347E`), as parts programmed before assembly do: it is the one at address 0, with the boot ROM in its first 48 KiB |
+| IC6, IC7 | Fujitsu `29XL12DF-70PFV` | two NOR flash chips of 128 Mbit: the 32 MiB at address 0.  A unit's two identify themselves as manufacturer 0x04, device 0x2222227e, and answer the common flash interface query: a word is written in 16 us as a rule and 512 at most, a sector erased in 256 ms as a rule and 16 s at most, and each chip has eight sectors of 8 KiB at the bottom, 254 of 64 KiB and eight of 8 KiB at the top.  IC6 has a paper label (`00347E`), as parts programmed before assembly do: it is the one at address 0, with the boot ROM in its first 48 KiB |
 | IC2-IC5 | Elpida `D45128163G5-A75` | four SDRAMs of 128 Mbit, 16 bits wide: the 64 MiB of RAM |
 | IC8 | NEC `D442000AGU` | static RAM, 256 KiB: the battery-backed memory |
 | IC9 | Fujitsu `MB86293` | the graphics controller, "Coral LQ" |
@@ -302,7 +302,13 @@ Each channel at 0x07aN0000 has 16-bit registers:
 
 Channel 5 is the debug console: the loader's log comes out there (`rnse`
 prints it).  Channel 1 goes to the radio processor, channel 3 to the
-faceplate.  The others presumably serve GPS and diagnostics.
+faceplate.  The North American software uses no other: on a unit,
+channels 2 and 4 were as after a reset (divisor 0xff, control 0, FIFO
+control 0x1f, status 0x0184) and where channel 0 would be every
+register read 0x1fff.  The installed software leaves channel 1 with
+control 0x0058, its transmitter off between frames, and with nobody
+taking the bytes out its receiver stops at 32 with an error flag
+(status 0x01a4) and hears nothing more until that is cleared.
 
 ### Radio/audio processor (channel 1)
 

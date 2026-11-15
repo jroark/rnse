@@ -1379,7 +1379,7 @@ fn suite_runs_its_measurements() {
         waited += 1;
         assert!(waited < 60, "{}: {:?}", name, String::from_utf8_lossy(&m.console));
     }
-    m.run(500 * ms);
+    m.run(3_500 * ms);
     assert!(m.panel_key("NAV", true));
     m.run(300 * ms);
     assert!(m.panel_key("NAV", false));
@@ -1400,10 +1400,10 @@ fn suite_runs_its_measurements() {
     };
     until(&mut m, "A DISC CHANGE");
     m.run(500 * ms);
-    assert!(m.panel_key("RETURN", true));
+    assert!(m.panel_key("SETUP", true));
     until(&mut m, "BATTERY-BACKED MEMORY");
     until(&mut m, "BYTES SENT");
-    assert!(m.panel_key("RETURN", false));
+    assert!(m.panel_key("SETUP", false));
     // The watchdog test ends the run: the emulator's bites as a unit's does.
     let stop = m.run(8_000 * ms);
     let text = String::from_utf8_lossy(&m.console).into_owned();
@@ -1423,7 +1423,9 @@ fn suite_runs_its_measurements() {
     // that software, the program hears nothing on it.)  And the first
     // flash chip said what it is.
     assert!(value(12, 62).is_some() && value(12, 126).is_some(), "{}", name);
-    assert_eq!((value(13, 0), value(13, 1)), (Some(0x04), Some(0x2253)), "{}", name);
+    assert_eq!((value(13, 0), value(13, 1)), (Some(0x04), Some(0x2222_227e)), "{}", name);
+    // "QRY", and a sector erased in 2^8 ms.
+    assert_eq!((value(13, 2), value(13, 3), value(13, 4), value(13, 19)), (Some(0x51), Some(0x52), Some(0x59), Some(8)), "{}", name);
     // The drive's name once more, in the full answer.
     assert_eq!(value(14, 2), Some(u32::from_be_bytes(*b"ALPI")), "{}", name);
     // Some of the battery-backed memory went out on its own frames.

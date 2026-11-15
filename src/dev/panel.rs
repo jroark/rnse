@@ -167,10 +167,10 @@ impl Parser {
 /// How long to wait for the unit to acknowledge a frame.
 const ACK_TIMEOUT_MS: u64 = 300;
 const RETRIES: u32 = 3;
-/// From the release of the reset line to the start-up frame.  With 60
-/// ms the SDK's start of the controller takes the 340 ms it took on a
-/// unit (20 ms were assumed before, which made it 300).
-pub const START_MS: u64 = 60;
+/// From the release of the reset line to the start-up frame.  With 70
+/// ms the SDK's start of the controller takes 350 ms; on a unit it
+/// took 340 and 360 (20 ms were assumed before, which made it 300).
+pub const START_MS: u64 = 70;
 
 pub struct Panel {
     parser: Parser,
