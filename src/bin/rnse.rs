@@ -4,7 +4,7 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse repack <disc.iso | LOADING.KWI> <dir> <out>   a copy of the disc with the\n                                       modules in <dir> (as extract writes\n                                       them) put in, checksums put right\n  rnse custom <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n                                       a copy of the disc with a program of\n                                       your own as that variant's loader,\n                                       and optionally another software index\n                                       (see docs/custom-firmware.md)\n  rnse firmware <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n                                       a copy of the disc with a program of\n                                       the SDK in the operating system's\n                                       place: installed by the disc's own\n                                       loader, started by the boot ROM at\n                                       every start (192; see \"A program in\n                                       flash\" in docs/custom-firmware.md)\n  rnse report <can-log> [--rom <out.bin>]
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse repack <disc.iso | LOADING.KWI> <dir> <out>   a copy of the disc with the\n                                       modules in <dir> (as extract writes\n                                       them) put in, checksums put right\n  rnse custom <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n                                       a copy of the disc with a program of\n                                       your own as that variant's loader,\n                                       and optionally another software index\n                                       (see docs/custom-firmware.md)\n  rnse firmware <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n               [--swap <swap.bin>]\n                                       a copy of the disc with a program of\n                                       the SDK in the operating system's\n                                       place: installed by the disc's own\n                                       loader, started by the boot ROM at\n                                       every start (192; see \"A program in\n                                       flash\" in docs/custom-firmware.md).\n                                       --swap: what a unit without software\n                                       runs from this disc in place of the\n                                       installation (sdk/examples/swap)\n  rnse report <can-log> [--rom <out.bin>]
                                        what sdk/examples/report sent from a
                                        unit: its registers, and its boot ROM
                                        into a file (candump logs and others)
@@ -30,8 +30,7 @@ fn main() {
         "repack" if args.len() == 4 => repack(&args[1], &args[2], &args[3]),
         "custom" if args.len() == 5 => custom(&args[1], &args[2], &args[3], &args[4], None),
         "custom" if args.len() == 7 && args[5] == "--index" => custom(&args[1], &args[2], &args[3], &args[4], Some(&args[6])),
-        "firmware" if args.len() == 5 => firmware(&args[1], &args[2], &args[3], &args[4], None),
-        "firmware" if args.len() == 7 && args[5] == "--index" => firmware(&args[1], &args[2], &args[3], &args[4], Some(&args[6])),
+        "firmware" if args.len() >= 5 => firmware(&args[1], &args[2], &args[3], &args[4], &args[5..]),
         "report" if args.len() == 2 => report(&args[1], None),
         "report" if args.len() == 4 && args[2] == "--rom" => report(&args[1], Some(&args[3])),
         "card" if args.len() == 3 => card(&args[1], &args[2], None),
@@ -135,11 +134,24 @@ fn card(out: &str, dir: &str, disc: Option<&String>) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-fn firmware(path: &str, variant: &str, program: &str, out: &str, index: Option<&String>) -> Result<(), Box<dyn std::error::Error>> {
+fn firmware(path: &str, variant: &str, program: &str, out: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let (mut index, mut swap) = (None, None);
+    let mut i = 0;
+    while i + 1 < rest.len() {
+        match rest[i].as_str() {
+            "--index" => index = Some(rest[i + 1].clone()),
+            "--swap" => swap = Some(std::fs::read(&rest[i + 1])?),
+            other => return Err(format!("firmware: unknown option {}", other).into()),
+        }
+        i += 2;
+    }
+    if i != rest.len() {
+        return Err("firmware: an option without its value".into());
+    }
     let image = std::fs::read(path)?;
     let payload = std::fs::read(program)?;
-    let mut new = fw::firmware_disc(&image, &variant.to_uppercase(), &payload)?;
-    if let Some(index) = index {
+    let mut new = fw::firmware_disc(&image, &variant.to_uppercase(), &payload, swap.as_deref())?;
+    if let Some(index) = &index {
         let old = fw::set_disc_index(&mut new, &variant.to_uppercase(), index)?;
         println!("software index of the disc: {} instead of {}", index, old);
     }
@@ -148,6 +160,10 @@ fn firmware(path: &str, variant: &str, program: &str, out: &str, index: Option<&
     println!("The disc's loader installs it; the boot ROM then starts the program at every start, and the stock");
     println!("software is gone until an update disc puts it back (the program's firmware_remove, then a restart");
     println!("with the stock disc in the drive).  Read \"A program in flash\" in docs/custom-firmware.md first.");
+    match swap {
+        Some(_) => println!("A unit without software that finds this disc runs the --swap program, not the installation."),
+        None => println!("warning: without --swap a unit whose program was taken out installs it again from this disc for as long as it is in the drive."),
+    }
     Ok(())
 }
 

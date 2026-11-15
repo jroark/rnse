@@ -746,7 +746,16 @@ pub fn firmware_module(stock: &[u8], payload: &[u8], ram_load: u32) -> Result<Ve
 /// own loader installs it like any software; every other module is the
 /// disc's, and stays in flash unused (the card processors' program is
 /// in one of them, where the SDK's card driver looks for it).
-pub fn firmware_disc(image: &[u8], variant: &str, payload: &[u8]) -> Result<Vec<u8>, FwError> {
+///
+/// A disc has its loader twice: in the container, for the installed
+/// software, and as a file of its own, which the boot ROM runs when the
+/// unit has no software (tried: each runs its own).  With `swap`, a
+/// program of the SDK goes in the file's place and the container keeps
+/// the stock loader: the installed software's update installs the
+/// program, and a unit without software that finds this disc runs
+/// `swap` instead of installing the program again (`sdk/examples/swap`
+/// pushes the disc out and waits for another).
+pub fn firmware_disc(image: &[u8], variant: &str, payload: &[u8], swap: Option<&[u8]>) -> Result<Vec<u8>, FwError> {
     let variants = load_variants(image)?;
     let v = variants.iter().find(|v| v.name == variant).ok_or_else(|| FwError::Format(format!("no variant {} on this disc", variant)))?;
     let loader = v.module("LDM").ok_or_else(|| FwError::Format("the variant has no loader".into()))?;
@@ -773,6 +782,24 @@ pub fn firmware_disc(image: &[u8], variant: &str, payload: &[u8]) -> Result<Vec<
     }
     if changed.is_empty() {
         return bad("the disc's operating system module was not replaced");
+    }
+    let mut out = out;
+    if let Some(swap) = swap {
+        // The loader's file as `custom_loader` makes it, and none of
+        // what that does to the container.
+        let (custom, places) = custom_loader(image, variant, swap)?;
+        if places.len() < 2 {
+            return bad("the loader's own file was not found on the disc");
+        }
+        let iso = Iso::new(image)?;
+        let kwi = iso.file("LOADING.KWI").ok_or_else(|| FwError::Format("disc image has no LOADING.KWI".into()))?;
+        let start = kwi.as_ptr() as usize - image.as_ptr() as usize;
+        let container = start..start + kwi.len();
+        for (i, (new, old)) in custom.iter().zip(image).enumerate() {
+            if new != old && !container.contains(&i) {
+                out[i] = *new;
+            }
+        }
     }
     Ok(out)
 }

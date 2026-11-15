@@ -1381,7 +1381,9 @@ fn firmware_disc(image: &[u8], example: &str) -> Option<Vec<u8>> {
     let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192))?;
     sdk_example(image, Model::Rnse192, example)?;
     let program = std::fs::read(sdk.join(format!("out/{}-192.bin", example))).unwrap();
-    let mut disc = fw::firmware_disc(image, &v.name, &program).unwrap();
+    sdk_example(image, Model::Rnse192, "swap")?;
+    let swap = std::fs::read(sdk.join("out/swap-192.bin")).unwrap();
+    let mut disc = fw::firmware_disc(image, &v.name, &program, Some(&swap)).unwrap();
     let index = fw::IndexInfo::from_disc(image, &v.name).unwrap();
     let middle: u32 = index.sofidx[1..3].parse().unwrap();
     let higher = format!("{}{:02}{}", &index.sofidx[..1], middle + 1, &index.sofidx[3..]);
@@ -1416,6 +1418,38 @@ fn a_program_is_installed_in_flash_and_taken_out_again() {
     assert!(m.panel_key("RETURN", false));
     let removed = until(&mut m, started, "removed, restarting", 10).unwrap_or_else(|| panic!("not removed: {:?}", tail(&m)));
     let back = until(&mut m, removed, "*** Jump User RESET ***", 600).unwrap_or_else(|| panic!("the ROM did not install the stock disc: {:?}", tail(&m)));
+    until(&mut m, back, "[fw] SOUND_TSK START", 60).unwrap_or_else(|| panic!("the stock software did not start: {:?}", tail(&m)));
+    stock_is_in_flash(&m, &image);
+}
+
+/// The disc that installed a program is still in the drive when the
+/// program is taken out.  The boot ROM runs the loader that the disc
+/// has as a file, which on a firmware disc is not the installation but
+/// sdk/examples/swap: the disc is pushed out, and when the stock disc
+/// has gone in the unit restarts and the ROM installs that.
+#[test]
+fn a_firmware_disc_left_in_the_drive_does_not_install_again() {
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let Some(custom) = firmware_disc(&image, "installed") else { return };
+    let Some(mut m) = rom_192(&custom, &custom, &rom) else { return };
+    let ms = m.cycles_per_ms();
+    let tail = |m: &Machine| { let t = String::from_utf8_lossy(&m.console).into_owned(); t[t.len().saturating_sub(300)..].to_string() };
+    assert_eq!(m.run(12_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert!(m.panel_key("RETURN", true));
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert!(m.panel_key("RETURN", false));
+    let swap = until(&mut m, 0, "rnse sdk: swap", 60).unwrap_or_else(|| panic!("the ROM did not run the disc's other loader: {:?}", tail(&m)));
+    until(&mut m, swap, "ejected", 20).unwrap_or_else(|| panic!("the disc was not pushed out: {:?}", tail(&m)));
+    // It waits, for as long as it takes; the program is not installed
+    // again and nothing is erased.
+    let erased = m.board.flash_ctl.erased_sectors;
+    assert_eq!(m.run(20_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert_eq!(m.board.flash_ctl.erased_sectors, erased, "something was erased while it waited");
+    assert_eq!(String::from_utf8_lossy(&m.console).matches("rnse sdk: installed").count(), 1);
+    // The stock disc goes in.
+    m.atapi().insert(Some(image.clone()));
+    let again = until(&mut m, swap, "a disc is ready, restarting", 60).unwrap_or_else(|| panic!("the new disc was not noticed: {:?}", tail(&m)));
+    let back = until(&mut m, again, "*** Jump User RESET ***", 600).unwrap_or_else(|| panic!("the ROM did not install the stock disc: {:?}", tail(&m)));
     until(&mut m, back, "[fw] SOUND_TSK START", 60).unwrap_or_else(|| panic!("the stock software did not start: {:?}", tail(&m)));
     stock_is_in_flash(&m, &image);
 }
