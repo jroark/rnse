@@ -218,23 +218,37 @@ the program's start; the same lines came over the CAN bus):
     0019060 6/28/00     the medium may have changed
     0019170 2/04/04     not ready, a third way
 
-**While it loads a disc the drive says 2/04/00, as inferred**, and the
-attention comes after that, not at the insertion.  What the emulator
-does not have: loading takes 2.7 s (the emulator's 6 s is a guess); after the attention the drive is not ready
-but says 2/04/04, which the OS takes for "becoming ready" like
-2/04/01, and it still said so 9.4 s later, when the run was ended (how
-long it takes to READY is not measured); and on the way out it says
-2/04/00 for 3.6 s, then the attention, then 2/3A/01 for 3 s before
-2/3A/00.
+**While it loads a disc the drive says 2/04/00, as inferred**, for 2.6
+to 2.7 s, and the attention comes after that, not at the insertion.
 
-The emulated 192's drive now answers this way by default (2.7 s of
-loading, then 10 s of 2/04/04, which is a guess at a time only known to
-be longer than 9.4 s; 3.6 s for an eject and 3 s of 2/3A/01), and the
-program's log in the emulator is the unit's, line for line.  The North
-American 192 software still takes a disc that goes in while it runs,
-with 0, 5, 10, 15 and 25 s of 2/04/04 alike.  The 193's drive, which
-nobody has measured, is as it was: 6 s of loading, nothing after it.
-`--spin-up`, `--settle` and `--eject-time` change the three times.
+**Then it waits to be told to start.**  The 2/04/04 that follows the
+attention does not pass by itself: a second run left the drive alone
+for 23 s and for 24 s, reading failed all the while, and whoever
+watched saw the disc stand still.  The stock software does not leave
+it alone: whenever the drive is not ready it sends START STOP UNIT with
+the start bit, again and again, between its questions (it can be seen
+doing so in the emulator).  The program had only asked.  How long the
+drive takes from that command to READY is not measured yet; the
+program has a key for it now (PREV).
+
+On the way out the drive says 2/04/00 for 2.8 to 3.7 s, then the
+attention, then 2/3A/01 for 2 to 5.5 s before 2/3A/00.
+
+And it reads slowly: 256 sectors from the start of a CD-R took 1510 ms
+through the program's own loop, that is some 5.5 ms a sector or 370
+KiB/s.  That number accounts for something else: a unit needs about 42
+s from a reset to starting a program from the disc, the emulator with
+1.5 ms a sector needed 15 s, and with 5.5 ms it needs 46.
+
+The emulated 192's drive now does all this by default: 2.7 s of
+loading, the attention, 2/04/04 until it is told to start and for 2 s
+after (the 2 s are a guess), 3.6 s for an eject and 3 s of 2/3A/01, and
+with `--drive-times` 5.5 ms a sector.  The program's log in the
+emulator is the unit's, line for line, the failed reads included.  The
+North American 192 software still takes a disc that goes in while it
+runs.  The 193's drive, which nobody has measured, is as it was: 6 s
+of loading, nothing after it, 1.5 ms a sector.  `--spin-up`,
+`--settle` and `--eject-time` change the times.
 
 The program for it is in `docs/custom-firmware.md`.  The switches to try other drives are
 `--loading-sense K/CC/QQ`, `--spin-up MS`, `--attention-first` and

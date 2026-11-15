@@ -282,13 +282,21 @@ pub struct Atapi {
     /// How long that takes ([`SPIN_UP_MICROS`] unless changed).
     pub spin_up_micros: u64,
     /// After a disc has been loaded and the drive has said that the
-    /// medium may have changed, it is still not ready for a while, and
-    /// says so in another way than while loading (2/04/04 on a 192's
-    /// drive, measured: docs/boot-rom.md).  Microseconds of that left,
-    /// and how long it takes; 0, the default, leaves the phase out.
+    /// medium may have changed, a 192's drive does not turn the disc
+    /// until it is told to (START STOP UNIT with the start bit, which
+    /// the stock software sends again and again while the drive is not
+    /// ready): until then, and while the disc gets up to speed after
+    /// it, the drive is not ready in another way than while loading
+    /// (2/04/04; measured, docs/boot-rom.md).  Whether the drive waits
+    /// for that command, whether it is waiting now, the microseconds
+    /// left of the spinning up and how long that takes.
+    pub needs_start: bool,
+    stopped: bool,
     settle: u64,
     pub settle_micros: u64,
     pub settle_sense: (u8, u8, u8),
+    /// With [`times`](Self::times): microseconds a sector takes to read.
+    pub sector_micros: u64,
     /// An eject takes time as well: the drive is "not ready" (2/04/00)
     /// while the disc goes out, then says that the medium may have
     /// changed, then "no medium, tray closed" (2/3A/01) for a while
@@ -386,8 +394,11 @@ impl Atapi {
             unit_attention: false,
             spin_up: 0,
             spin_up_micros: SPIN_UP_MICROS,
+            needs_start: false,
+            stopped: false,
             settle: 0,
             settle_micros: 0,
+            sector_micros: SECTOR_MICROS,
             settle_sense: (2, 0x04, 0x04),
             ejecting: 0,
             tray: 0,
@@ -437,6 +448,7 @@ impl Atapi {
     pub fn insert_disc(&mut self, image: Option<Disc>) {
         self.spin_up = if image.is_some() { self.spin_up_micros } else { 0 };
         self.settle = 0;
+        self.stopped = false;
         self.ejecting = 0;
         self.tray = 0;
         self.eject_attention = false;
@@ -565,7 +577,11 @@ impl Atapi {
         if self.spin_up > 0 {
             self.spin_up = self.spin_up.saturating_sub(micros);
             if self.spin_up == 0 {
-                self.settle = self.settle_micros;
+                if self.needs_start {
+                    self.stopped = true;
+                } else {
+                    self.settle = self.settle_micros;
+                }
             }
             // Ready: the next command hears that the medium may have
             // changed, once.
@@ -848,7 +864,7 @@ impl Atapi {
         };
         if self.times {
             let jump = if lba.abs_diff(self.head) > 16 { SEEK_MICROS } else { 0 };
-            self.busy = jump + u64::from(n) * SECTOR_MICROS;
+            self.busy = jump + u64::from(n) * self.sector_micros;
             self.head = lba + n;
         }
         self.buf = img.read(lba, n);
@@ -888,7 +904,7 @@ impl Atapi {
                     return;
                 }
             }
-            if needs_medium && self.has_disc() && self.settle > 0 {
+            if needs_medium && self.has_disc() && (self.settle > 0 || self.stopped) {
                 let (key, code, qualifier) = self.settle_sense;
                 self.fail(key, code, qualifier);
                 return;
@@ -948,6 +964,7 @@ impl Atapi {
                         self.ejected = (self.image.take(), self.audio.take());
                         self.spin_up = 0;
                         self.settle = 0;
+                        self.stopped = false;
                         self.unit_attention = false;
                         self.ejecting = self.eject_micros;
                         self.ejects += 1;
@@ -955,6 +972,10 @@ impl Atapi {
                 } else if op == 0x1b && p[4] & 3 == 3 {
                     // Load: what waits in the slot is pulled back in.
                     self.reinsert();
+                } else if op == 0x1b && p[4] & 3 == 1 && self.stopped {
+                    // Start: the disc begins to turn.
+                    self.stopped = false;
+                    self.settle = self.settle_micros;
                 }
                 self.complete_ok();
             }

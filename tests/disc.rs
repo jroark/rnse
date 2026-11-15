@@ -642,8 +642,8 @@ fn custom_program_reads_the_disc() {
         // time over seeks and reads.
         m.atapi().times = true;
         m.atapi().insert(Some(custom.clone()));
-        // (The 192's drive is not ready for some 13 seconds, as a
-        // unit's was measured.)
+        // (The 192's drive has to be told to start, as a unit's was
+        // seen to; the SDK's wait does that.)
         assert_eq!(m.run(20_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
         let text = String::from_utf8_lossy(&m.console).into_owned();
         // What the program should have found, from the image itself.
@@ -687,15 +687,23 @@ fn drive_program_logs_the_drive() {
         // a unit's drive was seen to do it, not ready in another way
         // for a while in between.
         assert!(m.atapi().reinsert());
-        assert_eq!(m.run(15_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        assert_eq!(m.run(8_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        if model == Model::Rnse192 {
+            // The 192's drive waits to be told to start: PREV.
+            press(&mut m, "PREV");
+            assert_eq!(m.run(4_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        }
         let text = String::from_utf8_lossy(&m.console).into_owned();
         let lines: Vec<&str> = text.lines().map(|l| l.trim()).filter(|l| l.len() > 8 && l.as_bytes()[7] == b' ' && l[..7].bytes().all(|b| b.is_ascii_digit())).collect();
         let states: Vec<&str> = lines.iter().map(|l| &l[8..]).collect();
         let time = |i: usize| lines[i][..7].parse::<u64>().unwrap();
         let loading = if model == Model::Rnse192 {
-            assert_eq!(states, ["READY", "2/04/00", "6/28/00", "2/3A/01", "2/3A/00", "2/04/00", "6/28/00", "2/04/04", "READY"], "{}: {:?}", name, text);
+            assert_eq!(states, ["READY", "2/04/00", "6/28/00", "2/3A/01", "2/3A/00", "2/04/00", "6/28/00", "2/04/04", "START", "READY"], "{}: {:?}", name, text);
             assert!((3_500..=3_800).contains(&(time(2) - time(1))), "{}: going out from {} to {}", name, time(1), time(2));
-            assert!((9_800..=10_200).contains(&(time(8) - time(7))), "{}: settling from {} to {}", name, time(7), time(8));
+            // Not ready for as long as it is only asked, and two
+            // seconds more once it has been told to start.
+            assert!(time(8) - time(7) > 5_000, "{}: started by itself after {} ms", name, time(8) - time(7));
+            assert!((1_900..=2_300).contains(&(time(9) - time(8))), "{}: ready {} ms after the start", name, time(9) - time(8));
             assert!((2_600..=2_900).contains(&(time(6) - time(5))), "{}: not ready from {} to {}", name, time(5), time(6));
             5
         } else {

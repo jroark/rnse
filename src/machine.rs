@@ -209,12 +209,15 @@ impl Machine {
         if model == crate::board::Model::Rnse192 {
             // The 192's drive as one was measured (docs/boot-rom.md, "A
             // disc that goes in while the unit runs"): 2.7 s to load a
-            // disc, 3.6 s to push one out.  After loading it went on
-            // saying "not ready" for more than 9.4 s, which is as long
-            // as it was watched; 10 s is taken here.
+            // disc, 3.6 s to push one out, 5.5 ms to read a sector
+            // (when its times are on).  A disc it has loaded it does
+            // not turn until it is told to start; how long it then
+            // takes to be ready is not measured, two seconds are taken.
             m.board.atapi.spin_up_micros = 2_700_000;
-            m.board.atapi.settle_micros = 10_000_000;
+            m.board.atapi.needs_start = true;
+            m.board.atapi.settle_micros = 2_000_000;
             m.board.atapi.eject_micros = 3_600_000;
+            m.board.atapi.sector_micros = 5_500;
             // The levels on the processor's own port pins, all inputs,
             // as a unit's report has them.  What they are is not known.
             m.cpu.io.pdtra_in = 0x3d24;
