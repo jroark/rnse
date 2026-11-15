@@ -1454,6 +1454,50 @@ fn a_firmware_disc_left_in_the_drive_does_not_install_again() {
     stock_is_in_flash(&m, &image);
 }
 
+/// A firmware of one's own (sdk/examples/base), started by a unit's
+/// boot ROM from flash with nothing of the stock software run before
+/// it: it starts the radio processor and has the tuner as the source,
+/// tunes, starts a card by itself and plays an MP3 file of it through
+/// the amplifier, and goes back to the tuner.
+#[test]
+fn a_firmware_from_flash_is_a_radio_and_a_player() {
+    use rnse::dev::radio::Radio;
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let Some(custom) = firmware_disc(&image, "base") else { return };
+    let Some(mut m) = rom_192(&custom, &image, &rom) else { return };
+    let ms = m.cycles_per_ms();
+    let song = include_bytes!("data/tones.mp3").to_vec();
+    let card = rnse::fat::card("MUSIC", &[rnse::fat::Entry::file("TONES.MP3", song)], None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let tail = |m: &Machine| { let t = String::from_utf8_lossy(&m.console).into_owned(); t[t.len().saturating_sub(300)..].to_string() };
+    until(&mut m, 0, "radio started", 30).unwrap_or_else(|| panic!("the radio processor was not started: {:?}", tail(&m)));
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert_eq!((m.radio.source, m.radio.volume), (Radio::SOURCE_TUNER, 8), "the tuner as the source");
+    let press = |m: &mut Machine, key: &str| {
+        assert!(m.panel_key(key, true));
+        m.run(200 * ms);
+        assert!(m.panel_key(key, false));
+        m.run(800 * ms);
+    };
+    press(&mut m, "NEXT");
+    assert_eq!(m.radio.frequency, Some(2062), "one megahertz up from 102.1");
+    // MEDIA: the card is started from nothing, and its file plays.
+    press(&mut m, "MEDIA");
+    until(&mut m, 0, "playing", 30).unwrap_or_else(|| panic!("no file was played: {:?}", tail(&m)));
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert_eq!(m.board.media.dsps[0].fault, None);
+    assert!(m.board.media.dsps[0].loud_frames > 0, "the card processor sends its converter only silence");
+    assert_eq!(m.radio.source, Radio::SOURCE_DECODER, "the amplifier's source");
+    let (_, _, pixels) = m.render();
+    assert!(pixels.iter().any(|&p| p != 0), "the screen is dark");
+    assert!(m.panel_knob("volume", 3));
+    assert_eq!(m.run(1_500 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert_eq!(m.radio.volume, 11);
+    press(&mut m, "RADIO");
+    assert_eq!(m.radio.source, Radio::SOURCE_TUNER, "back to the tuner");
+    assert_eq!(m.resets, 0, "the watchdog reset the unit");
+}
+
 /// The guard of a program in flash (sdk/src/flash.c): starts that end
 /// before the program has called itself healthy are counted, and the
 /// fifth in a row takes the program out, after which the boot ROM

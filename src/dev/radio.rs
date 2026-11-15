@@ -174,6 +174,8 @@ impl Radio {
 
     /// Source number of the CD drive's audio.
     pub const SOURCE_CD: u8 = 1;
+    /// The tuner.
+    pub const SOURCE_TUNER: u8 = 3;
 
     /// What the amplifier does to the CD drive's signal: nothing gets
     /// through unless the drive is the selected source, and the volume

@@ -721,8 +721,16 @@ pub fn firmware_module(stock: &[u8], payload: &[u8], ram_load: u32) -> Result<Ve
     if pool + 4 * literals.len() > PROGRAM {
         return bad("the start-up instructions do not fit below the program");
     }
+    // Everything else of the stock module stays as it is: nothing of it
+    // runs, but the card processors' program is in it (at 0x200000 of
+    // the flash on the 192), which is where the SDK's card driver
+    // fetches it from, as the stock driver does.
+    const KEPT_FROM: usize = 0x10_0000;
+    if PROGRAM + payload.len() > KEPT_FROM.min(size) {
+        return bad(format!("the program is {:#x} bytes; more than {:#x} would go over what is kept of the stock module", payload.len(), KEPT_FROM - PROGRAM));
+    }
     let mut new = stock[..size].to_vec();
-    new[0x80..].fill(0);
+    new[0x80..KEPT_FROM.min(size)].fill(0);
     let start = (0x8000_0000 | load) + AT as u32;
     for i in 0..3 {
         new[0x80 + 4 * i..0x84 + 4 * i].copy_from_slice(&start.to_be_bytes());
@@ -744,8 +752,9 @@ pub fn firmware_module(stock: &[u8], payload: &[u8], ram_load: u32) -> Result<Ve
 /// A copy of an update disc on which a variant's operating system
 /// module is a program of the SDK ([`firmware_module`]).  The disc's
 /// own loader installs it like any software; every other module is the
-/// disc's, and stays in flash unused (the card processors' program is
-/// in one of them, where the SDK's card driver looks for it).
+/// disc's, and stays in flash unused.  (So does the stock operating
+/// system from its second megabyte on, for the card processors'
+/// program that is in it.)
 ///
 /// A disc has its loader twice: in the container, for the installed
 /// software, and as a file of its own, which the boot ROM runs when the
