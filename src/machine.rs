@@ -303,6 +303,25 @@ impl Machine {
         self.cpu.hypercalls_enabled = true;
     }
 
+    /// Put a real boot ROM (read from a unit; never on a disc) where
+    /// the stand-in is and start at the reset vector.  From here on
+    /// nothing is done for the software: no entry point is called, no
+    /// service answered, and the stand-in's hypercall opcode is an
+    /// instruction like any other.
+    pub fn start_from_reset(&mut self, rom: &[u8]) -> Result<(), String> {
+        if self.board.model != crate::board::Model::Rnse192 {
+            return Err("a real boot ROM is only known for the 192".into());
+        }
+        if rom.len() > 0xc000 {
+            return Err(format!("the 192's boot ROM is 0xc000 bytes, the file has {:#x}", rom.len()));
+        }
+        self.board.flash[..rom.len()].copy_from_slice(rom);
+        self.cpu.hypercalls_enabled = false;
+        self.boot_calls.clear();
+        self.cpu.reset();
+        Ok(())
+    }
+
     /// Start the update loader (LDM) the way the boot ROM does after it
     /// has copied it from the disc into RAM: call its first entry point
     /// in privileged mode.  The three byte arguments are whatever the

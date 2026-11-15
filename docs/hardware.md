@@ -27,7 +27,7 @@ parts carry date codes from late 2006 to mid 2007).
 | X2 | `32.768k` | clock crystal |
 | X4 | `14.27x` (the last digit reads 3 or 9) | a crystal beside the graphics chip: its reference clock.  If the chip's clock generator makes 14 times that and the display divides by 25 (the divider the firmware programs), the 508 x 263 dots of a frame take 1/59.8 s |
 | T426-T431 | | six test pads in two rows right under IC1.  Six signals is what the SH-4's debug port (H-UDI: TCK, TMS, TDI, TDO, TRST, ASEBRK) has; a guess by number and place |
-| T424, T425 | | two test pads with a series resistor each (R89, R90), beside the others.  A candidate for the debug serial port, on which the loader prints its log; to be checked with a logic analyser during a stock update |
+| T424, T425 | | two test pads with a series resistor each (R89, R90), beside the others.  Taken for a candidate for the debug serial port, on which the loader prints its log; a logic analyser on eight pads found no serial data on any of them during a stock update ("Seen on a real unit" under CAN) |
 
 Connectors are marked `DVD`, `DISP`, `SD`, `GYRO`, `SW` and `POWER`.
 
@@ -66,8 +66,11 @@ and their interrupt codes (0x780-0x7e0), which exist on the SH7750R and
 SH7751R but not on the original SH7750.
 
 * Peripheral clock about 58.8 MHz: the OS loads TMU0 with 14699 at Pclk/4
-  for a 1 ms tick, the loader 73499 for 5 ms.  The tick's length is not
-  measured on this unit.  It is 1 ms on the 193, where sound gives an
+  for a 1 ms tick, the loader 73499 for 5 ms.  Measured on a unit: a
+  program with a tick of 146999 counts at Pclk/4 sent a CAN frame every
+  100 ticks, and a logic analyser on the bus had them 1.00003 s apart
+  over 18 s ("Seen on a real unit" under CAN).  The reasoning that gave
+  the number before: the tick is 1 ms on the 193, where sound gives an
   independent clock (see [hardware-193.md](hardware-193.md), "Clocks and
   time"), the two units' software is the same with every timer value in
   the ratio 58.8 : 50, and 58.8 MHz is also what makes the CAN
@@ -112,7 +115,7 @@ Physical addresses.  The firmware mostly uses the P1 (0x8...) and P2
 | 0x12N00000, 0x12N00001 | byte-wide ports, N = 3..a: direction register (1 = output) and data | see "Ports" |
 | 0x12d00000-6          | output latches | bits unknown; 0x12d00001 is driven around CD DMA transfers |
 | 0x15000002, 0x1500004a | 16-bit host ports of the two SD card/MP3 processors (NEC µPD77115A) | certain; see "SD card processors" |
-| 0x16000000-0x16000020 | 32-bit control registers | unknown |
+| 0x16000000-0x16000020 | 32-bit control registers | 0x16000004 is a latch of output lines; see "The latch at 0x16000004" |
 | 0x17c00000-0x17c00014 | GPS baseband, control registers | see "GPS" |
 | 0x17e00400, 0x17e00800 | GPS baseband, further register blocks | see "GPS" |
 | 0x18000000-0x19fbffff | Coral video memory | certain |
@@ -136,12 +139,37 @@ The OS addresses its byte-wide ports through a table of eight (index 0-7
 | 3              | 1 | in  | polled every tick, unknown |
 | 4 (0x12700001) | 7 | in  | polled every tick, unknown |
 | 6 (0x12900001) | 0 | in  | switch of the second SD card slot (DSP 1) |
+| 7 (0x12a00001) | 3, 2 | out | mode lines of the CAN transceiver: both high = awake.  The OS clears bit 3 and then bit 2 when it lets the bus sleep and sets both at once to wake it (0x801c57f8-0x801c581e in V2220371); the loader sets both.  Both lines are on test pads of the main board and follow these bits on a logic analyser, bit 3 falling some 9 ms before bit 2 at a sleep |
 
 A port has more registers than the two: the card driver writes +2 and
 +4 of ports 2 and 6 (0x40 and 0x01 to +2: the bits of the two card
 switches, so these select the pins that interrupt).  The emulator
 stores them and does nothing with them; it used to take every even
 address of a port for its direction register.
+
+### The latch at 0x16000004
+
+A 32-bit register of output lines that reads back.  Known bits: 0 is
+the faceplate controller's reset (low = reset), 2 and 3 the resets of
+the two card processors, 12 a line the loader's CAN set-up takes low
+and, after a pause, high again (0x8df85bf4 in loader V222007A; the OS
+never touches it).  0x04, 0x08, 0x10, 0x20 and 0x40 are what the OS
+has set once it is up (0x7d in the emulator); a real North American
+unit with software 0260, read by a program in the loader's place,
+answered 0x00003fff.
+
+**Everybody who writes it reads it first.**  The loader's first write
+is `read, or 0x10, write`; started on its own in the emulator, where
+the latch is zero, that looks like the value 0x10, and a program that
+writes that value on a real unit takes every other line away.  That
+was tried: the screen went dark (the faceplate controller, which has
+the lighting, in reset), and the stock loader, started afterwards, put
+up its picture unseen, sat for 90.6 s without reading the disc and
+reset the unit; a stock update that works takes 148 s on the same
+unit.  Which of the lost lines the drive needs is not known.  The same
+holds for 0x1600001c and 0x16000020, of which the loader's CAN set-up
+sets and clears single bits (0x1c: sets 0x1800, clears 0x4000; 0x20:
+clears 0x0200, 0x0040 and 0x0030), and for the ports.
 
 ## Interrupts
 
@@ -363,6 +391,32 @@ infotainment bus, from 58.8 MHz, the peripheral clock.  The loader does not put 
 before it sets it up, and the OS never starts it at all: the boot ROM
 leaves it running, and the loader's BCR writes presumably only repeat
 what is there.
+
+Seen on a real unit (a North American 192 on a bench, nothing else on
+the bus, a logic analyser on both wires and on eight test pads):
+
+* Alone, the unit repeats its first unacknowledged frame.  After the
+  start that is 0x436 `16 02 ..`, `16 01 ..`, then 0x361, and after
+  4.7 s the OS lets the bus sleep: the transceiver's two mode lines
+  fall (port 7, bits 3 and 2) and nothing the controller is given to
+  send after that reaches the wires, although the unit is on and shows
+  the radio.  A program that wants to be heard sets the two bits.
+* The loader wakes the transceiver itself and sends 0x436 `16 02 00 80
+  00 00` and `16 01 ..` in turns for 1.3 s, then `16 04 00 00 00 00`
+  until it ends: 148 s for an update that works.
+* The SDK's set-up (`sdk/src/hw192.c`, `can_init`) sends: its frames
+  are on the wires with the right identifiers, data and check sums.
+  The controller's status then reads 0x0026 or 0x0022 and its error
+  counters 0x8800, an unacknowledged sender in error-passive state.  A
+  frame that is given to the controller right after the one before was
+  cancelled does not go out, though: of frames sent back to back,
+  each given up after 100 ms, every second one was missing.
+* None of the eight pads carries the debug serial port, neither from
+  the OS (which prints nothing) nor from a loader.  Two of them are the
+  transceiver's mode lines.  Two more change only at a reset: one goes
+  low and one high for about 1.5 s, and at a power-up, though not at
+  the reset a loader ends with, another carries a burst of 2.4 ms (27
+  ms at a cold start).  Which pad is which of T424-T431 was not noted.
 
 The emulated bus carries one frame at a time, each for as long as its
 bits take at 100 kbit/s (some 1.3 ms for eight data bytes), so that

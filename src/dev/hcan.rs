@@ -307,6 +307,19 @@ impl Hcan {
             return;
         }
         self.tx_timing = Some((self.r16(0x06), self.r16(0x04)));
+        if self.alone && self.trace {
+            // Nobody acknowledges, so the frame never counts as sent,
+            // but it is on the wires (again and again) from now until
+            // it is cancelled: what a logic analyser would record.
+            let pending = self.r32(TXPR1);
+            if let Some(n) = (1..32).find(|n| pending & (1 << n) != 0) {
+                let base = MB + n * 0x20;
+                let len = (self.regs[base + self.ctl + 1] & 0xf).min(8);
+                let mut f = Frame { id: self.mb_id(n), len, data: [0; 8] };
+                f.data[..len as usize].copy_from_slice(&self.regs[base + 8..base + 8 + len as usize]);
+                eprintln!("[can] tx {} (not acknowledged)", f);
+            }
+        }
     }
 
     /// The mailbox whose frame goes onto the bus next (the lowest of

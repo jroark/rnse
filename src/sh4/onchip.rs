@@ -842,6 +842,16 @@ impl OnChip {
                 }
                 ((self.pdtrb & out_mask) | (self.pdtrb_in & !out_mask)) as u32
             }
+            // RTCSR: while the refresh timer counts (a clock is selected)
+            // its compare match and its overflow of the refresh count
+            // come round all the time; the 192's boot ROM clears the
+            // overflow flag and waits for it four times before it goes
+            // on.  The timer itself is not modelled: both flags read as
+            // set whenever it runs.
+            0xff80_001c => {
+                let v = self.bsc[7];
+                if v & 0x38 != 0 { v | 0x84 } else { v }
+            }
             0xff80_0000..=0xff80_007f => self.bsc[((addr & 0x7f) >> 2) as usize],
 
             // DMAC
@@ -877,7 +887,12 @@ impl OnChip {
             }
 
             // INTC
-            0xffd0_0000 => self.intc.icr as u32,
+            // ICR.  Bit 15 is the level on the NMI pin, which is high
+            // on a 192 that runs (a unit's report has 0x8000 here); its
+            // boot ROM looks at it first thing after a reset and goes
+            // off to wait when it is low.  The 193's software does not
+            // read the bit.
+            0xffd0_0000 => self.intc.icr as u32 | if self.intc.int2.is_none() { 0x8000 } else { 0 },
             0xffd0_0004 => self.intc.ipra as u32,
             0xffd0_0008 => self.intc.iprb as u32,
             0xffd0_000c => self.intc.iprc as u32,
@@ -1002,6 +1017,13 @@ impl OnChip {
             0xff80_0030 => self.pdtra = v as u16,
             0xff80_0040 => self.pctrb = v,
             0xff80_0044 => self.pdtrb = v as u16,
+            // The refresh timer's registers take a byte, and only with
+            // 0xa5 above it.
+            0xff80_001c | 0xff80_0020 | 0xff80_0024 => {
+                if v >> 8 == 0xa5 {
+                    self.bsc[((addr & 0x7f) >> 2) as usize] = v & 0xff;
+                }
+            }
             0xff80_0000..=0xff80_007f => self.bsc[((addr & 0x7f) >> 2) as usize] = v,
             0xff90_0000..=0xff9f_ffff => {} // SDMR2/SDMR3: SDRAM mode register set
 

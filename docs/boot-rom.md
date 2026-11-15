@@ -5,6 +5,59 @@ that an update never rewrites, so it is not on the disc.  The emulator
 replaces it with a stand-in (`src/bootrom.rs`) built from what the other
 software expects of it.  This file records that evidence.
 
+A real one has since been read: `sdk/examples/report` sent the 48 KiB
+of a North American 192 out on the CAN bus, and they came back whole,
+with the CRC-32 the unit computed (0xf7f42e55).  The image is firmware
+and stays out of the repository.
+
+## The real one, in the emulator
+
+`rnse boot disc.iso --variant V222 --boot-rom rom.bin` puts such an
+image where the stand-in is and starts at the reset vector; nothing is
+then called or answered by the emulator.  With the image of that unit:
+
+* The installed software starts and comes to the radio's picture, with
+  the same picture and, line for line, the same log as with the
+  stand-in.  An update runs whole: the application takes a disc with a
+  higher index, the loader erases and writes, prints `*** Jump User
+  RESET ***`, and the ROM starts the new software.
+* Two things had to be added to the emulator for it, both in
+  `src/sh4/onchip.rs`: the refresh timer's flags (the ROM clears RTCSR's
+  overflow flag and waits for it, four times, before it goes on), and
+  the level of the NMI pin in ICR bit 15 (the ROM looks at it first
+  thing; with the pin low it goes to a routine that strobes the
+  watchdog and waits on timer 0, which nothing has started).
+
+What the image says about itself and about what is written below:
+
+* Its header at 0x400 is `.PRG`, `V220100D`, `Sep  3 2003`, `11:41:33`,
+  `AISIN AW co.LTD`.  **The project code there is V220, on a unit that
+  runs and updates V222 software**, so the loader cannot be taking its
+  "current project" from these four bytes alone, as the table below has
+  it.  Not looked into.
+* Offset 0 is code, not an address: `mov.l`, `jmp` to 0xa0000fa0.  The
+  loader's end works with it all the same, so "jmp @[0]" below needs
+  another look as well.
+* The reset code sets the bus controller (BCR1 0x01000008, BCR2 0xfd38,
+  WCR1 0x11111011, WCR2 0x2082624d, MCR 0x00029018 and then its mode
+  bits), the ten registers at 0x16000000-0x16000024 (among them
+  0x1600001c = 0x806898c0, which is where that value comes from, and
+  the latch 0x16000004 = 0x3f8f) and the direction and data of the
+  eight ports (port 7, the CAN transceiver's: direction 0x1f, data
+  0x10).
+* Under it the three timers run: timer 0 for a tick, timer 1 (100
+  interrupts in the first seconds, then none), and timer 2, the CAN
+  timer, at 5 ms: half as often as the stand-in has it (48833
+  interrupts in a run where the tick had 245543).  The stand-in's 2.5 ms
+  is wrong by that.
+* It leaves the interrupt priorities the unit's report shows (IPRA
+  0x7050, IPRC 0x0600) and has CAN mailboxes 1 and 2 on identifier
+  0x436 before the OS runs, where the stand-in has mailbox 2 on 0x400.
+
+None of the services has been read out of the image yet, nor has the
+stand-in been changed to match: the tables below are still what the
+other software suggested, now with something to check them against.
+
 ## What other software reads from it
 
 | what | evidence |
