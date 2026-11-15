@@ -106,11 +106,21 @@ two machines, [docs/firmware-format.md](docs/firmware-format.md) for the disc
 and file formats, and [docs/boot-rom.md](docs/boot-rom.md) for how the
 missing boot ROM is replaced.
 
+A modern, rotary-controlled replacement firmware for the 192, including native
+SD apps, is described in [docs/modern-192.md](docs/modern-192.md).
+
 ## Building
 
     cargo build --release
 
 There are no dependencies outside the Rust standard library.
+
+## Native macOS app
+
+Build with `./macos/build.sh`, then open `out/macos/RNS-E.app`. The native
+app uses the photographed faceplate with clickable keys and rotating knobs,
+live sound, media mounting, screenshots, and firmware logs. See
+[macOS instructions](macos/README.md) for requirements and controls.
 
 ## Using it
 
