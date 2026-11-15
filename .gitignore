@@ -13,3 +13,5 @@
 __pycache__/
 
 /macos/bridge/target/
+/linux/work/
+/linux/out/
