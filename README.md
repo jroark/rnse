@@ -106,6 +106,9 @@ two machines, [docs/firmware-format.md](docs/firmware-format.md) for the disc
 and file formats, and [docs/boot-rom.md](docs/boot-rom.md) for how the
 missing boot ROM is replaced.
 
+A modern, rotary-controlled replacement firmware for the 192, including native
+SD apps, is described in [docs/modern-192.md](docs/modern-192.md).
+
 ## Building
 
     cargo build --release
