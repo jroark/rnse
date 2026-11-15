@@ -1840,6 +1840,107 @@ fn programs_come_from_an_sd_card() {
     }
 }
 
+/// Linux from an SD card (docs/linux.md): the stock software starts
+/// sdboot from the disc, sdboot starts linuxboot (RNSE.BIN) from the
+/// card, and linuxboot loads the kernel (VMLINUX.BIN, as linux/build.sh
+/// makes it; RNSE_LINUX names the file) and enters it.  The kernel comes
+/// up on the 192's own processor with its caches modelled, runs its
+/// /init, keeps the board's watchdog served with room to spare, and puts
+/// its console on the screen.  The controls work throughout (CLAUDE.md,
+/// "Mandatory hardware behavior"): EJECT folds the display down and up
+/// while linuxboot reads the card and under Linux, CD EJECT pushes the
+/// disc out, a short RETURN does nothing of the kind, and RETURN held for
+/// two seconds goes back to sdboot, which does not start Linux again by
+/// itself.  Without RNSE_LINUX nothing is tested.
+#[test]
+fn linux_boots_from_an_sd_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some(kernel) = std::env::var_os("RNSE_LINUX") else { return };
+    let kernel = std::fs::read(kernel).expect("RNSE_LINUX is not readable");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "linuxboot").is_none() { return }
+    let linuxboot = std::fs::read(sdk.join("out/linuxboot-192.bin")).unwrap();
+    let entries = vec![rnse::fat::Entry::file("RNSE.BIN", linuxboot), rnse::fat::Entry::file("VMLINUX.BIN", kernel)];
+    let card = rnse::fat::card("LINUX", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    let console = |m: &Machine| String::from_utf8_lossy(&m.console).into_owned();
+    let press = |m: &mut Machine, key: &str, hold: u64| {
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(hold * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert!(m.panel_key(key, false));
+    };
+
+    // While the card is read: the display folds down and up again.
+    for _ in 0..200 {
+        if console(&m).contains("READING VMLINUX.BIN") { break }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    }
+    assert!(console(&m).contains("READING VMLINUX.BIN"), "{}: {:?}", name, console(&m));
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos <= 94, "{}: the display is at {} while the card is read", name, m.board.display_pos);
+    assert!(!console(&m).contains("STARTING LINUX"), "{}: the card was read too fast to try the keys", name);
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos >= 894, "{}: the display is at {}", name, m.board.display_pos);
+
+    // The card's start, 2.5 MB from it, the kernel's start and a few of
+    // /init's rounds.
+    assert_eq!(m.run(12_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = console(&m);
+    let tail = &text[text.len().saturating_sub(600)..];
+    assert!(text.contains("rnse sdk: linuxboot"), "{}: {:?}", name, tail);
+    assert!(text.contains("Booting machvec: Audi RNS-E 192"), "{}: {:?}", name, tail);
+    assert!(text.contains("CPU: SH7750R"), "{}: {:?}", name, tail);
+    assert!(text.contains("fb0: 400x235"), "{}: {:?}", name, tail);
+    assert!(text.contains("return to the loader with RETURN held"), "{}: {:?}", name, tail);
+    assert!(text.contains("/init running"), "{}: {:?}", name, tail);
+    assert!(!text.contains("Kernel panic") && !text.contains("Oops"), "{}: {:?}", name, tail);
+    // The kernel's time goes on, and with it the watchdog's strobe.
+    let ups = text.matches("rnse: up ").count();
+    let edges = m.board.watchdog_edges;
+    assert_eq!(m.run(6_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(console(&m).matches("rnse: up ").count() > ups, "{}: /init has stopped", name);
+    assert!(m.board.watchdog_edges > edges + 500, "{}: {} edges in 6 s", name, m.board.watchdog_edges - edges);
+    let (_, _, pixels) = m.render();
+    assert!(pixels.iter().any(|&p| p != 0), "{}: the screen is dark", name);
+
+    // Under Linux: a short RETURN stays in Linux; the display folds down,
+    // the disc comes out, the display folds up.
+    press(&mut m, "RETURN", 300);
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(!console(&m).contains("back to the SD loader"), "{}: a short RETURN left Linux", name);
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos <= 94, "{}: the display is at {} under Linux", name, m.board.display_pos);
+    let ejects = m.atapi().ejects;
+    press(&mut m, "CD_EJECT", 200);
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = console(&m);
+    assert_eq!(m.atapi().ejects, ejects + 1, "{}: no eject: {:?}", name, &text[text.len().saturating_sub(300)..]);
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos >= 894, "{}: the display is at {}", name, m.board.display_pos);
+
+    // RETURN held: back to sdboot, which stays there.
+    press(&mut m, "RETURN", 2_500);
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = console(&m);
+    let back = text.find("back to the SD loader").unwrap_or_else(|| panic!("{}: RETURN held did not leave Linux", name));
+    assert!(text[back..].contains("rnse sdk: sdboot") && text[back..].contains("TEST RETURNED: 0"), "{}: {:?}", name, &text[back..]);
+    assert!(!text[back..].contains("rnse sdk: linuxboot"), "{}: Linux was started again", name);
+
+    // The unit resets 105 ms after the last edge: keep well inside.
+    let longest = m.watchdog.longest / ms;
+    assert!(longest < 60, "{}: the watchdog waited {} ms", name, longest);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
 /// Three cooperative tests run with one disc launch and no flash writes.
 #[test]
 fn sd_loader_returns_and_rearms_on_reinsertion() {
