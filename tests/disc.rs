@@ -1890,6 +1890,141 @@ fn sd_loader_offers_a_menu_of_programs() {
     assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
 }
 
+/// Android Auto's video on the 192 (sdk/examples/h264bench): the
+/// stock software starts the SD loader, the loader the benchmark, which
+/// decodes an H.264 stream from the card as a phone would send it
+/// (tests/data/margin.264: twelve synthetic frames of 800x480 made by
+/// tools/aa-streams.sh) and finds every frame as ffmpeg decodes it
+/// (margin.crc, the CRC-32s ffmpeg's frames have), twice: with the
+/// caches as the stock software leaves them and the decoder as it came,
+/// and with the caches set up anew (`cache_setup`: index modes off, P1
+/// copy-back) and the decoder's direct copy, under the modelled caches.
+#[test]
+fn sdk_decodes_h264_from_a_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "h264bench").is_none() { return }
+    let bench = std::fs::read(sdk.join("out/h264bench-192.bin")).unwrap();
+    let entries = vec![
+        rnse::fat::Entry::file("RNSE.BIN", bench),
+        rnse::fat::Entry::file("MARGIN.264", include_bytes!("data/margin.264").to_vec()),
+        rnse::fat::Entry::file("MARGIN.CRC", include_bytes!("data/margin.crc").to_vec()),
+    ];
+    let card = rnse::fat::card("VIDEO", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let flash = m.board.flash.clone();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    let text = loop {
+        assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        if text.contains("DONE.") || m.cpu.cycles > 120_000 * ms {
+            break text;
+        }
+    };
+    let tail = &text[text.len().saturating_sub(1200)..];
+    assert!(text.contains("rnse sdk: h264bench"), "{}: {:?}", name, tail);
+    // Each frame's line is the CRC-32 of the frames up to it, which is
+    // what each line of the .CRC file has.
+    let want: Vec<&str> = std::str::from_utf8(include_bytes!("data/margin.crc")).unwrap().lines().collect();
+    assert_eq!(want.len(), 12);
+    for crc in &want {
+        assert_eq!(text.matches(&format!("{} ", crc)).count(), 2, "{}: frame CRC {} not seen once a pass: {:?}", name, crc, tail);
+    }
+    let rows: Vec<&str> = text.lines().filter(|l| l.contains("MARGIN ") && (l.starts_with("STOCK ") || l.starts_with("COPY+CB+NOIX "))).collect();
+    assert_eq!(rows.len(), 2, "{}: {:?}", name, tail);
+    for row in rows {
+        assert!(row.ends_with(" OK"), "{}: {}", name, row);
+    }
+    assert!(!text.contains("unexpected"), "{}: {:?}", name, tail);
+    // And back to the SD loader, with the caches as the program found
+    // them and the flash as it was.
+    let at = text.find("DONE.").unwrap();
+    until(&mut m, at, "TEST RETURNED: 0", 90).unwrap_or_else(|| panic!("{}: not back at the loader: {:?}", name, String::from_utf8_lossy(&m.console[at..])));
+    assert_eq!(m.board.flash, flash, "{}", name);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
+/// Sound as samples from a program of our own (sdk/src/pcm.c,
+/// sdk/examples/pcmtest): each card processor in turn gets the SDK's
+/// player and plays two tones, fed by one DMA transfer and by DMA in
+/// blocks, and the amplifier gives out each at its pitch, for its two
+/// seconds, at the converter's 44.1 kHz, without a break.
+#[test]
+fn sdk_pcm_plays_through_both_card_processors() {
+    use rnse::board::Model;
+    use rnse::dev::radio::Radio;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "pcmtest").is_none() { return }
+    let program = std::fs::read(sdk.join("out/pcmtest-192.bin")).unwrap();
+    let card = rnse::fat::card("SOUND", &[rnse::fat::Entry::file("RNSE.BIN", program)], None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let flash = m.board.flash.clone();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    m.speaker = Some(Vec::new());
+    let text = loop {
+        assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        if text.contains("DONE.") || m.cpu.cycles > 60_000 * ms {
+            break text;
+        }
+    };
+    // (What the converters sent last reaches the speaker a little later.)
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let tail = &text[text.len().saturating_sub(1500)..];
+    assert!(text.contains("rnse sdk: pcmtest"), "{}: {:?}", name, tail);
+    assert!(!text.contains("FAILED") && !text.contains("DID NOT START"), "{}: {:?}", name, tail);
+    let rates: Vec<u32> = text.lines().filter_map(|l| l.trim().strip_prefix("SAMPLES A SECOND ")).filter_map(|v| v.trim().parse().ok()).collect();
+    assert_eq!(rates.len(), 4, "{}: {:?}", name, tail);
+    assert!(rates.iter().all(|r| r.abs_diff(44_100) <= 20), "{}: every way at 44.1 kHz: {:?}", name, rates);
+    assert_eq!(m.radio.source, Radio::SOURCE_DECODER, "{}", name);
+    for d in &m.board.media.dsps {
+        assert_eq!(d.fault, None, "{}: {}", name, d.name);
+    }
+    // The pitch of each half second of the right channel: the six
+    // tones, in their order, each for its two seconds.
+    let heard = m.speaker.take().unwrap();
+    let right: Vec<i16> = heard.iter().skip(1).step_by(2).copied().collect();
+    let pitches: Vec<u32> = right.chunks(22_050).map(|c| 2 * c.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as u32).collect();
+    for want in [440, 550, 880, 1100] {
+        let halves = pitches.iter().filter(|&&p| p.abs_diff(want) <= 4).count();
+        assert!(halves >= 3, "{}: {} Hz heard for {} half seconds: {:?}", name, want, halves, pitches);
+    }
+    // No break in a tone: within each half second that is one tone
+    // throughout, no step between two samples larger than that tone's
+    // sine makes.  (Where one tone ends and the next starts, a step is
+    // what it is.)
+    let chunks: Vec<&[i16]> = right.chunks(22_050).collect();
+    for k in 1..chunks.len().saturating_sub(1) {
+        let (chunk, pitch) = (chunks[k], pitches[k]);
+        let Some(&hz) = [440u32, 550, 880, 1100].iter().find(|&&f| pitch.abs_diff(f) <= 4) else { continue };
+        // (The same tone on both sides: not where one starts or ends.)
+        if pitches[k - 1].abs_diff(hz) > 4 || pitches[k + 1].abs_diff(hz) > 4 {
+            continue;
+        }
+        let peak = chunk.iter().map(|v| i32::from(*v).abs()).max().unwrap();
+        let largest = chunk.windows(2).map(|w| (i32::from(w[1]) - i32::from(w[0])).abs()).max().unwrap();
+        // (pcmtest's sine takes eight bits of its phase: its steps are
+        // up to a fifth or so uneven.  A break is a step of the order of
+        // the whole amplitude.)
+        let slope = (1.4 * 2.0 * std::f64::consts::PI * f64::from(hz) / 44_100.0 * f64::from(peak)) as i32;
+        assert!(peak > 0 && largest <= slope + 2, "{}: {} Hz: a step of {} where its sine of {} has at most {}", name, hz, largest, peak, slope);
+    }
+    assert!(!text.contains("unexpected"), "{}: {:?}", name, tail);
+    // And back to the SD loader, with the flash as it was.
+    let at = text.find("DONE.").unwrap();
+    until(&mut m, at, "TEST RETURNED: 0", 60).unwrap_or_else(|| panic!("{}: not back at the loader: {:?}", name, String::from_utf8_lossy(&m.console[at..])));
+    assert_eq!(m.board.flash, flash, "{}", name);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
 /// RETURN held for two seconds (CLAUDE.md, "Mandatory hardware
 /// behavior"): in a program the SD loader started, back to the loader
 /// (and a RETURN still held then is not taken for a new one); in the
