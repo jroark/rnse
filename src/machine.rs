@@ -107,7 +107,7 @@ pub struct Machine {
     /// Number of calls seen per boot ROM service (trap, function code).
     pub bios_calls: BTreeMap<(u8, u32), u64>,
     /// Memory break of the two pools managed by boot ROM services 4/5.
-    pub bios_break: [u32; 2],
+    pub bios_break: [u32; 8],
     /// Address of the firmware's `printf`, if known.  The main software
     /// formats debug messages but does not send them to a serial port;
     /// with this set the emulator prints them itself.
@@ -205,7 +205,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 2], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
+        Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() }
     }
 
     /// Leave the timers running with their interrupts enabled and open
@@ -317,6 +317,7 @@ impl Machine {
         }
         self.board.flash[..rom.len()].copy_from_slice(rom);
         self.cpu.hypercalls_enabled = false;
+        self.cpu.trace_services = self.trace_bios;
         self.boot_calls.clear();
         self.cpu.reset();
         Ok(())
@@ -877,19 +878,35 @@ impl Machine {
             navi.can.configure_mailbox(24, 0x400, 0x03f, 3);
             navi.can.configure_mailbox(31, 0x000, 0x7ff, 3);
         } else {
+            // What follows is what a 192's ROM was seen to leave when it
+            // calls the OS (docs/boot-rom.md, "The real one").
+            //
             // The media driver preserves DMAOR.DME while selecting its
-            // transfer mode; it never sets master enable itself. The
-            // boot ROM must leave the 192's DMAC enabled.
-            self.cpu.io.dmaor = 1;
+            // transfer mode; it never sets master enable itself.
+            self.cpu.io.dmaor = 0xc001;
+            // The three timers at levels 7, 6 and 5.
+            self.cpu.io.intc.ipra = 0x7650;
+            self.cpu.r[15] = 0x8fff_ffb0;
+            self.bios_break = [0x8c00_0100, 0x9000_0000, 0, 0, 0, 0, 0, 0];
+            // The start of the battery-backed memory is the ROM's: it
+            // clears it after a reset, but for the word at 0x18.
+            if self.board.nvram.len() >= 0x1c {
+                self.board.nvram[..0x18].fill(0);
+                self.board.nvram[0x1a..0x1c].fill(0);
+            }
             // The HCAN driver leaves these three shared receive boxes'
             // modes alone (unlike its dedicated receive boxes). It uses
             // box 3 for 0x600..0x67f, box 2 for network management, and
             // box 0 for other identifiers dispatched through software
             // filters. Their masks must survive identifier writes when
             // further software consumers register.
-            self.board.can.configure_mailbox(0, 0, 0x7ff, 3);
-            self.board.can.configure_mailbox(2, 0x400, 0x03f, 3);
-            self.board.can.configure_mailbox(3, 0x600, 0x07f, 3);
+            // As the ROM has them: 0 takes everything (its identifier
+            // is the second ignition message's), 1 sends the unit's
+            // network management message and 2 receives that range.
+            self.board.can.configure_mailbox(0, 0x2c3, 0x7ff, 3);
+            self.board.can.configure_mailbox(1, 0x436, 0, 0);
+            self.board.can.configure_mailbox(2, 0x436, 0x03f, 3);
+            self.board.can.configure_mailbox(3, 0, 0x07f, 3);
         }
         // Likewise the CAN controller: the OS sets up mailboxes and
         // handles interrupts but never takes the chip out of reset.
@@ -1004,19 +1021,110 @@ impl Machine {
     fn bios_trap(&mut self, n: u8, caller: u32) {
         let regs: Vec<u32> = self.cpu.bank0().to_vec();
         let code = regs[0];
+        let is_192 = self.board.model == crate::board::Model::Rnse192;
         let count = self.bios_calls.entry((n, code)).or_insert(0);
         *count += 1;
         let shown = *count <= 8;
         let last = *count == 8;
         let ret = match (n, code) {
+            // Eight pools on the 192, as its ROM has them (others answer
+            // 0 and -1); what the 193's does with a pool number above 1
+            // is not known.
+            (0x3e, 4) if is_192 => self.bios_break.get(regs[4] as usize).copied().unwrap_or(0),
+            (0x3e, 5) if is_192 => match self.bios_break.get_mut(regs[4] as usize) {
+                Some(b) => {
+                    *b = regs[5];
+                    0
+                }
+                None => u32::MAX,
+            },
             (0x3e, 4) => self.bios_break[(regs[4] & 1) as usize],
             (0x3e, 5) => {
                 self.bios_break[(regs[4] & 1) as usize] = regs[5];
                 0
             }
-            // Version string of a boot component; the application checks
-            // the first three characters for other hardware projects.
+            // A text of the boot ROM's header: 1 its version (the
+            // application checks the first three characters for other
+            // hardware projects), 2 the version without the project, 3
+            // and 4 its date and time, 6 its maker; anything else the
+            // header itself.  (16 and 17 are two texts in the ROM's
+            // data that the stand-in has not got.)
+            (0x3e, 1) if is_192 => match regs[4] {
+                1 => 0x8000_0406,
+                2 => 0x8000_040a,
+                3 => 0x8000_0410,
+                4 => 0x8000_0420,
+                5 => 0x8000_0430,
+                6 => 0x8000_0440,
+                _ => 0x8000_0400,
+            },
             (0x3e, 1) => 0x8000_0406,
+            (0x3e, 2) if is_192 => 0,
+            // Start again: 0 through the reset code, 1 without it.
+            (0x3e, 3) if is_192 && regs[4] <= 1 => {
+                eprintln!("[boot] firmware asked the boot ROM for a restart ({})", regs[4]);
+                self.reset_requested = true;
+                self.cpu.fault = Some("reset requested".into());
+                0
+            }
+            // A counter kept in battery-backed memory, eight of them at
+            // 0x8c, each with its complement behind it: r5 is added and
+            // the sum returned.  The OS adds 1 to counter 0 from its
+            // tick now and then.
+            (0x3e, 7) if is_192 => {
+                let n = regs[4] as usize;
+                if n < 8 && self.board.nvram.len() >= 0xcc {
+                    let at = 0x8c + 8 * n;
+                    let word = |nv: &[u8], o: usize| u32::from_be_bytes(nv[o..o + 4].try_into().unwrap());
+                    let mut v = word(&self.board.nvram, at);
+                    if v != !word(&self.board.nvram, at + 4) {
+                        v = 0;
+                    }
+                    v = v.wrapping_add(regs[5]);
+                    self.board.nvram[at..at + 4].copy_from_slice(&v.to_be_bytes());
+                    self.board.nvram[at + 4..at + 8].copy_from_slice(&(!v).to_be_bytes());
+                    v
+                } else {
+                    u32::MAX
+                }
+            }
+            (0x3e, 8) if is_192 => {
+                if regs[4] == u32::MAX && self.board.nvram.len() >= 0x20 {
+                    self.board.nvram[0x1c..0x20].copy_from_slice(&0x4000_0000u32.to_be_bytes());
+                    0
+                } else {
+                    u32::MAX
+                }
+            }
+            // The count of restarts after an exception is cleared.
+            (0x3e, 0x0a) if is_192 => {
+                if self.board.nvram.len() >= 0x1c {
+                    self.board.nvram[0x1a..0x1c].fill(0);
+                }
+                u32::MAX
+            }
+            // Numbers the ROM has no service for: its dispatcher's -1.
+            (0x3e, 0x0b..=0x0f | 0x14..) if is_192 => u32::MAX,
+            // The module directory: entry n of it (0 the directory
+            // itself), and for service 0x12 the text six bytes into
+            // that module's header.
+            (0x3e, 0x10 | 0x12) if is_192 => {
+                let count = u32::from_be_bytes(self.board.flash[0xc018..0xc01c].try_into().unwrap());
+                let n = regs[4];
+                if n == 0 && code == 0x10 {
+                    0x8000_c000
+                } else if n == 0 || n > count || n > 64 {
+                    0
+                } else {
+                    let entry = 0xc01c + (n - 1) * 16;
+                    if code == 0x10 {
+                        0x8000_0000 | entry
+                    } else {
+                        let e = entry as usize + 12;
+                        u32::from_be_bytes(self.board.flash[e..e + 4].try_into().unwrap()).wrapping_add(6)
+                    }
+                }
+            }
             // Version block of the installed software: SOFIDX[4],
             // NAVVER[8], AUDVER[8] as stored in the module directory.
             (0x3e, 0x13) => {
@@ -1075,6 +1183,18 @@ impl Machine {
                         eprintln!("[bios]   CAN state block {}: {:#x} bytes at {:08x}", n, size, addr);
                     }
                 }
+                if is_192 {
+                    // The ROM fills every one of these blocks with the
+                    // state of its own CAN software.  The stand-in knows
+                    // a few fields of it and leaves the rest zero, and
+                    // zero it has to be: neither the ROM nor, after a
+                    // clean start, the OS clears RAM first.
+                    for &(addr, size) in network.values().chain(blocks.values()) {
+                        for i in 0..size.min(0x2000) {
+                            self.poke8(addr + i, 0);
+                        }
+                    }
+                }
                 // An awake boot ROM has enabled CAN transmission and
                 // entered the network's start state. These values mirror
                 // the OS's cold initialization (NM start state 1, flag
@@ -1090,10 +1210,12 @@ impl Machine {
                 }
                 // The CAN timer handler clears its underflow flag,
                 // but the OS never programs its reload or starts it.
-                // Use a 2.5 ms timer, the period the loaders give this
-                // timer themselves, for a CAN service tick of 5 ms
-                // (both firmware handlers divide this interrupt by two).
-                let reload = (self.cycles_per_ms() / self.cpu.io.pclk_div * 5 / 8 - 1) as u32;
+                // On the 192 its ROM has it at 5 ms (73499 counts, like
+                // its other two timers).  For the 193, whose ROM has
+                // not been seen: 2.5 ms, the period the loaders give
+                // this timer themselves.
+                let eighths = if is_192 { 10 } else { 5 };
+                let reload = (self.cycles_per_ms() / self.cpu.io.pclk_div * eighths / 8 - 1) as u32;
                 let now = self.cpu.cycles;
                 let pc = self.cpu.pc;
                 let (timer, start, bit) = if self.cpu.io.navi.is_some() {
@@ -1130,6 +1252,18 @@ impl Machine {
                 }
                 0
             }
+            // What the 192's ROM keeps about restarts after an
+            // exception, in battery-backed memory from 0x10: where the
+            // exception was (SPC, SSR), a word about it, and how many
+            // there have been since the last reset, which is the result.
+            // After a reset all of it is zero.  (The OS clears all RAM
+            // on a 9; the stand-in used to answer that.)
+            (0x3e, 6) if is_192 => {
+                for p in [regs[4], regs[5], regs[6]] {
+                    self.poke32(p, 0);
+                }
+                0
+            }
             (0x3e, 6) => {
                 for p in [regs[4], regs[5], regs[6]] {
                     self.poke32(p, 0);
@@ -1154,7 +1288,25 @@ impl Machine {
                 self.cpu.io.write(&mut self.board, base + 4, 4, regs[5], now, caller); // destination
                 self.cpu.io.write(&mut self.board, base, 4, regs[6], now, caller); // source
                 self.cpu.io.write(&mut self.board, base + 8, 4, regs[7], now, caller); // count
-                regs[4] & 7
+                // What the ROM's routine happens to leave in r0.
+                (regs[4] & 7) << 4
+            }
+            // Stop a channel: its enable bit is taken away (the ROM
+            // first waits for the transfer's end; here it has ended),
+            // or, after an address error, that flag in DMAOR, whose old
+            // value is then the result.
+            (0x3d, 0x0205) if is_192 => {
+                let now = self.cpu.cycles;
+                let chcr = 0xffa0_000c + (regs[4] & 7) * 16;
+                let dmaor = self.cpu.io.read(&mut self.board, 0xffa0_0040, 4, now, caller);
+                if dmaor & 4 != 0 {
+                    self.cpu.io.write(&mut self.board, 0xffa0_0040, 4, dmaor & !4, now, caller);
+                    dmaor
+                } else {
+                    let v = self.cpu.io.read(&mut self.board, chcr, 4, now, caller);
+                    self.cpu.io.write(&mut self.board, chcr, 4, v & !1, now, caller);
+                    0
+                }
             }
             (0x3d, 0x0203) => {
                 let now = self.cpu.cycles;

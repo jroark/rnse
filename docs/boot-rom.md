@@ -28,42 +28,57 @@ then called or answered by the emulator.  With the image of that unit:
   thing; with the pin low it goes to a routine that strobes the
   watchdog and waits on timer 0, which nothing has started).
 
-What the image says about itself and about what is written below:
+What the image says about itself, and what the stand-in was changed to
+after it (for the 192; the 193's is still all inference):
 
 * Its header at 0x400 is `.PRG`, `V220100D`, `Sep  3 2003`, `11:41:33`,
-  `AISIN AW co.LTD`.  **The project code there is V220, on a unit that
-  runs and updates V222 software**, so the loader cannot be taking its
-  "current project" from these four bytes alone, as the table below has
-  it.  Not looked into.
-* Offset 0 is code, not an address: `mov.l`, `jmp` to 0xa0000fa0.  The
-  loader's end works with it all the same, so "jmp @[0]" below needs
-  another look as well.
+  `AISIN AW co.LTD`, each text ending in CR LF.  The project code there
+  is V220 on a unit that runs V222 software; the V222 loader prints it
+  (`curprjct=V220`) and updates from a V222 set all the same.  The
+  stand-in's header has that layout and says V220 on every 192.
+* Offset 0 is code, not an address: `mov.l`, `jmp` to the reset code at
+  0xa0000fa0, whose address is the long word at 8.  The loader's
+  `jmp @[0]` at the end of an update therefore jumps to 0xd001402b, an
+  odd address; the address error is the loader's to handle, and its
+  handler goes to the reset code.  So an update ends in the ROM's reset
+  code, which sets the ports and the latch anew: that is the "reset" a
+  logic analyser sees on a unit then, with no reset line involved.  The
+  stand-in has the same three instructions and its reset hook at 0xfa0.
 * The reset code sets the bus controller (BCR1 0x01000008, BCR2 0xfd38,
   WCR1 0x11111011, WCR2 0x2082624d, MCR 0x00029018 and then its mode
   bits), the ten registers at 0x16000000-0x16000024 (among them
   0x1600001c = 0x806898c0, which is where that value comes from, and
   the latch 0x16000004 = 0x3f8f) and the direction and data of the
   eight ports (port 7, the CAN transceiver's: direction 0x1f, data
-  0x10).
-* Under it the three timers run: timer 0 for a tick, timer 1 (100
-  interrupts in the first seconds, then none), and timer 2, the CAN
-  timer, at 5 ms: half as often as the stand-in has it (48833
-  interrupts in a run where the tick had 245543).  The stand-in's 2.5 ms
-  is wrong by that.
-* It leaves the interrupt priorities the unit's report shows (IPRA
-  0x7050, IPRC 0x0600) and has CAN mailboxes 1 and 2 on identifier
-  0x436 before the OS runs, where the stand-in has mailbox 2 on 0x400.
-
-None of the services has been read out of the image yet, nor has the
-stand-in been changed to match: the tables below are still what the
-other software suggested, now with something to check them against.
+  0x10).  It does not clear RAM.
+* What it leaves when it calls the OS's first entry point: SR
+  0x40000010 and its own vector base (0x80000470), so its interrupt
+  handlers are at work until the OS has its own; the stack at
+  0x8fffffb0; DMAOR 0xc001; IPRA 0x7650; the three timers running, each
+  at 5 ms (73499 counts) with its interrupt on; CAN mailbox 0 receiving
+  everything (identifier 0x2c3), 1 sending 0x436, 2 receiving
+  0x400-0x43f, 3 receiving with mask 0x7f.  The stand-in leaves the
+  same, except that it cannot take interrupts before the OS can: its
+  CAN timer starts with the CAN handover, now at 5 ms where it had 2.5,
+  and timer 1, which the ROM's own CAN software uses for half a second,
+  it does not run.
+* The services, read from the image and compared call by call with the
+  stand-in's answers in a start of the same software (`--trace-bios`
+  prints the real ROM's in the stand-in's words): see "Services".
+  With those changed the two agree on every call of a start, and the
+  firmware's log is the same line for line, with RAM full of arbitrary
+  data as well (`--strict`).
+* It has a driver for the drive (0xa7800000, 0xa7880000), the display,
+  the three serial channels 1, 3 and 5, CAN and the A/D converter, and
+  nothing for the SD card processors (no 0xb5000002, no 0xb500004a):
+  whatever it can start by itself, it starts from the disc.
 
 ## What other software reads from it
 
 | what | evidence |
 |------|----------|
-| Offset 0: address of the reset entry | The loader ends an update with `jmp @[0]` (after printing `*** Jump User RESET ***`). |
-| Offset 0x400: a module header; +6 is the project code, e.g. `V220` | The loader copies four bytes from 0x80000406 as the "current project" and only accepts a software set of that name from the disc.  Without it it tries its built-in list (`V220`, `V264`) and reports "version up not required". |
+| Offset 0 | The loader ends an update with `jmp @[0]` (after printing `*** Jump User RESET ***`).  On a 192 what is there is code, and the jump ends in the reset code by way of an address error (above). |
+| Offset 0x400: a header of texts; +6 is the version, which begins with a project code, e.g. `V220` | The loader copies four bytes from 0x80000406 as the "current project" (`curprjct`).  With `V220` there the V222 loader takes a V222 set; without a code it knows it tries its built-in list (`V220`, `V264`) and reports "version up not required". |
 
 ## Starting the loader
 
@@ -239,7 +254,11 @@ the two SD card processors (`docs/hardware.md`), whose program and
 host protocol would be needed first.
 
 Whether the boot ROM can also start a loader from a disc by itself, as
-it would have to after an update that was cut short, is not known.
+it would have to after an update that was cut short, has not been
+tried.  The 192's has what it takes: a driver for the drive and for the
+display, and a path of its own for when the software has failed ten
+times or the module directory does not verify.  It has nothing for the
+SD cards.
 `rnse loader` starts one directly, with interrupts masked and zeroes in
 r4-r6 unless told otherwise (`--args`).
 
@@ -280,10 +299,9 @@ State the OS inherits:
   takes the controller out of its reset/halt state itself.
 * A running CAN timer: TMU2 on the 192, unit 1 channel 0 on the 193.
   The OS installs its handler and clears underflows but does not start
-  the timer. The stand-in supplies a 2.5 ms interval, the one the
-  loaders program themselves; the handlers divide this by two to
-  service CAN every 5 ms. The exact boot-ROM reload is unavailable, so
-  this interval is an emulation assumption.
+  the timer.  On the 192 the ROM has it at 5 ms, and so has the
+  stand-in.  For the 193 the stand-in supplies 2.5 ms, the interval the
+  loaders program themselves, which is an assumption.
 * On the 192, shared receive mailboxes 0 (general), 2 (network management,
   mask `0x03f`) and 3 (`0x600..0x67f`, mask `0x07f`). The driver changes
   their identifiers as clients register but skips programming their mode.
@@ -321,6 +339,10 @@ Understood so far, trap 0x3d:
 | 0202 | channel, destination, source, count | sets a DMA channel's DAR, SAR and DMATCR | For the drive: channel 1, the buffer, 0xa7880000, words. |
 | 0203 | channel, value | writes the channel's CHCR and returns it read back | The drive's is 0x00094021. |
 | 0204 | channel | returns the channel's CHCR | By the place in the loader's code; the OS has the call but does not use it. |
+| 0205 | channel | waits for the channel's transfer to end and takes its enable bit away; after an address error clears that flag in DMAOR instead and returns DMAOR | From the ROM. |
+
+(0201 returns the new DMAOR and 0202 sixteen times the channel number,
+which is what its code leaves in r0; the stand-in does the same now.)
 
 Without these the 192's installed software could send the drive its
 commands but never got any disc data: every read of a data disc timed
@@ -330,10 +352,16 @@ Trap 0x3e:
 
 | fn | arguments | meaning | evidence |
 |----|-----------|---------|----------|
-| 1 | n | pointer to a version string | The application compares the first 3 characters of `fn1(1)` with "V25" and "V35". |
+| 1 | n | pointer to a text of the ROM's header: 1 the version, 2 the version without the project, 3 date, 4 time, 6 maker, else the header | The application compares the first 3 characters of `fn1(1)` with "V25" and "V35".  The rest from the ROM. |
+| 3 | 0 or 1 | restart: through the reset code, or without it | From the ROM. |
 | 4 | pool | get the pool's memory break | Modules do `base = fn4(0); ...; fn5(0, base + size)` to claim their static RAM, |
-| 5 | pool, address | set the pool's memory break | and the OS starts by setting it to the end of its own data (0x8c19c84c). |
-| 6 | three out-pointers | start-up status | The OS clears all RAM when this returns 9. |
+| 5 | pool, address | set the pool's memory break | and the OS starts by setting it to the end of its own data (0x8c19c84c).  Eight pools in the ROM, at 0x8fffd000; the first two start as 0x8c000100 and 0x90000000. |
+| 6 | three out-pointers | how often the ROM has started the software again after an exception since the last reset; through the pointers where the last one was (SPC, SSR) and a word about it.  Kept in battery-backed memory from 0x10, zero after a reset | From the ROM.  The OS clears all RAM when this returns 9, which made it look like a start-up status; the stand-in answered 9 and now answers 0. |
+| 7 | n, amount | adds to counter n of eight in battery-backed memory (0x8c + 8n, with its complement) and returns it | From the ROM.  The OS adds 1 to counter 0 from its tick now and then. |
+| 8 | -1 | writes 0x40000000 to battery-backed memory at 0x1c | From the ROM; purpose unknown. |
+| 0x0a | - | clears the count that 6 returns | From the ROM. |
+| 0x10 | n | address of entry n of the module directory (0: of the directory) | From the ROM. |
+| 0x12 | n | address of the text six bytes into module n's header | From the ROM; the stand-in answered 0. |
 | 9 | pointer to two block lists, two further arguments, 2 | 192 CAN state handover | V2220371 calls it from `801c75c0`; the two lists are built with `801c8568` and `801c4dcc`. |
 | 0x13 | - | pointer to the software index block (SOFIDX, NAVVER, AUDVER) | The OS compares the radio processor's reported version with the AUDVER text found through it; the block sits in the module directory at flash 0xC01C. |
 
@@ -341,11 +369,12 @@ Seen but not understood:
 
 | trap/fn | arguments observed | notes |
 |---------|--------------------|-------|
-| 3e/3 | 0 | Called after the module directory fails verification, right after 3d/0901(0xc000, 0x100).  Probably "restart". |
-| 3e/7 | 0, 1, 10, -2 | Called periodically from the tick. |
-| 3d/0901 | address, size | See 3e/3: probably erases flash. |
+| 3d/0901 | address, size | Called before 3e/3 (a restart) when the module directory fails verification: probably erases flash. |
 
-Unknown services return 0.  `rnse boot --trace-bios` logs every call with
+Trap 0x3f is not the ROM's: its table has no handler for it, the OS
+answers those itself.  A number the ROM has no service for gets -1 from
+its dispatcher, and so from the stand-in on the 192 for trap 0x3e;
+services the ROM has and the stand-in does not answer 0.  `rnse boot --trace-bios` logs every call with
 its caller.
 
 ## The 193's boot ROM

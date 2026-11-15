@@ -13,15 +13,20 @@
 //! each entry point.  Executing it returns control to the emulator, which
 //! performs the service in Rust (see [`Hook`]) and resumes the CPU.
 //!
-//! Everything here is inferred from how the modules on the disc use the
-//! boot ROM; see docs/boot-rom.md for the evidence.
+//! For the 192 it follows a real boot ROM, read from a unit, in what
+//! that ROM was seen to do: its header, its reset entry, what its
+//! services answer and the state it leaves (docs/boot-rom.md, "The real
+//! one, in the emulator"; `rnse boot --boot-rom` runs such an image in
+//! this module's place).  None of the ROM's code is here.  For the 193
+//! everything is still inferred from how the modules on the disc use
+//! the boot ROM; see docs/boot-rom.md for the evidence.
 
 use crate::board::Board;
 
 pub const HYPERCALL: u16 = 0xfffd;
 
 /// Flash offsets of the stub's entry points.
-pub const RESET_ENTRY: u32 = 0x0800;
+pub const RESET_ENTRY: u32 = 0x0fa0;
 pub const CALL_RETURN: u32 = 0x0a00;
 pub const UNHANDLED: u32 = 0x0900;
 pub const VBR: u32 = 0x1000;
@@ -30,7 +35,7 @@ pub const TRAP_STUBS: u32 = 0x2000;
 /// What a hypercall address means.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hook {
-    /// Something jumped to the reset entry (flash offset 0 holds its address).
+    /// Something jumped to the reset entry (flash offset 0 leads to it).
     Reset,
     /// A module entry point called by the stub returned.
     CallReturn,
@@ -72,24 +77,41 @@ pub fn install(board: &mut Board, project: &str) {
     let f = &mut board.flash;
     f[..0x4000].iter_mut().for_each(|b| *b = 0xff);
 
-    // Offset 0: address of the reset entry.  The update loader finishes
-    // with `jmp @[0]`.
-    put32(f, 0, 0xa000_0000 | RESET_ENTRY);
+    // Offset 0 is code, as in a 192's ROM: the reset entry's address is
+    // the long word at 8, loaded and jumped to.  The 192's loader ends
+    // an update with `jmp @[0]`, which takes those instructions for an
+    // address, an odd one; the address error that follows is the
+    // loader's own to handle, and its handler goes to the reset entry.
+    put16(f, 0, 0xd001); // mov.l @(4,pc),r0
+    put16(f, 2, 0x402b); // jmp @r0
+    put16(f, 4, 0x0009); // nop
+    put16(f, 6, 0x0000);
+    put32(f, 8, 0xa000_0000 | RESET_ENTRY);
     if model == crate::board::Model::Rnse193 {
-        // Here the reset vector is entered as code.
+        // Here the loader jumps to address 0 itself.
         put16(f, 0, HYPERCALL);
         put16(f, 2, 0x0009);
     }
 
-    // 0x400: module-style header; the loader reads the project code at
-    // +6 to decide which software set on a disc fits this hardware.
-    let mut hdr = [0u8; 0x80];
-    hdr[..6].copy_from_slice(b".BOT\r\n");
-    hdr[6..10].copy_from_slice(&project.as_bytes()[..4]);
+    // 0x400: a header of texts, each ending in CR LF, laid out as in a
+    // 192's ROM: the kind, the version (which begins with a project
+    // code), date, time, and at 0x40 the maker.  Service 1 of trap 0x3e
+    // hands out their addresses.
+    let mut hdr = [0u8; 0x70];
+    hdr[..6].copy_from_slice(b".PRG\r\n");
+    // A 192's ROM says V220 whatever software the unit has: the one
+    // read from a North American unit, which runs V222, does, and the
+    // V222 loader prints it as `curprjct=V220` and updates all the same.
+    let code: &[u8] = if model == crate::board::Model::Rnse192 { b"V220" } else { &project.as_bytes()[..4] };
+    hdr[6..10].copy_from_slice(code);
     hdr[10..14].copy_from_slice(b"0000");
     hdr[14..16].copy_from_slice(b"\r\n");
-    hdr[0x30..0x3f].copy_from_slice(b"rnse emulator  ");
-    f[0x400..0x480].copy_from_slice(&hdr);
+    hdr[0x1e..0x20].copy_from_slice(b"\r\n");
+    hdr[0x2e..0x30].copy_from_slice(b"\r\n");
+    hdr[0x3e..0x40].copy_from_slice(b"\r\n");
+    hdr[0x40..0x4d].copy_from_slice(b"rnse emulator");
+    hdr[0x6d..0x70].copy_from_slice(b"\r\n\x1a");
+    f[0x400..0x470].copy_from_slice(&hdr);
 
     for at in [RESET_ENTRY, CALL_RETURN, UNHANDLED] {
         put16(f, at, HYPERCALL);

@@ -128,6 +128,12 @@ pub struct Cpu {
     pub pc_hist: Vec<u32>,
     pub pc_hist_pos: usize,
     pub trace_exceptions: bool,
+    /// Log the boot ROM's services (TRAPA 0x3d-0x3f) with their results
+    /// when real code answers them: what `Machine::bios_trap` prints for
+    /// the stand-in, in the same words, so that the two can be compared.
+    pub trace_services: bool,
+    services_open: Vec<(u8, [u32; 8], u32)>,
+    services_seen: std::collections::BTreeMap<(u8, u32), u32>,
     /// Cycle at which the current `run` call ends (fast paths must not
     /// run past it).
     pub(super) run_end: u64,
@@ -192,6 +198,9 @@ impl Cpu {
             calls: None,
             pc_hist_pos: 0,
             trace_exceptions: false,
+            trace_services: false,
+            services_open: Vec::new(),
+            services_seen: std::collections::BTreeMap::new(),
             run_end: u64::MAX,
             irq_counts: [0; 128],
             hypercalls_enabled: false,
@@ -545,6 +554,11 @@ impl Cpu {
             ExcKind::Trapa(n) => {
                 spc = self.insn_pc.wrapping_add(2);
                 self.io.tra = (n as u32) << 2;
+                if self.trace_services && (0x3d..=0x3f).contains(&n) {
+                    let mut regs = [0u32; 8];
+                    regs.copy_from_slice(&self.r[..8]);
+                    self.services_open.push((n, regs, spc));
+                }
             }
             ExcKind::TlbMissRead | ExcKind::TlbMissWrite => {
                 vector = 0x400;
@@ -694,6 +708,19 @@ impl Cpu {
                     }
                     if self.hypercall.is_some() {
                         return Stop::Hypercall;
+                    }
+                }
+                if !self.services_open.is_empty() && self.services_open.last().is_some_and(|s| s.2 == self.pc) && self.sr & SR_BL == 0 {
+                    // Back behind the TRAPA: the service's answer is in r0.
+                    let (n, regs, spc) = self.services_open.pop().unwrap();
+                    let count = self.services_seen.entry((n, regs[0])).or_insert(0);
+                    *count += 1;
+                    if *count <= 8 {
+                        eprintln!(
+                            "[bios] trap {:02x} fn {:04x} (r4={:08x} r5={:08x} r6={:08x} r7={:08x}) caller {:08x} -> {:08x}{}",
+                            n, regs[0], regs[4], regs[5], regs[6], regs[7], spc.wrapping_sub(2), self.r[0],
+                            if *count == 8 { "  (further calls not shown)" } else { "" }
+                        );
                     }
                 }
                 if bp_filter[(self.pc >> 1) as usize & 4095] && self.breakpoints.contains(&self.pc) {
