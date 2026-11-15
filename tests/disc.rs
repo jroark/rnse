@@ -1460,3 +1460,36 @@ fn suite_runs_its_measurements() {
     let last = records.iter().filter(|r| r.0 == 10 && r.1 == 0).map(|r| r.2).max().unwrap();
     assert!((90..=130).contains(&last), "{}: reset {} ms after the last strobe", name, last);
 }
+
+/// Programs from an SD card (sdk/examples/sdboot): the stock software
+/// starts the loader from the disc, the loader starts the card
+/// processor of a slot with the installed software's program out of
+/// the flash, reads RNSE.BIN from the card's FAT and starts it in its
+/// own place; and with the card in the second slot likewise.
+#[test]
+fn programs_come_from_an_sd_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    for slot in [0, 1] {
+        let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+        // (Built by sdk_example for the two tests of it.)
+        if sdk_example(&image, Model::Rnse192, "hello").is_none() { return }
+        let hello = std::fs::read(sdk.join("out/hello-192.bin")).unwrap();
+        let entries = vec![rnse::fat::Entry::file("RNSE.BIN", hello)];
+        let card = rnse::fat::card("RNSE", &entries, None).unwrap();
+        assert!(m.insert_card(slot, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+        let ms = m.cycles_per_ms();
+        m.cpu.breakpoints.clear();
+        if let Some(address) = Machine::known_printf("V2220371") { m.hook_printf(address); }
+        assert_eq!(m.run(25_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        let tail = &text[text.len().saturating_sub(400)..];
+        assert!(text.contains("rnse sdk: sdboot"), "{}: {:?}", name, tail);
+        assert!(text.contains("STARTING IT"), "{}, slot {}: {:?}", name, slot, tail);
+        assert!(text.contains("rnse sdk: hello"), "{}, slot {}: {:?}", name, slot, tail);
+        assert!(!text.contains("unexpected"), "{}: {:?}", name, tail);
+        let cache = &m.cpu.cache.trouble;
+        assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+    }
+}
