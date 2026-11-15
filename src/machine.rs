@@ -81,6 +81,10 @@ pub struct Machine {
     /// Text the firmware printed on its debug serial port.
     pub console: Vec<u8>,
     pub echo_console: bool,
+    /// A sampling profile, when wanted: how often the CPU was found at
+    /// each address at the end of one of the run loop's slices (every
+    /// 20,000 cycles or sooner).
+    pub profile: Option<std::collections::HashMap<u32, u64>>,
     /// CPU cycles per display frame.
     pub frame_cycles: u64,
     /// Resets by the watchdog that the run went on through (with a
@@ -217,7 +221,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
+        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
         if model == crate::board::Model::Rnse192 {
             // The 192's drive as one was measured (docs/boot-rom.md, "A
             // disc that goes in while the unit runs"): 2.7 s to load a
@@ -1507,6 +1511,9 @@ impl Machine {
             let slice = left.min(20_000);
             self.board.now = self.cpu.cycles;
             let stop = self.cpu.run(&mut self.board, slice);
+            if let Some(profile) = self.profile.as_mut() {
+                *profile.entry(self.cpu.pc).or_insert(0) += 1;
+            }
             self.drain_console();
             if self.board.atapi.dma_request() {
                 // The drive's DMARQ line is DREQ1 of the SH-4 DMAC.
@@ -1616,8 +1623,18 @@ impl Machine {
                         // yet: the last one stands in for it.
                         for (dsp, last) in self.board.media.dsps.iter_mut().zip(self.media_last.iter_mut()) {
                             let rate = dsp.sample_rate() as usize;
-                            let have = dsp.audio.len() / 2;
-                            let take = (played.len() / 2 * rate / 44_100).min(have);
+                            let mut have = dsp.audio.len() / 2;
+                            let want = played.len() / 2 * rate / 44_100;
+                            // A converter has no queue: what is more than
+                            // two frames' worth behind (sent while nobody
+                            // listened) is long gone, and would come out
+                            // late, and at whatever rate the processor
+                            // has by then.
+                            if have > 3 * want {
+                                dsp.audio.drain(..2 * (have - 3 * want));
+                                have = 3 * want;
+                            }
+                            let take = want.min(have);
                             let sent: Vec<i16> = dsp.audio.drain(..2 * take).collect();
                             for (i, out) in decoded.chunks_mut(2).enumerate() {
                                 let at = i * rate / 44_100;

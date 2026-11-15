@@ -13,6 +13,7 @@ typedef unsigned char u8;
 typedef unsigned short u16;
 typedef unsigned int u32;
 typedef signed int s32;
+typedef signed short s16;
 
 #define REG8(a) (*(volatile u8 *)(a))
 #define REG16(a) (*(volatile u16 *)(a))
@@ -161,6 +162,21 @@ int cd_follow_key(void);
  * disc and the cards behind the display can always be got at.  Call it
  * in every loop, and set sd_idle and display_idle to it. */
 void panel_service(void);
+/* RETURN, as panel_service follows it.  Held for two seconds, it ends
+ * a program started by the SD loader: loader_leave first, when set (to
+ * stop sound and the like), the display brought to rest, then
+ * loader_return(LOADER_RETURN_HELD).  Outside a loader session (or with
+ * panel_return_to_loader cleared, as the loader itself has it) nothing
+ * happens but that panel_return_held says so, once.  A press let go
+ * within the two seconds is a short one: panel_return_short says so,
+ * once, on its release, so that a long hold never counts as a short
+ * press as well.  A RETURN already down when the program starts counts
+ * only after it has been let go. */
+#define LOADER_RETURN_HELD 99
+extern void (*loader_leave)(void);
+extern int panel_return_to_loader;
+int panel_return_short(void);
+int panel_return_held(void);
 /* Sectors of 2048 bytes. */
 int cd_read(u32 sector, u32 count, void *buf);
 /* A file in the root directory of an ISO 9660 disc, by its name in
@@ -317,12 +333,21 @@ int run_image(void *image, u32 bytes);
 /* Cooperative SD loader session (192). Returns only outside a session.
  * main() completion calls this automatically. Reserve 0x8c7c0000..0x8c800000. */
 void loader_return(int status);
+/* Whether this program runs in a loader session (and so has a loader
+ * to return to). */
+int loader_active(void);
 /* Loader-side helpers: blocked is a two-bit mask of consumed insertions.
  * loader_run returns only on rejection; loader_returned consumes a completed
  * session and returns its slot, or -1 when this is a fresh launch. */
 int loader_run(void *image, u32 bytes, int slot, u32 blocked);
 int loader_returned(int *status, u32 *blocked);
 int sd_present(int slot);
+/* The program a loader session runs, by its directory name (11
+ * characters), and flags of the loader's own, kept across the session
+ * for the loader's next start; loader_noted returns 0 when there is
+ * none (flags may be 0). */
+void loader_note(const char *name, u32 flags);
+int loader_noted(char *name, u32 *flags);
 /* (way_back_scratch, below, is where there is room for such an image.) */
 /* What the program was started with: the screen language (0..8) and
  * two values the stock loader gets as well. */
@@ -334,11 +359,65 @@ extern u32 start_state[4];
  * neither the program nor the stock loader has in use. */
 extern const u32 way_back_scratch;
 
+/* The cache control register set to ccr (src/cache.S), whatever the
+ * caches hold: the operand cache is written back and emptied first,
+ * and both caches start empty under the new setting.  The stock
+ * software leaves 0x80008181 on both units; on the 192 that is the
+ * SH7750R's large caches (EMODE), both on, stores through P1 written
+ * through and the rest copied back, and the index modes (IIX, OIX)
+ * that give each half of the caches to one half of every 64 MB, so
+ * that a program within one 32 MB has half of each. */
+void cache_setup(u32 ccr);
+#define CCR_OCE 0x00000001u  /* operand cache on */
+#define CCR_WT 0x00000002u   /* P0, U0, P3: write-through */
+#define CCR_CB 0x00000004u   /* P1: copy-back */
+#define CCR_OIX 0x00000080u  /* operand cache indexed by address bit 25 */
+#define CCR_ICE 0x00000100u  /* instruction cache on */
+#define CCR_IIX 0x00008000u  /* instruction cache indexed by address bit 25 */
+#define CCR_EMODE 0x80000000u /* SH7750R: the caches at double size */
+
+/* Sound as samples, the 192 (src/pcm.c): a card processor (0 or 1)
+ * gets a program of our own that plays 16-bit stereo samples, left
+ * then right, at 44.1 kHz, out of its converter, which is what the
+ * amplifier hears as RADIO_DECODER.  pcm_put hands the samples over
+ * itself and returns when the processor has taken them all (it waits
+ * as long as they take to play, less the last two); pcm_dma has the
+ * DMA controller do it and returns at once, and pcm_dma_busy says
+ * whether it is still at it.  The samples must stay where they are
+ * until then.  pcm_stop puts the processor back into reset (a card in
+ * its slot wants sd_init after that).  pcm_start returns 0, or below 0
+ * when the processor did not take its program (or on the 193). */
+int pcm_start(int dsp);
+int pcm_put(const s16 *lr, u32 frames);
+/* Called by pcm_put every 2048 samples, when set (to panel_service): a
+ * gap in the sound if it takes longer than a sample or two.  Programs
+ * that keep keys answered while playing feed by DMA. */
+extern void (*pcm_idle)(void);
+int pcm_dma(const s16 *lr, u32 frames);
+int pcm_dma_busy(void);
+/* The words a transfer still has to go (two a stereo sample): what a
+ * program that streams in blocks looks at before it does anything long,
+ * so that the next block is started in time. */
+u32 pcm_dma_left(void);
+void pcm_stop(void);
+
 /* Called from the vector code for anything but the tick. */
 void unexpected(u32 expevt, u32 intevt, u32 spc);
 
-/* Division without the compiler's library. */
+/* Division without the compiler's library.  (`/` and `%` work too
+ * now, through src/libgcc.S; these are kept for the code that has them.) */
 u32 udiv(u32 a, u32 b);
 u32 umod(u32 a, u32 b);
+
+/* Memory to allocate from (src/heap.c): malloc() hands out pieces of
+ * the block given to heap_init, aligned to 32 bytes, and free() does
+ * nothing.  The kit itself allocates nothing; this is for the code in
+ * sdk/third_party.  memset() and memcpy() are there as well. */
+void heap_init(void *base, u32 size);
+u32 heap_left(void);
+void *malloc(unsigned long n);
+void free(void *p);
+void *memset(void *d, int c, unsigned long n);
+void *memcpy(void *d, const void *s, unsigned long n);
 
 #endif

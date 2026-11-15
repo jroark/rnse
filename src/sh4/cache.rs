@@ -243,6 +243,31 @@ impl Cache {
         }
     }
 
+    /// A write to an address array (0xF0.., the instruction cache's;
+    /// 0xF4.., the operand cache's), the way code that empties the
+    /// caches without knowing what they hold does it.  A
+    /// non-associative write (address bit 3 clear) whose data leaves
+    /// the line invalid (bit 0, V, clear) writes the line back first
+    /// if it is dirty (operand cache).  The model is direct-mapped, so
+    /// it takes the entry (address bits 14:5, on the chip the index
+    /// and the way) for its line number: a sweep over all entries
+    /// empties it as it empties the chip.  Associative writes, and
+    /// writes that make a line valid, are not modelled.
+    pub fn array_write<B: Bus>(&mut self, bus: &mut B, addr: u32, v: u32) {
+        if !self.enabled || addr & 8 != 0 || v & 1 != 0 {
+            return;
+        }
+        match addr >> 24 {
+            0xf0 => self.ic[(addr >> 5) as usize % IC_LINES] = EMPTY,
+            0xf4 => {
+                let e = &mut self.oc[(addr >> 5) as usize % OC_LINES];
+                Self::write_back(bus, e);
+                *e = EMPTY;
+            }
+            _ => {}
+        }
+    }
+
     /// A write to CCR.
     pub fn ccr_write(&mut self, v: u32) {
         if v & CCR_ICI != 0 || v & CCR_ICE == 0 {
@@ -367,6 +392,30 @@ mod tests {
         c.ccr_write(STOCK_CCR | CCR_CB);
         c.write(&mut ram, 0x600, 1, 0x11, 0x8000_0600);
         assert_eq!(ram.read8(0x600), 0);
+    }
+
+    #[test]
+    fn a_sweep_of_the_address_array_writes_everything_back() {
+        let mut ram = Ram(vec![0; 0x10000]);
+        let mut c = Cache::default();
+        c.enable(STOCK_CCR);
+        c.write(&mut ram, 0x100, 4, 0x1122_3344, 0x100);
+        c.write(&mut ram, 0x8000, 1, 0x55, 0x8000);
+        // An associative write, or one that leaves a line valid, does
+        // nothing here.
+        c.array_write(&mut ram, 0xf400_0108, 0);
+        c.array_write(&mut ram, 0xf400_0100, 1);
+        assert_eq!(ram.read32(0x100), 0);
+        // What Linux and the SDK's cache_setup do: zero into every
+        // entry of the operand cache's address array.
+        for entry in 0..1024u32 {
+            c.array_write(&mut ram, 0xf400_0000 | entry << 5, 0);
+        }
+        assert_eq!((ram.read32(0x100), ram.read8(0x8000)), (0x1122_3344, 0x55));
+        assert_eq!((c.peek(0x100), c.peek(0x8000)), (None, None));
+        // Then CCR's invalidate bit loses nothing.
+        c.ccr_write(STOCK_CCR | CCR_OCI);
+        assert_eq!(c.trouble.dirty_discarded, 0);
     }
 
     #[test]
