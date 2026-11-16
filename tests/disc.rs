@@ -2160,9 +2160,10 @@ fn programs_come_from_an_sd_card() {
 /// card, and linuxboot loads the kernel (VMLINUX.BIN, as linux/build.sh
 /// makes it; RNSE_LINUX names the file) and enters it.  The kernel comes
 /// up on the 192's own processor with its caches modelled, starts
-/// BusyBox, keeps the board's watchdog served with room to spare, and puts
-/// its console on the screen.  A command typed with nothing but the knob,
-/// SELECT and the soft keys ("rotary typing") runs in the screen's shell.
+/// BusyBox and the GUI (rnse-gui), and keeps the board's watchdog served
+/// with room to spare.  The GUI's "Shell" goes to the shell on the second
+/// console, where a command typed with nothing but the knob, SELECT and
+/// the soft keys ("rotary typing") runs; INFO comes back.
 /// The controls work throughout (CLAUDE.md,
 /// "Mandatory hardware behavior"): EJECT folds the display down and up
 /// while linuxboot reads the card and under Linux, CD EJECT pushes the
@@ -2209,9 +2210,10 @@ fn linux_boots_from_an_sd_card() {
     assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
     assert!(m.board.display_pos >= 894, "{}: the display is at {}", name, m.board.display_pos);
 
-    // The card's start, 2.5 MB from it, the kernel's start and a few of
-    // /init's rounds.
-    assert_eq!(m.run(12_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    // The card's start, the kernel from it, the kernel's start, BusyBox
+    // and the GUI.
+    until(&mut m, 0, "rnse: Linux on the RNS-E 192 (sd start)", 90).unwrap_or_else(|| panic!("{}: Linux did not come up: {:?}", name, console(&m)));
+    assert_eq!(m.run(6_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
     let text = console(&m);
     let tail = &text[text.len().saturating_sub(600)..];
     assert!(text.contains("rnse sdk: linuxboot"), "{}: {:?}", name, tail);
@@ -2219,11 +2221,19 @@ fn linux_boots_from_an_sd_card() {
     assert!(text.contains("CPU: SH7750R"), "{}: {:?}", name, tail);
     assert!(text.contains("fb0: 400x235"), "{}: {:?}", name, tail);
     assert!(text.contains("return to the loader with RETURN held"), "{}: {:?}", name, tail);
-    assert!(text.contains("rnse: Linux on the RNS-E 192, BusyBox shell"), "{}: {:?}", name, tail);
     assert!(!text.contains("Kernel panic") && !text.contains("Oops"), "{}: {:?}", name, tail);
+    let (_, _, pixels) = m.render();
+    assert!(pixels.iter().any(|&p| p != 0), "{}: the GUI's screen is dark", name);
 
-    // Typed on the screen's shell with the knob: a command whose answer
-    // comes out on the serial console, the kernel's log.
+    // The GUI's "Shell", the sixth of its list, and there, typed with the
+    // knob, a command whose answer comes out on the serial console, the
+    // kernel's log.
+    let ready = until(&mut m, 0, "rnse-gui: ready", 30).unwrap_or_else(|| panic!("{}: the GUI did not come up: {:?}", name, console(&m)));
+    assert!(m.panel_knob("main", 5));
+    assert_eq!(m.run(300 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    press(&mut m, "SELECT", 100);
+    until(&mut m, ready, "rnse-gui: shell", 10).unwrap_or_else(|| panic!("{}: the GUI did not go to the shell: {:?}", name, console(&m)));
+    assert_eq!(m.run(500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
     const RING: &str = "abcdefghijklmnopqrstuvwxyz0123456789-./_|>&;=*~$'\"<()[]{}!?#@%+:,\\^`ABCDEFGHIJKLMNOPQRSTUVWXYZ";
     let edges = m.board.watchdog_edges;
     let mut at = 0;
@@ -2248,6 +2258,9 @@ fn linux_boots_from_an_sd_card() {
     assert!(m.board.watchdog_edges > edges + 500, "{}: {} edges while typing", name, m.board.watchdog_edges - edges);
     let (_, _, pixels) = m.render();
     assert!(pixels.iter().any(|&p| p != 0), "{}: the screen is dark", name);
+    let shell = console(&m).len();
+    press(&mut m, "INFO", 100);
+    until(&mut m, shell, "rnse-gui: back", 10).unwrap_or_else(|| panic!("{}: INFO did not bring the GUI back", name));
 
     // Under Linux: a short RETURN stays in Linux; the display folds down,
     // the disc comes out, the display folds up.
@@ -2286,6 +2299,247 @@ fn linux_boots_from_an_sd_card() {
     assert!(longest < 40, "{}: the watchdog waited {} ms, until {} ms, PC {:08x}", name, longest, m.watchdog.longest_end / ms, m.watchdog.longest_pc);
     let cache = &m.cpu.cache.trouble;
     assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
+/// The SD path to Linux (as `linux_boots_from_an_sd_card`) with a card
+/// that also holds files and a script, AUTORUN.SH, which /etc/init.d/rcS
+/// runs: every driver of docs/linux.md from user space.  The flash and
+/// the battery-backed memory read, the A/D converter, the card itself, the
+/// radio processor answering, CAN frames out on the bus (and the bus's
+/// frames in), the disc in the drive mounted and read, sound from a WAV
+/// and an MP3 file through a card processor's converter.  Then the GUI's
+/// pages, with the keys; and the disc comes out and the display folds
+/// down while sound plays.
+#[test]
+fn linux_drivers_and_gui_from_an_sd_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some(kernel) = std::env::var_os("RNSE_LINUX") else { return };
+    let kernel = std::fs::read(kernel).expect("RNSE_LINUX is not readable");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "linuxboot").is_none() { return }
+    let linuxboot = std::fs::read(sdk.join("out/linuxboot-192.bin")).unwrap();
+    let mut wav = Vec::new();
+    let samples: Vec<i16> = (0..22050).map(|i| ((i as f64 * 440.0 * std::f64::consts::TAU / 22050.0).sin() * 8000.0) as i16).collect();
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&(36 + 2 * samples.len() as u32).to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    for v in [16u32, 0x0001_0001, 22050, 44100, 0x0010_0002] {
+        wav.extend_from_slice(&v.to_le_bytes());
+    }
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&(2 * samples.len() as u32).to_le_bytes());
+    for v in &samples {
+        wav.extend_from_slice(&v.to_le_bytes());
+    }
+    let script = b"echo \"== T: mode $(cat /sys/kernel/rnse/mode)\"
+echo \"== T: mtd $(grep -c mtd /proc/mtd)\"
+echo \"== T: sram $(dd if=/sys/bus/nvmem/devices/rnse-sram/nvmem bs=1 count=4 skip=261888 2>/dev/null | wc -c)\"
+echo \"== T: adc $(cat /sys/bus/iio/devices/iio:device0/in_voltage3_raw)\"
+echo \"== T: card $(cat /sys/block/rnsesd0/size)\"
+echo \"== T: radio $(rnse-radio version)\"
+rnse-can send 7f0#0102 && echo \"== T: can sent $(cat /sys/class/net/can0/statistics/tx_packets)\"
+echo \"== T: can received $(rnse-can dump 2 | wc -l)\"
+mount -t iso9660 -o ro /dev/sr0 /media/cd && echo \"== T: cd $(ls /media/cd | grep -c LOADING.KWI)\"
+umount /media/cd
+rnse-radio source decoder 12
+rnse-play /media/sd0/TONE.WAV /media/sd0/TONES.MP3 && echo \"== T: played\"
+echo \"== T: done\"
+".to_vec();
+    let entries = vec![
+        rnse::fat::Entry::file("RNSE.BIN", linuxboot),
+        rnse::fat::Entry::file("VMLINUX.BIN", kernel),
+        rnse::fat::Entry::file("TONE.WAV", wav),
+        rnse::fat::Entry::file("TONES.MP3", include_bytes!("data/tones.mp3").to_vec()),
+        rnse::fat::Entry::file("AUTORUN.SH", script),
+    ];
+    let card = rnse::fat::card("LINUX", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    m.watchdog.longest = 0;
+    let console = |m: &Machine| String::from_utf8_lossy(&m.console).into_owned();
+    let press = |m: &mut Machine, key: &str, hold: u64| {
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(hold * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert!(m.panel_key(key, false));
+    };
+    let start = until(&mut m, 0, "rnse: running /media/sd0/AUTORUN.SH", 120).unwrap_or_else(|| panic!("{}: the card's script did not run: {:?}", name, console(&m)));
+    let played = until(&mut m, start, "== T: played", 90);
+    let text = console(&m);
+    let log = &text[start..];
+    assert!(played.is_some(), "{}: {:?}", name, log);
+    for (what, want) in [("mode", "sd"), ("mtd", "7"), ("sram", "4"), ("adc", "1023"), ("can sent", "1"), ("can received", "2"), ("cd", "1")] {
+        let line = log.lines().find(|l| l.starts_with(&format!("== T: {} ", what))).unwrap_or_else(|| panic!("{}: no {}: {:?}", name, what, log));
+        assert_eq!(line[format!("== T: {} ", what).len()..].trim(), want, "{}: {}", name, line);
+    }
+    assert!(log.contains("== T: radio A2220141"), "{}: the radio processor did not answer: {:?}", name, log);
+    assert!(log.lines().any(|l| l.starts_with("== T: card ") && l[11..].trim().parse::<u64>().unwrap_or(0) > 0), "{}: no card: {:?}", name, log);
+    assert!(m.can().tx.iter().any(|f| f.id == 0x7f0 && f.data[..2] == [1, 2]), "{}: 7f0 not on the bus", name);
+    let loud = m.board.media.dsps[0].loud_frames + m.board.media.dsps[1].loud_frames;
+    assert!(loud > 44_100, "{}: the converters played {} frames that were not silent", name, loud);
+    assert!(m.radio.source == 4, "{}: the amplifier's source is {}, not the card processors", name, m.radio.source);
+
+    // The GUI's pages, by their keys.
+    for key in ["RADIO", "MEDIA", "CAR", "SETUP", "INFO"] {
+        press(&mut m, key, 100);
+        assert_eq!(m.run(1_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let (_, _, pixels) = m.render();
+        assert!(pixels.iter().any(|&p| p != 0), "{}: the screen is dark after {}", name, key);
+    }
+    // Sound from the GUI (Media, the first card, its first file), and
+    // while it plays the disc comes out and the display folds down.
+    press(&mut m, "MEDIA", 100);
+    assert_eq!(m.run(1_000 * ms), Stop::Budget);
+    press(&mut m, "SELECT", 100);
+    assert_eq!(m.run(1_000 * ms), Stop::Budget);
+    let before = m.board.media.dsps[0].loud_frames + m.board.media.dsps[1].loud_frames;
+    press(&mut m, "SELECT", 100);
+    assert_eq!(m.run(2_000 * ms), Stop::Budget);
+    let after = m.board.media.dsps[0].loud_frames + m.board.media.dsps[1].loud_frames;
+    assert!(after > before, "{}: nothing played from the GUI", name);
+    let ejects = m.atapi().ejects;
+    press(&mut m, "CD_EJECT", 200);
+    assert_eq!(m.run(4_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos <= 94, "{}: the display is at {}", name, m.board.display_pos);
+    assert_eq!(m.atapi().ejects, ejects + 1, "{}: the disc did not come out while sound played", name);
+    // RETURN held: playback stops and sdboot is back.
+    press(&mut m, "RETURN", 2_500);
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = console(&m);
+    let back = text.find("back to the SD loader").unwrap_or_else(|| panic!("{}: RETURN held did not leave Linux", name));
+    assert!(text[back..].contains("TEST RETURNED: 0"), "{}: {:?}", name, &text[back..]);
+    assert!(!text.contains("Kernel panic") && !text.contains("Oops") && !text.contains("BUG:"), "{}", name);
+    let longest = m.watchdog.longest / ms;
+    assert!(longest < 40, "{}: the watchdog waited {} ms, until {} ms, PC {:08x}", name, longest, m.watchdog.longest_end / ms, m.watchdog.longest_pc);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
+/// The disc `rnse firmware ... --kernel` makes: linuxboot in the
+/// operating system's place, the kernel (RNSE_LINUX) in the application's,
+/// the swap loader, and a higher index than the stock disc's.  With
+/// `spoil`, one byte of the kernel changed after its sum was taken.
+fn linux_firmware_disc(image: &[u8], spoil: bool) -> Option<Vec<u8>> {
+    use rnse::board::Model;
+    let kernel = std::fs::read(std::env::var_os("RNSE_LINUX")?).expect("RNSE_LINUX is not readable");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let variants = fw::load_variants(image).unwrap();
+    let v = variants.iter().find(|v| Model::for_variant(&v.name) == Some(Model::Rnse192))?;
+    sdk_example(image, Model::Rnse192, "linuxboot")?;
+    let program = std::fs::read(sdk.join("out/linuxboot-192.bin")).unwrap();
+    sdk_example(image, Model::Rnse192, "swap")?;
+    let swap = std::fs::read(sdk.join("out/swap-192.bin")).unwrap();
+    let mut disc = fw::firmware_disc_with_kernel(image, &v.name, &program, Some(&swap), Some(&kernel)).unwrap();
+    if spoil {
+        let apm = v.module("APM").unwrap();
+        let mut spoilt = fw::kernel_module(&apm.data, &kernel).unwrap();
+        spoilt[fw::KERNEL_AT + 0x3000] ^= 0x40;
+        let name = v.name.clone();
+        disc = fw::repack(&disc, &|var, module| (var == name && module == "APM").then(|| spoilt.clone())).unwrap().0;
+    }
+    let index = fw::IndexInfo::from_disc(image, &v.name).unwrap();
+    let middle: u32 = index.sofidx[1..3].parse().unwrap();
+    let higher = format!("{}{:02}{}", &index.sofidx[..1], middle + 1, &index.sofidx[3..]);
+    fw::set_disc_index(&mut disc, &v.name, &higher).unwrap();
+    Some(disc)
+}
+
+/// Linux installed in flash (docs/linux.md, "Linux in flash"), all the
+/// way under a unit's boot ROM (RNSE_BOOT_ROM) with the caches modelled
+/// and RAM arbitrary: the stock software takes the firmware disc for an
+/// update and its loader writes linuxboot and the kernel; the ROM starts
+/// linuxboot, which counts the start for the guard, checks the kernel in
+/// the flash and starts it; the GUI comes up and, ten seconds in, counts
+/// the start as one that worked.  The controls work, RETURN held says
+/// there is no loader to go back to, the watchdog is served, and after a
+/// power cycle the unit comes up in Linux again.
+#[test]
+fn linux_is_installed_in_flash() {
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let Some(custom) = linux_firmware_disc(&image, false) else { return };
+    let Some(mut m) = rom_192(&image, &custom, &rom) else { return };
+    let ms = m.cycles_per_ms();
+    let tail = |m: &Machine| { let t = String::from_utf8_lossy(&m.console).into_owned(); t[t.len().saturating_sub(600)..].to_string() };
+    let press = |m: &mut Machine, key: &str, hold: u64| {
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(hold * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert!(m.panel_key(key, false));
+    };
+    let jump = until(&mut m, 0, "*** Jump User RESET ***", 600).unwrap_or_else(|| panic!("the stock software did not install the disc: {:?}", tail(&m)));
+    let started = until(&mut m, jump, "rnse sdk: linuxboot from flash", 60).unwrap_or_else(|| panic!("the ROM did not start linuxboot: {:?}", tail(&m)));
+    m.watchdog.longest = 0;
+    // The cache's record from here on: what the stock loader left dirty
+    // when it jumped to the reset is lost on a unit too.
+    let before = (m.cpu.cache.trouble.stale_fetches, m.cpu.cache.trouble.dirty_discarded);
+    eprintln!("cache trouble when linuxboot starts: {:?}", m.cpu.cache.trouble);
+    let up = until(&mut m, started, "rnse: Linux on the RNS-E 192 (flash start)", 60).unwrap_or_else(|| panic!("Linux did not come up from flash: {:?}", tail(&m)));
+    until(&mut m, up, "rnse: this start counted as one that worked", 30).unwrap_or_else(|| panic!("the GUI did not call the start healthy: {:?}", tail(&m)));
+    let text = String::from_utf8_lossy(&m.console).into_owned();
+    assert!(text[started..].contains("rnse.flash=1"), "{:?}", tail(&m));
+    assert!(text[started..].contains("return to the loader not available (started from flash)"), "{:?}", tail(&m));
+    let (_, _, pixels) = m.render();
+    assert!(pixels.iter().any(|&p| p != 0), "the screen is dark");
+    // The controls: the disc out (the firmware disc is still in), the
+    // display down and up; RETURN held leaves nothing.
+    let ejects = m.atapi().ejects;
+    press(&mut m, "CD_EJECT", 200);
+    assert_eq!(m.run(4_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    let now = m.atapi().ejects;
+    assert_eq!(now, ejects + 1, "no eject: {:?}", tail(&m));
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert!(m.board.display_pos >= 894, "the display is at {}", m.board.display_pos);
+    press(&mut m, "RETURN", 2_500);
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert!(String::from_utf8_lossy(&m.console).contains("return to the SD loader is not available here (started from flash)"));
+    assert_eq!(m.resets, 0, "the watchdog reset the unit");
+    let longest = m.watchdog.longest / ms;
+    assert!(longest < 40, "the watchdog waited {} ms, until {} ms, PC {:08x}", longest, m.watchdog.longest_end / ms, m.watchdog.longest_pc);
+    let erased = m.board.flash_ctl.erased_sectors;
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), before, "{:?}", cache);
+    // A power cycle: Linux again, nothing erased.
+    m.cpu.reset();
+    let again = until(&mut m, up, "rnse sdk: linuxboot from flash", 30).expect("not started again");
+    until(&mut m, again, "rnse: Linux on the RNS-E 192 (flash start)", 60).expect("Linux did not come up again");
+    assert_eq!(m.board.flash_ctl.erased_sectors, erased, "something was erased");
+}
+
+/// The guard (sdk/src/flash.c) is the way out of Linux in flash: with a
+/// kernel that is not whole, linuxboot says so and keeps the controls
+/// going but never counts a start as one that worked, and at the fifth
+/// start in a row the guard takes the program out; the boot ROM installs
+/// the stock disc that is in the drive.  Nothing else erases anything.
+#[test]
+fn linux_in_flash_with_a_spoilt_kernel_is_taken_out_by_the_guard() {
+    let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
+    let Some(spoilt) = linux_firmware_disc(&image, true) else { return };
+    let Some(mut m) = rom_192(&spoilt, &image, &rom) else { return };
+    let ms = m.cycles_per_ms();
+    let count = |m: &Machine| String::from_utf8_lossy(&m.console).matches("rnse sdk: linuxboot from flash").count();
+    for n in 1..=4 {
+        assert_eq!(m.run(4_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert_eq!(count(&m), n, "start {}", n);
+        let text = String::from_utf8_lossy(&m.console).into_owned();
+        assert!(text.matches("NO KERNEL IN THE FLASH").count() == n, "start {}: {:?}", n, &text[text.len().saturating_sub(400)..]);
+        assert!(!text.contains("Linux version"), "a spoilt kernel was started");
+        assert_eq!(m.resets, 0, "the watchdog reset the unit while linuxboot waited");
+        // The controls while it waits.
+        let ejects = m.atapi().ejects;
+        assert!(m.panel_key("CD_EJECT", true));
+        assert_eq!(m.run(200 * ms), Stop::Budget);
+        assert!(m.panel_key("CD_EJECT", false));
+        assert_eq!(m.run(3_000 * ms), Stop::Budget);
+        assert_eq!(m.atapi().ejects, ejects + 1, "start {}: CD EJECT did nothing", n);
+        m.atapi().insert(Some(image.clone()));
+        m.cpu.reset();
+    }
+    let back = until(&mut m, 0, "*** Jump User RESET ***", 600).expect("the ROM did not install the stock disc");
+    assert_eq!(count(&m), 4, "linuxboot was started a fifth time");
+    until(&mut m, back, "[fw] SOUND_TSK START", 60).expect("the stock software did not start");
+    stock_is_in_flash(&m, &image);
 }
 
 /// Three cooperative tests run with one disc launch and no flash writes.
