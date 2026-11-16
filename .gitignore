@@ -19,3 +19,9 @@ __pycache__/
 /doom/out/
 *.wad
 *.WAD
+/umac/work/
+/umac/out/
+*.ROM
+*.rom
+*.dsk
+*.DSK
