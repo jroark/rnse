@@ -2854,3 +2854,223 @@ fn modern_builtins() {
     assert_eq!(latest(&reboot),location);
     assert_eq!(m.resets,0);
 }
+
+/// Generated homebrew cartridge: colored background, pulse tone, no copyrighted ROM.
+#[test]
+fn nes_bare_metal_sd_video_audio() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    assert!(
+        sdk.join("out/nes/NESCORE.BIN").exists(),
+        "run sdk/nes-build.sh first"
+    );
+    let (mut m, _, _) = sdk_example(&image, Model::Rnse192, "sdboot")
+        .expect("SH4 compiler and 192 firmware required");
+    let variants = fw::load_variants(&image).unwrap();
+    let v = variants
+        .iter()
+        .find(|v| v.name == "V222")
+        .expect("V222 firmware required");
+    m.install(v, &fw::IndexInfo::from_disc(&image, "V222").unwrap());
+    m.cpu.breakpoints.clear();
+    let mut rom = vec![0; 16 + 16384 + 8192];
+    rom[..6].copy_from_slice(&[b'N', b'E', b'S', 26, 1, 1]);
+    let program: &[u8] = &[
+        0x78, 0xd8, 0xa2, 0xff, 0x9a, // SEI, CLD, stack
+        0xa9, 0x00, 0x8d, 0x00, 0x20, 0x8d, 0x01, 0x20, 0xa9, 0x3f, 0x8d, 0x06, 0x20, 0xa9, 0x00,
+        0x8d, 0x06, 0x20, 0xa9, 0x21, 0x8d, 0x07, 0x20, // blue universal background
+        0xa9, 0x08, 0x8d, 0x01, 0x20, 0xa9, 0x01, 0x8d, 0x15, 0x40, 0xa9, 0xbf, 0x8d, 0x00, 0x40,
+        0xa9, 0xfd, 0x8d, 0x02, 0x40, 0xa9, 0x08, 0x8d, 0x03, 0x40, 0x4c, 0x35, 0x80,
+    ];
+    rom[16..16 + program.len()].copy_from_slice(program);
+    for offset in [0x3ffa, 0x3ffc, 0x3ffe] {
+        rom[16 + offset] = 0;
+        rom[16 + offset + 1] = 0x80;
+    }
+    let card = rnse::fat::card(
+        "NES",
+        &[
+            rnse::fat::Entry::file(
+                "NESCORE.BIN",
+                std::fs::read(sdk.join("out/nes/NESCORE.BIN")).unwrap(),
+            ),
+            rnse::fat::Entry::file(
+                "RNSE.BIN",
+                std::fs::read(sdk.join("out/nes/RNSE.BIN")).unwrap(),
+            ),
+            rnse::fat::Entry::file("DEMO.NES", rom),
+        ],
+        None,
+    )
+    .unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let flash = m.board.flash.clone();
+    m.speaker = Some(Vec::new());
+    until(&mut m, 0, "DEMO", 60)
+        .unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(&m.console)));
+    let ms = m.cycles_per_ms();
+    m.panel_key("SELECT", true);
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    m.panel_key("SELECT", false);
+    until(&mut m, 0, "NES PLAYING", 60)
+        .unwrap_or_else(|| panic!("{:?}: {}", m.cpu.fault, String::from_utf8_lossy(&m.console)));
+    assert_eq!(m.run(1000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert_eq!(m.board.flash, flash);
+    assert_eq!(m.cpu.cache.trouble.stale_fetches, 0);
+    assert_eq!(m.cpu.cache.trouble.dirty_discarded, 0);
+    assert!(!String::from_utf8_lossy(&m.console).contains("unexpected"));
+    let picture = m.render();
+    let center = (117 * picture.0 + 200) * 3;
+    assert!(
+        picture.2[center + 2] > picture.2[center],
+        "blue cartridge background"
+    );
+    std::fs::create_dir_all(sdk.join("out/nes")).unwrap();
+    std::fs::write(
+        sdk.join("out/nes/demo.png"),
+        rnse::png::encode_rgb(picture.0, picture.1, &picture.2),
+    )
+    .unwrap();
+    let heard = m.speaker.take().unwrap();
+    assert!(
+        heard.len() > 44100 && heard.iter().any(|v| v.unsigned_abs() > 1),
+        "cartridge pulse audio: {} samples, peak {}", heard.len(), heard.iter().map(|v|v.unsigned_abs()).max().unwrap_or(0)
+    );
+    let symbols = std::fs::read_to_string(sdk.join("out/nes/nes.sym")).unwrap();
+    let inputs = u32::from_str_radix(
+        symbols
+            .lines()
+            .find(|l| l.ends_with(" inputs"))
+            .unwrap()
+            .split_whitespace()
+            .next()
+            .unwrap(),
+        16,
+    )
+    .unwrap();
+    // With no adapter, faceplate holds become player-one buttons.
+    m.panel_key("SOFT_TR", true);
+    m.panel_key("NEXT", true);
+    m.panel_key("INFO", true);
+    assert_eq!(m.run(100 * ms), Stop::Budget);
+    assert_eq!(m.peek32(inputs + 4), Some(0x85));
+    assert_eq!(m.peek32(inputs + 12), Some(0));
+    m.can_frame(rnse::dev::hcan::Frame::new(
+        0x6e3,
+        &[1, 0, 1, 128, 0, 0, 0, 0],
+    ));
+    assert_eq!(m.run(80 * ms), Stop::Budget);
+    assert_eq!(m.peek32(inputs + 4), Some(1));
+    assert_eq!(m.peek32(inputs + 12), Some(128));
+    assert_eq!(m.run(250 * ms), Stop::Budget);
+    assert_eq!(m.peek32(inputs + 4), Some(0x85)); // held faceplate resumes on timeout
+    assert_eq!(m.peek32(inputs + 12), Some(0));
+    m.panel_key("SOFT_TR", false);
+    m.panel_key("NEXT", false);
+    m.panel_key("INFO", false);
+    assert_eq!(m.run(100 * ms), Stop::Budget);
+    assert_eq!(m.peek32(inputs + 4), Some(0));
+    let at = m.console.len();
+    m.panel_key("RETURN", true);
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    m.panel_key("RETURN", false);
+    until(&mut m, at, "DEMO", 30).expect("return to ROM browser restores SD");
+    m.panel_key("SELECT", true);
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    m.panel_key("SELECT", false);
+    until(&mut m, at, "NES PLAYING", 30).expect("second game launch");
+    assert_eq!(m.board.flash, flash);
+    m.panel_key("RETURN", true);
+    assert_eq!(m.run(2500 * ms), Stop::Budget);
+    m.panel_key("RETURN", false);
+    until(&mut m, at, "TEST ENDED BY HOLDING RETURN", 30)
+        .unwrap_or_else(||panic!("long RETURN: {}",String::from_utf8_lossy(&m.console[at..])));
+    assert_eq!(m.board.flash, flash);
+    assert_eq!(m.cpu.cache.trouble.stale_fetches, 0);
+    assert_eq!(m.cpu.cache.trouble.dirty_discarded, 0);
+}
+
+/// Optional user-provided cartridge smoke test; never stores the ROM in the repo.
+#[test]
+fn nes_user_rom_from_sd_loader() {
+    use rnse::board::Model;
+    let Some(path) = std::env::var_os("RNSE_NES_ROM") else {
+        return;
+    };
+    let image = disc().expect("RNSE_DISC required for user-ROM test");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let rom = std::fs::read(path).expect("RNSE_NES_ROM unreadable");
+    assert!(rom.starts_with(b"NES\x1a"));
+    let (mut m, _, _) =
+        sdk_example(&image, Model::Rnse192, "sdboot").expect("SH4 compiler required");
+    let variants = fw::load_variants(&image).unwrap();
+    let v = variants
+        .iter()
+        .find(|v| v.name == "V222")
+        .expect("V222 required");
+    m.install(v, &fw::IndexInfo::from_disc(&image, "V222").unwrap());
+    m.cpu.breakpoints.clear();
+    let card = rnse::fat::card(
+        "NES",
+        &[
+            rnse::fat::Entry::file(
+                "NESCORE.BIN",
+                std::fs::read(sdk.join("out/nes/NESCORE.BIN")).unwrap(),
+            ),
+            rnse::fat::Entry::file(
+                "NES.BIN",
+                std::fs::read(sdk.join("out/nes/RNSE.BIN")).unwrap(),
+            ),
+            rnse::fat::Entry::file("METROID.NES", rom),
+        ],
+        None,
+    )
+    .unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let flash = m.board.flash.clone();
+    until(&mut m, 0, "METROID", 60)
+        .unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(&m.console)));
+    let ms = m.cycles_per_ms();
+    m.panel_key("SELECT", true);
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    m.panel_key("SELECT", false);
+    until(&mut m, 0, "NES PLAYING", 30)
+        .unwrap_or_else(|| panic!("{}", String::from_utf8_lossy(&m.console)));
+    assert_eq!(m.run(5000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    let save = |m: &Machine, name: &str| {
+        let (w, h, p) = m.render();
+        std::fs::write(
+            sdk.join("out/nes").join(name),
+            rnse::png::encode_rgb(w, h, &p),
+        )
+        .unwrap();
+        assert!(
+            p.chunks_exact(3)
+                .any(|v| v[0] > 60 || v[1] > 60 || v[2] > 60),
+            "visible cartridge output"
+        );
+    };
+    save(&m, "metroid-title.png");
+    // Faceplate Start, then A + Right, with no CAN adapter attached.
+    m.panel_key("SELECT", true);
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    m.panel_key("SELECT", false);
+    assert_eq!(m.run(5000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    save(&m, "metroid-start.png");
+    m.panel_key("SELECT", true);
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    m.panel_key("SELECT", false);
+    assert_eq!(m.run(5000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    save(&m, "metroid-gameplay.png");
+    m.panel_key("SOFT_TR", true);
+    m.panel_key("NEXT", true);
+    assert_eq!(m.run(1000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    m.panel_key("SOFT_TR", false);
+    m.panel_key("NEXT", false);
+    save(&m, "metroid-controls.png");
+    assert_eq!(m.board.flash, flash);
+    assert_eq!(m.cpu.cache.trouble.stale_fetches, 0);
+    assert_eq!(m.cpu.cache.trouble.dirty_discarded, 0);
+    assert!(!String::from_utf8_lossy(&m.console).contains("unexpected"));
+}

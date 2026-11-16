@@ -293,3 +293,9 @@ preservation.  It is not affiliated with Audi, Aisin AW or anyone else.
 The firmware is copyrighted by its owners and is deliberately kept out of
 the repository (`.gitignore` blocks the usual file types); use an image
 of a disc you own.
+
+## NES on the 192
+
+The [bare-metal NES application](docs/nes.md) loads ROMs from SD and takes two
+original NES controllers through the [dual-controller CAN adapter](hardware/nes-can/README.md).
+The adapter includes KiCad sources, routed PCB, manufacturing plots and MCU firmware.
