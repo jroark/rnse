@@ -765,6 +765,69 @@ pub fn firmware_module(stock: &[u8], payload: &[u8], ram_load: u32) -> Result<Ve
 /// `swap` instead of installing the program again (`sdk/examples/swap`
 /// pushes the disc out and waits for another).
 pub fn firmware_disc(image: &[u8], variant: &str, payload: &[u8], swap: Option<&[u8]>) -> Result<Vec<u8>, FwError> {
+    firmware_disc_with_kernel(image, variant, payload, swap, None)
+}
+
+/// Where a kernel image starts in the module that [`kernel_module`]
+/// makes, and the mark of its header (at 0x100): `RNSELNX1`, its length
+/// and its CRC-32 (IEEE, as zlib's), big-endian, then where it is loaded
+/// and entered.  `sdk/examples/linuxboot` checks all of it.
+pub const KERNEL_AT: usize = 0x200;
+pub const KERNEL_MARK: &[u8; 8] = b"RNSELNX1";
+
+/// CRC-32 (IEEE 802.3, as zlib's crc32).
+pub fn crc32(data: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for &b in data {
+        crc ^= b as u32;
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xedb8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+/// The application module's place (APM) with a Linux kernel image in it,
+/// for a firmware disc whose operating system's place holds
+/// `sdk/examples/linuxboot` (docs/linux.md, "Linux in flash").  Header,
+/// load address and length are the stock module's, so that its loader
+/// writes it where the stock application was; nothing of the stock
+/// application is left.  The three entry points go to an `rts` of their
+/// own: the boot ROM calls the operating system's first (V222, which
+/// never returns for a program installed there), but should it ever call
+/// this module's, they return at once.  The kernel image, as
+/// `linux/build.sh` makes VMLINUX.BIN, is at [`KERNEL_AT`].
+pub fn kernel_module(stock: &[u8], kernel: &[u8]) -> Result<Vec<u8>, FwError> {
+    const STUB: usize = 0x90;
+    let size = be32(stock, 0x74) as usize;
+    let load = be32(stock, 0x70);
+    if size > stock.len() || KERNEL_AT + kernel.len() > size {
+        return bad(format!("the kernel is {:#x} bytes; the module's place holds {:#x}", kernel.len(), size.saturating_sub(KERNEL_AT)));
+    }
+    if kernel.len() < 0x2000 || kernel[0x1000..0x1004] == [0; 4] {
+        return bad("not a kernel image as linux/build.sh makes it (nothing at _stext, 0x1000 in)");
+    }
+    let mut out = stock.to_vec();
+    out[0x80..size].fill(0xff);
+    let stub = load + STUB as u32;
+    for i in 0..4 {
+        out[0x80 + 4 * i..0x84 + 4 * i].copy_from_slice(&stub.to_be_bytes());
+    }
+    out[STUB..STUB + 4].copy_from_slice(&[0x00, 0x0b, 0x00, 0x09]); // rts; nop
+    out[0x100..0x108].copy_from_slice(KERNEL_MARK);
+    out[0x108..0x10c].copy_from_slice(&(kernel.len() as u32).to_be_bytes());
+    out[0x10c..0x110].copy_from_slice(&crc32(kernel).to_be_bytes());
+    out[0x110..0x114].copy_from_slice(&0x8c00_1000u32.to_be_bytes());
+    out[0x114..0x118].copy_from_slice(&0x8c00_2000u32.to_be_bytes());
+    out[KERNEL_AT..KERNEL_AT + kernel.len()].copy_from_slice(kernel);
+    fix_checksum(&mut out)?;
+    Ok(out)
+}
+
+/// [`firmware_disc`], and with `kernel` a Linux kernel in the
+/// application module's place ([`kernel_module`]) for the program in the
+/// operating system's place to start.
+pub fn firmware_disc_with_kernel(image: &[u8], variant: &str, payload: &[u8], swap: Option<&[u8]>, kernel: Option<&[u8]>) -> Result<Vec<u8>, FwError> {
     let variants = load_variants(image)?;
     let v = variants.iter().find(|v| v.name == variant).ok_or_else(|| FwError::Format(format!("no variant {} on this disc", variant)))?;
     let loader = v.module("LDM").ok_or_else(|| FwError::Format("the variant has no loader".into()))?;
@@ -774,7 +837,20 @@ pub fn firmware_disc(image: &[u8], variant: &str, payload: &[u8], swap: Option<&
     let ram_load = loader.load_addr;
     let error = std::cell::RefCell::new(None);
     let (out, changed) = repack(image, &|var, name| {
-        if var != variant || name != "OSM" {
+        if var != variant {
+            return None;
+        }
+        if name == "APM" {
+            let kernel = kernel?;
+            return match kernel_module(&v.module("APM")?.data, kernel) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    error.borrow_mut().get_or_insert(e);
+                    None
+                }
+            };
+        }
+        if name != "OSM" {
             return None;
         }
         let stock = &v.module("OSM")?.data;
@@ -789,8 +865,11 @@ pub fn firmware_disc(image: &[u8], variant: &str, payload: &[u8], swap: Option<&
     if let Some(e) = error.into_inner() {
         return Err(e);
     }
-    if changed.is_empty() {
+    if !changed.iter().any(|c| c.1 == "OSM") {
         return bad("the disc's operating system module was not replaced");
+    }
+    if kernel.is_some() && !changed.iter().any(|c| c.1 == "APM") {
+        return bad("the disc's application module was not replaced by the kernel");
     }
     let mut out = out;
     if let Some(swap) = swap {
@@ -1136,6 +1215,32 @@ mod tests {
 
     /// Repacking with the modules as they are gives the same image;
     /// with one changed, only that module and its checksum change.
+    #[test]
+    fn crc32_is_zlibs() {
+        assert_eq!(crc32(b"123456789"), 0xcbf4_3926);
+        assert_eq!(crc32(b""), 0);
+    }
+
+    #[test]
+    fn a_kernel_goes_into_the_application_module() {
+        let mut body = vec![0u8; 0x4000];
+        body[0x1000] = 0x12;
+        let mut apm = fake_module(b".APL", b"V9990002", 0x0021_0000, &vec![0x55u8; 0x5000]);
+        let size = be32(&apm, 0x74) as usize;
+        let m = kernel_module(&apm, &body).unwrap();
+        assert_eq!(m.len(), apm.len());
+        assert_eq!(&m[0x70..0x78], &apm[0x70..0x78], "load address and size kept");
+        assert_eq!(be32(&m, 0x80), 0x0021_0090);
+        assert_eq!(&m[0x90..0x94], &[0x00, 0x0b, 0x00, 0x09]);
+        assert_eq!(&m[0x100..0x108], KERNEL_MARK);
+        assert_eq!(be32(&m, 0x108), 0x4000);
+        assert_eq!(be32(&m, 0x10c), crc32(&body));
+        assert_eq!(&m[KERNEL_AT..KERNEL_AT + 0x4000], &body[..]);
+        assert!(Module::parse("APM", &m).unwrap().checksum_ok());
+        apm.truncate(size);
+        assert!(kernel_module(&apm, &vec![1u8; size]).is_err(), "too long");
+    }
+
     #[test]
     fn repack_replaces_a_module() {
         let os = fake_module(b".OS ", b"V9990001", 0x0000_c100, b"operating system");
