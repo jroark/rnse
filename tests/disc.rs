@@ -2862,6 +2862,137 @@ fn modern_builtins() {
 /// screen and the demo; sound effects out of a card processor's
 /// converter; the menu with the faceplate's keys and a game begun; the
 /// display and the disc while it plays; RETURN held back to `sdboot`.
+/// A PC on the 192 (win311/, Tiny386): sdboot starts pcboot
+/// (WIN311.BIN) from the card, which starts the emulator (PCEMU.BIN),
+/// which boots MS-DOS and Windows 3.11 from the disk image on the same
+/// card, and the knobs move the mouse.  With the caches modelled and RAM
+/// arbitrary.  Needs RNSE_WIN311, a directory with what win311/build.sh
+/// writes (win311/out) and a disk image WIN311.IMG with DOS and Windows
+/// installed (docs/win311.md: not in the repository).  Screenshots go to
+/// out/win311/.
+#[test]
+fn win311_runs_from_an_sd_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some(dir) = std::env::var_os("RNSE_WIN311") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    let file = |name: &str| std::fs::read(dir.join(name)).unwrap_or_else(|_| panic!("RNSE_WIN311 has no {}", name));
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    let entries = vec![
+        rnse::fat::Entry::file("WIN311.BIN", file("WIN311.BIN")),
+        rnse::fat::Entry::file("PCEMU.BIN", file("PCEMU.BIN")),
+        rnse::fat::Entry::file("BIOS.ROM", file("BIOS.ROM")),
+        rnse::fat::Entry::file("VGABIOS.ROM", file("VGABIOS.ROM")),
+        rnse::fat::Entry::file("WIN311.IMG", file("WIN311.IMG")),
+    ];
+    let card = rnse::fat::card("WIN311", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let ms = m.cycles_per_ms();
+    m.watchdog.longest = 0;
+    let console = |m: &Machine| String::from_utf8_lossy(&m.console).into_owned();
+    let tail = |m: &Machine| { let t = console(m); t[t.len().saturating_sub(1500)..].to_string() };
+    std::fs::create_dir_all("out/win311").unwrap();
+    let shot = |m: &Machine, file: &str| {
+        let (w, h, rgb) = m.render();
+        std::fs::write(format!("out/win311/{file}.png"), rnse::png::encode_rgb(w, h, &rgb)).unwrap();
+    };
+    // Windows' desktop: the share of the screen in its grey (192, 192,
+    // 192), and whether a title bar's dark blue (0, 0, 128) is there.
+    let desktop = |m: &Machine| {
+        let (_, _, rgb) = m.render();
+        let px = rgb.len() / 3;
+        let grey = rgb.chunks(3).filter(|p| p == &[192, 192, 192]).count();
+        let blue = rgb.chunks(3).filter(|p| p == &[0, 0, 128]).count();
+        (grey * 100 / px, blue)
+    };
+
+    until(&mut m, 0, "rnse sdk: pcemu", 60).unwrap_or_else(|| panic!("{}: the emulator did not start: {:?}", name, tail(&m)));
+    until(&mut m, 0, "pcemu: WIN311.IMG", 30).unwrap_or_else(|| panic!("{}: no disk image: {:?}", name, tail(&m)));
+    // Where the SH-4 spends its time, sampled (addresses to
+    // out/win311/profile.txt, for nm).
+    // RNSE_WIN311_PROFILE=S: after S seconds (Windows starting at about
+    // 60), a second of samples.
+    if let Some(skip) = std::env::var("RNSE_WIN311_PROFILE").ok().and_then(|s| s.parse::<u64>().ok()) {
+        assert_eq!(m.run(skip * 1_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        shot(&m, "profiled");
+        let mut hist = std::collections::HashMap::<u32, u32>::new();
+        for _ in 0..120_000 {
+            assert_eq!(m.run(2_000 + (hist.len() as u64 % 7)), Stop::Budget, "{:?}", m.cpu.fault);
+            *hist.entry(m.cpu.pc).or_default() += 1;
+        }
+        let mut v: Vec<_> = hist.into_iter().collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let text: String = v.iter().map(|(pc, n)| format!("{:08x} {}\n", pc, n)).collect();
+        std::fs::write("out/win311/profile.txt", text).unwrap();
+        return;
+    }
+    let started = std::time::Instant::now();
+    let mut seconds = 0;
+    let mut up = None;
+    while seconds < 240 {
+        assert_eq!(m.run(5_000 * ms), Stop::Budget, "{}: {:?} {}", name, m.cpu.fault, tail(&m));
+        seconds += 5;
+        shot(&m, &format!("boot-{:03}", seconds));
+        std::fs::write("out/win311/console.txt", &m.console).unwrap();
+        let (grey, blue) = desktop(&m);
+        eprintln!("win311: {} s emulated ({:.0} s here): grey {}%, blue {}", seconds, started.elapsed().as_secs_f64(), grey, blue);
+        if grey > 15 && blue > 100 {
+            up = Some(seconds);
+            break;
+        }
+    }
+    let up = up.unwrap_or_else(|| panic!("{}: no Windows desktop after {} s: {:?}", name, seconds, tail(&m)));
+    eprintln!("win311: Program Manager after {} s of the unit's time", up);
+    let longest = m.watchdog.longest / ms;
+    assert!(longest < 40, "{}: the watchdog waited {} ms, until {} ms, PC {:08x}", name, longest, m.watchdog.longest_end / ms, m.watchdog.longest_pc);
+
+    // Until the picture stands still (Program Manager's icons drawn).
+    let mut last = m.render().2;
+    for _ in 0..30 {
+        assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        let now = m.render().2;
+        if now == last { break }
+        last = now;
+    }
+    shot(&m, "desktop");
+    eprintln!("win311: {}", tail(&m).lines().filter(|l| l.starts_with("pcemu:")).last().unwrap_or(""));
+
+    // The pointer: what changes between two pictures, as a box.
+    let w = m.render().0;
+    let changed = |a: &[u8], b: &[u8]| {
+        let mut bx = (usize::MAX, usize::MAX, 0, 0);
+        for (i, (p, q)) in a.chunks(3).zip(b.chunks(3)).enumerate() {
+            if p != q {
+                let (x, y) = (i % w, i / w);
+                bx = (bx.0.min(x), bx.1.min(y), bx.2.max(x), bx.3.max(y));
+            }
+        }
+        bx
+    };
+    let turn = |m: &mut Machine, knob: &str, n: i32| -> Vec<u8> {
+        for _ in 0..n.abs() {
+            assert!(m.panel_knob(knob, n.signum()));
+            assert_eq!(m.run(60 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        }
+        assert_eq!(m.run(1_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+        m.render().2
+    };
+    // Slowly, a detent at a time: the volume knob louder moves it right,
+    // the select knob clockwise down, a few pixels a detent.
+    let right = turn(&mut m, "volume", 10);
+    shot(&m, "pointer-right");
+    let (x0, y0, x1, y1) = changed(&last, &right);
+    eprintln!("win311: right: changed ({}, {})..({}, {})", x0, y0, x1, y1);
+    assert!(x0 != usize::MAX, "{}: the volume knob did not move the pointer", name);
+    assert!(x1 - x0 >= 8 && x1 - x0 <= 40 && y1 - y0 <= 24, "{}: moved ({}, {})..({}, {}) for 10 detents across", name, x0, y0, x1, y1);
+    let down = turn(&mut m, "main", 10);
+    shot(&m, "pointer-down");
+    let (x0, y0, x1, y1) = changed(&right, &down);
+    eprintln!("win311: down: changed ({}, {})..({}, {})", x0, y0, x1, y1);
+    assert!(x0 != usize::MAX, "{}: the select knob did not move the pointer", name);
+    assert!(y1 - y0 >= 6 && y1 - y0 <= 40 && x1 - x0 <= 24, "{}: moved ({}, {})..({}, {}) for 10 detents down", name, x0, y0, x1, y1);
+}
+
 /// With the caches modelled and RAM arbitrary.  Needs RNSE_DOOM, the
 /// directory doom/build.sh writes (doom/out: DOOMGAME.BIN, DOOM1.WAD).
 #[test]
