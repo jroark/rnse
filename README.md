@@ -104,7 +104,9 @@ source and id's shareware data, all downloaded and none kept here
 (Quake reads its 18 MB of data from the card as it plays), and a Mac
 Plus (`docs/umac.md`): Matt Evans's umac, built by `umac/build.sh`,
 running the Mac's own ROM and System from the card at 384 x 235, with
-the two knobs as its mouse.
+the two knobs as its mouse; and a PC
+(Tiny386) that runs MS-DOS and Windows 3.11 from a disk image installed
+from your own floppies, the knobs as its mouse (`docs/win311.md`).
 One example, `report`, is meant for a real unit: it reads the
 processor's registers and the boot ROM (which is on no disc) and gets
 them out, on the screen and over the CAN bus, where `rnse report`

@@ -25,6 +25,9 @@ __pycache__/
 *.rom
 *.dsk
 *.DSK
+/win311/work/
+/win311/out/
+*.IMG
 /quake/work/
 /quake/out/
 *.pak
