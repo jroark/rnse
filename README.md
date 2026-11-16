@@ -93,6 +93,10 @@ program can end by handing over to the stock loader, which the image
 carries along, so that the unit is its ordinary self again.  And
 `--strict` lists what a program used that the emulator has no model of.
 `--gdb PORT` puts the machine under GDB's control.
+Bigger programs come from an SD card through the SD loader: Linux
+(`docs/linux.md`) and the shareware Doom (`docs/doom.md`), which runs on
+the kit's own drivers, built by `doom/build.sh` from doomgeneric and
+id's shareware WAD, both downloaded and neither kept here.
 One example, `report`, is meant for a real unit: it reads the
 processor's registers and the boot ROM (which is on no disc) and gets
 them out, on the screen and over the CAN bus, where `rnse report`
