@@ -19,5 +19,12 @@ __pycache__/
 /doom/out/
 *.wad
 *.WAD
+/umac/work/
+/umac/out/
+*.ROM
+*.rom
+*.dsk
+*.DSK
 /win311/work/
 /win311/out/
+*.IMG

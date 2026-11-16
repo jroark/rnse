@@ -93,10 +93,16 @@ program can end by handing over to the stock loader, which the image
 carries along, so that the unit is its ordinary self again.  And
 `--strict` lists what a program used that the emulator has no model of.
 `--gdb PORT` puts the machine under GDB's control.
+`sdk/examples/dvd` is a DVD player for the 192, started from an SD card
+by the SD loader: unencrypted DVD-Video discs, MPEG-2 decoded at half
+width, AC-3, MPEG and LPCM sound ([docs/dvd.md](docs/dvd.md)).
 Bigger programs come from an SD card through the SD loader: Linux
-(`docs/linux.md`) and the shareware Doom (`docs/doom.md`), which runs on
+(`docs/linux.md`), the shareware Doom (`docs/doom.md`), which runs on
 the kit's own drivers, built by `doom/build.sh` from doomgeneric and
-id's shareware WAD, both downloaded and neither kept here; and a PC
+id's shareware WAD, both downloaded and neither kept here, and a Mac
+Plus (`docs/umac.md`): Matt Evans's umac, built by `umac/build.sh`,
+running the Mac's own ROM and System from the card at 384 x 235, with
+the two knobs as its mouse; and a PC
 (Tiny386) that runs MS-DOS and Windows 3.11 from a disk image installed
 from your own floppies, the knobs as its mouse (`docs/win311.md`).
 One example, `report`, is meant for a real unit: it reads the
