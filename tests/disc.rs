@@ -2162,6 +2162,10 @@ fn linux_boots_from_an_sd_card() {
     assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
     let ms = m.cycles_per_ms();
     m.cpu.breakpoints.clear();
+    // The watchdog from here on: the stock software's own start (some
+    // 33 ms to its first edge, with the watchdog armed from power-on)
+    // is not what this test judges.
+    m.watchdog.longest = 0;
     let console = |m: &Machine| String::from_utf8_lossy(&m.console).into_owned();
     let press = |m: &mut Machine, key: &str, hold: u64| {
         assert!(m.panel_key(key, true));
@@ -2249,8 +2253,15 @@ fn linux_boots_from_an_sd_card() {
     assert!(!text[back..].contains("rnse sdk: linuxboot"), "{}: Linux was started again", name);
 
     // The unit resets 105 ms after the last edge: keep well inside.
+    // The emulator counts an instruction as a cycle, which is kind to
+    // loops of cache operations: a pause of 50 ms here, on the way back
+    // (the purge of all RAM from the cache, unstrobed), was a reset on a
+    // unit, which then came up in the stock software.  Normal is the
+    // tick's spacing, some 16 ms; under Linux the console's scrolling
+    // (written with interrupts off) makes 33, which is the next thing
+    // to bring down.
     let longest = m.watchdog.longest / ms;
-    assert!(longest < 60, "{}: the watchdog waited {} ms", name, longest);
+    assert!(longest < 40, "{}: the watchdog waited {} ms, until {} ms, PC {:08x}", name, longest, m.watchdog.longest_end / ms, m.watchdog.longest_pc);
     let cache = &m.cpu.cache.trouble;
     assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
 }
