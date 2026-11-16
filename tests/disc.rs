@@ -2084,6 +2084,28 @@ fn return_held_goes_back_to_the_loader_and_from_there_to_stock() {
     assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
 }
 
+/// The radio processor's keep-alive: a unit left in the SD loader's menu
+/// (and under Linux) was restarted into the stock software after about
+/// seven minutes, the stock software's 81 [06] of every minute not
+/// coming.  The loader sends it now (panel_service, radio_keepalive);
+/// with the emulated radio processor's patience cut to 70 s, the menu is
+/// still there after 150 s, the keep-alives coming once a minute.
+#[test]
+fn the_loader_keeps_the_radio_processor_content() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    m.radio_keepalive_limit_ms = 70_000;
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    let before = m.radio.seen.get(&(0x81, 0x06)).copied().unwrap_or(0);
+    assert_eq!(m.run(150_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(!m.reset_requested, "{}: the unit was restarted", name);
+    let sent = m.radio.seen.get(&(0x81, 0x06)).copied().unwrap_or(0) - before;
+    assert!((2..=4).contains(&sent), "{}: {} keep-alives in 150 s", name, sent);
+    assert!(String::from_utf8_lossy(&m.console).contains("WAITING FOR CARD"), "{}", name);
+}
+
 /// Programs from an SD card (sdk/examples/sdboot): the stock software
 /// starts the loader from the disc, the loader starts the card
 /// processor of a slot with the installed software's program out of

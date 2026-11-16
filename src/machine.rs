@@ -85,6 +85,15 @@ pub struct Machine {
     /// Text the firmware printed on its debug serial port.
     pub console: Vec<u8>,
     pub echo_console: bool,
+    /// The 192's radio processor restarts the unit when the main
+    /// processor has not sent it its keep-alive, 81 [06] (the stock
+    /// software's once a minute), for this long: some seven minutes on a
+    /// unit (a program that sent it nothing, on a bench).  Which frames
+    /// count is not known; only this one does here.  0: never.
+    pub radio_keepalive_limit_ms: u64,
+    /// When the last keep-alive came, and how many have.
+    radio_keepalive_at: u64,
+    radio_keepalives: u32,
     /// A sampling profile, when wanted: how often the CPU was found at
     /// each address at the end of one of the run loop's slices (every
     /// 20,000 cycles or sooner).
@@ -225,7 +234,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
+        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, radio_keepalive_limit_ms: 420_000, radio_keepalive_at: 0, radio_keepalives: 0, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
         if model == crate::board::Model::Rnse192 {
             // The 192's drive as one was measured (docs/boot-rom.md, "A
             // disc that goes in while the unit runs"): 2.7 s to load a
@@ -821,6 +830,11 @@ impl Machine {
             }
             if self.radio_present && format_ok {
                 let reply = self.radio.from_unit(&bytes);
+                let keepalives = self.radio.seen.get(&(0x81, 0x06)).copied().unwrap_or(0);
+                if keepalives != self.radio_keepalives {
+                    self.radio_keepalives = keepalives;
+                    self.radio_keepalive_at = now;
+                }
                 if !reply.is_empty() {
                     // As with the faceplate: an answer takes at least
                     // the time of the bytes on the line.
@@ -1694,6 +1708,22 @@ impl Machine {
                         // With a real boot ROM a reset is a reset: the
                         // processor starts at the ROM again, with the
                         // memories as they are, and the run goes on.
+                        self.cpu.reset();
+                        self.watchdog.edges = 0;
+                        self.board.watchdog_edges = 0;
+                        self.resets += 1;
+                        continue;
+                    }
+                    self.reset_requested = true;
+                    self.cpu.fault = Some("reset requested".into());
+                    return Stop::Fault;
+                }
+                if self.board.model == crate::board::Model::Rnse192 && self.radio_present && self.radio_keepalive_limit_ms > 0
+                    && now - self.radio_keepalive_at > self.radio_keepalive_limit_ms * self.cycles_per_ms()
+                {
+                    eprintln!("[radio] no keep-alive (81 [06]) for {} s: the radio processor restarts the unit", (now - self.radio_keepalive_at) / self.cycles_per_ms() / 1000);
+                    self.radio_keepalive_at = now;
+                    if self.real_rom {
                         self.cpu.reset();
                         self.watchdog.edges = 0;
                         self.board.watchdog_edges = 0;
