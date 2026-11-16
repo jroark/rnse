@@ -2980,6 +2980,181 @@ fn doom_runs_from_an_sd_card() {
     assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
 }
 
+/// umac, a Mac Plus emulator, on the 192 from an SD card (docs/umac.md):
+/// the stock software starts sdboot, sdboot's only program is macboot
+/// (MAC.BIN), which reads umac (MACEMU.BIN), the Mac Plus ROM and a disk
+/// image and starts umac.  Needs RNSE_UMAC=umac/out (umac/build.sh) and,
+/// since neither may be in the repository, RNSE_MAC_ROM (the Mac Plus's
+/// third ROM, 128 KiB) and RNSE_MAC_DISK (a raw image of a disk with a
+/// System that boots).  Screenshots go to out/umac/.
+#[test]
+fn mac_runs_from_an_sd_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let (Some(dir), Some(rom), Some(disk)) =
+        (std::env::var_os("RNSE_UMAC"), std::env::var_os("RNSE_MAC_ROM"), std::env::var_os("RNSE_MAC_DISK"))
+    else {
+        return;
+    };
+    let umac = std::fs::read(std::path::Path::new(&dir).join("MACEMU.BIN")).expect("RNSE_UMAC has no MACEMU.BIN");
+    let rom = std::fs::read(rom).expect("RNSE_MAC_ROM is not readable");
+    let disk = std::fs::read(disk).expect("RNSE_MAC_DISK is not readable");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "macboot").is_none() { return }
+    let macboot = std::fs::read(sdk.join("out/macboot-192.bin")).unwrap();
+    let entries = vec![
+        rnse::fat::Entry::file("MAC.BIN", macboot),
+        rnse::fat::Entry::file("MACEMU.BIN", umac),
+        rnse::fat::Entry::file("MACPLUS.ROM", rom),
+        rnse::fat::Entry::file("MAC.DSK", disk),
+    ];
+    let card = rnse::fat::card("MAC", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let ms = m.cycles_per_ms();
+    m.watchdog.longest = 0;
+    let console = |m: &Machine| String::from_utf8_lossy(&m.console).into_owned();
+    let tail = |m: &Machine| { let t = console(m); t[t.len().saturating_sub(800)..].to_string() };
+    let press = |m: &mut Machine, key: &str, hold: u64| {
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(hold * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert!(m.panel_key(key, false));
+    };
+    // The Mac's 384x235 at x = 8 of the 400x235 screen, black (true) or
+    // white, one bool a pixel, saved as a PNG on the way.
+    let shot = |m: &Machine, file: &str| -> Vec<Vec<bool>> {
+        let (w, h, rgb) = m.render();
+        std::fs::create_dir_all("out/umac").unwrap();
+        std::fs::write(format!("out/umac/{file}.png"), rnse::png::encode_rgb(w, h, &rgb)).unwrap();
+        let bytes = rgb.len() / (w * h);
+        (0..h).map(|y| (8..392).map(|x| rgb[(y * w + x) * bytes] < 128).collect()).collect()
+    };
+
+    until(&mut m, 0, "READING MAC.DSK", 60).unwrap_or_else(|| panic!("{}: macboot did not read the card: {:?}", name, tail(&m)));
+    until(&mut m, 0, "umac: 384x235", 60).unwrap_or_else(|| panic!("{}: umac did not start: {:?}", name, tail(&m)));
+    let text = console(&m);
+    assert!(text.lines().any(|l| l.trim_end() == "rnse sdk: umac"), "{}: {:?}", name, tail(&m));
+
+    // The Mac boots from the disk into the Finder: its menu bar is a
+    // white band across the top over a black line (the pointer may
+    // cross it), with the desktop's pattern below.
+    let mut finder = None;
+    for second in (5..=90).step_by(5) {
+        assert_eq!(m.run(5_000 * ms), Stop::Budget, "{}: {:?} {:?}", name, m.cpu.fault, tail(&m));
+        let pixels = shot(&m, &format!("boot-{second:02}s"));
+        let line = (15..24).find(|&y| pixels[y].iter().filter(|&&b| b).count() >= 370);
+        if let Some(y) = line {
+            if pixels[y + 4].iter().any(|&b| b) && pixels[y + 4].iter().any(|&b| !b) {
+                finder = Some((second, y));
+                break;
+            }
+        }
+    }
+    let (second, menu_line) = finder.unwrap_or_else(|| panic!("{}: no Finder after 90 s: {:?}", name, tail(&m)));
+    eprintln!("{}: the Finder after about {} s, the menu bar's line at y = {}", name, second, menu_line);
+    assert!(!console(&m).contains("Attempted to read"), "{}: {:?}", name, tail(&m));
+
+    // The knobs move the pointer: the picture changes where it was and
+    // where it goes, and nothing else does.
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let before = shot(&m, "pointer-before");
+    assert!(m.panel_knob("main", 6));
+    assert!(m.panel_knob("volume", 6));
+    assert_eq!(m.run(1_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let after = shot(&m, "pointer-after");
+    let changed: Vec<(usize, usize)> = (0..235).flat_map(|y| (0..384).map(move |x| (x, y)))
+        .filter(|&(x, y)| before[y][x] != after[y][x]).collect();
+    assert!(!changed.is_empty(), "{}: the knobs did not move the pointer", name);
+    let (x0, x1) = (changed.iter().map(|c| c.0).min().unwrap(), changed.iter().map(|c| c.0).max().unwrap());
+    let (y0, y1) = (changed.iter().map(|c| c.1).min().unwrap(), changed.iter().map(|c| c.1).max().unwrap());
+    assert!(x1 - x0 < 120 && y1 - y0 < 120, "{}: more than the pointer changed: {}..{} x {}..{}", name, x0, x1, y0, y1);
+
+    // The display folds down and up while the Mac runs.
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos <= 94, "{}: the display is at {} under the Mac", name, m.board.display_pos);
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos >= 894, "{}: the display is at {}", name, m.board.display_pos);
+
+    // RETURN held: back to sdboot, with the status of a RETURN held.
+    let before = console(&m).len();
+    press(&mut m, "RETURN", 2_500);
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = console(&m);
+    assert!(text[before..].contains("rnse sdk: sdboot") && text[before..].contains("TEST ENDED BY HOLDING RETURN"), "{}: {:?}", name, &text[before..]);
+
+    // The watchdog was served throughout, and the caches never handed
+    // out anything stale.
+    let longest = m.watchdog.longest / ms;
+    assert!(longest < 40, "{}: the watchdog waited {} ms, until {} ms, PC {:08x}", name, longest, m.watchdog.longest_end / ms, m.watchdog.longest_pc);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
+/// The DVD player (`sdk/examples/dvd`) as a unit starts it: the stock
+/// software starts the SD loader from the disc, the loader the player
+/// from the card (DVD.BIN), CD EJECT takes the loader's disc out (the
+/// player says it is no DVD-Video disc), a DVD goes in, SELECT plays
+/// its first title with the caches modelled, and RETURN held goes back
+/// to the loader.  Needs `RNSE_DVD` as well (`sdk/tests/check-dvd.sh`
+/// makes one, and `tests/dvd.rs` has the player's own tests, which need
+/// no firmware).
+#[test]
+fn dvd_player_from_the_sd_loader() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some(dvd) = std::env::var_os("RNSE_DVD") else { return };
+    let dvd = std::fs::read(dvd).expect("RNSE_DVD is not readable");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "dvd").is_none() { return }
+    let player = std::fs::read(sdk.join("out/dvd-192.bin")).unwrap();
+    let flash = m.board.flash.clone();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    let card = rnse::fat::card("DVD", &[rnse::fat::Entry::file("DVD.BIN", player)], None).unwrap();
+    let at = m.console.len();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let started = until(&mut m, at, "rnse sdk: dvd", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    until(&mut m, started, "NOT A DVD-VIDEO DISC", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[started..])));
+    // The loader's disc out, and the DVD in.
+    assert!(m.panel_key("CD_EJECT", true));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    assert!(m.panel_key("CD_EJECT", false));
+    assert_eq!(m.run(8000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.atapi().image.is_none(), "{}: the loader's disc was not ejected", name);
+    let at = m.console.len();
+    m.atapi().insert(Some(dvd));
+    until(&mut m, at, "READING THE DISC", 40).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    assert_eq!(m.run(3000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.panel_key("SELECT", true));
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    assert!(m.panel_key("SELECT", false));
+    assert_eq!(m.run(5000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let (_, _, rgb) = m.render();
+    let colour = rgb.chunks(3).filter(|p| {
+        let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+        (r - g).abs() > 40 || (g - b).abs() > 40 || (r - b).abs() > 40
+    }).count();
+    let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    assert!(colour > 20_000, "{}: {} colourful pixels: {}", name, colour, text);
+    assert!(text.contains("fps*10"), "{}: {}", name, text);
+    // RETURN held: the player stops its sound and puts the caches back,
+    // and the loader is there again.
+    let at = m.console.len();
+    assert!(m.panel_key("RETURN", true));
+    assert_eq!(m.run(2600 * ms), Stop::Budget);
+    assert!(m.panel_key("RETURN", false));
+    until(&mut m, at, "TEST ENDED BY HOLDING RETURN", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    let text = String::from_utf8_lossy(&m.console[started..]).into_owned();
+    assert!(!text.contains("unexpected"), "{}: {}", name, text);
+    assert_eq!(m.board.flash, flash, "{}", name);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
+
 /// Quake (quake/build.sh, docs/quake.md) from an SD card: sdboot starts
 /// quakeboot (QUAKE.BIN), which reads the game (QUAKEGAM.BIN) and enters
 /// it; the game reads PAK0.PAK from the card as it needs it and plays
