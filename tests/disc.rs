@@ -3285,3 +3285,167 @@ fn dvd_player_from_the_sd_loader() {
     let cache = &m.cpu.cache.trouble;
     assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
 }
+
+/// Quake (quake/build.sh, docs/quake.md) from an SD card: sdboot starts
+/// quakeboot (QUAKE.BIN), which reads the game (QUAKEGAM.BIN) and enters
+/// it; the game reads PAK0.PAK from the card as it needs it and plays
+/// its sound out of the other card processor.  Needs RNSE_QUAKE=quake/out
+/// besides RNSE_DISC and a cross compiler.  RNSE_QUAKE_SHOTS=DIR keeps
+/// screenshots of the way; RNSE_QUAKE_ARG=TEXT puts a QUAKE.ARG on the
+/// card (with `+timedemo demo1` the test prints the frame rate and ends
+/// there).
+#[test]
+fn quake_runs_from_an_sd_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some(dir) = std::env::var_os("RNSE_QUAKE") else { return };
+    let dir = std::path::PathBuf::from(dir);
+    let game = std::fs::read(dir.join("QUAKEGAM.BIN")).expect("RNSE_QUAKE has no QUAKEGAM.BIN");
+    let pak = std::fs::read(dir.join("PAK0.PAK")).expect("RNSE_QUAKE has no PAK0.PAK");
+    let shots = std::env::var_os("RNSE_QUAKE_SHOTS").map(std::path::PathBuf::from);
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "quakeboot").is_none() { return }
+    let quakeboot = std::fs::read(sdk.join("out/quakeboot-192.bin")).unwrap();
+    let mut entries = vec![
+        rnse::fat::Entry::file("QUAKE.BIN", quakeboot),
+        rnse::fat::Entry::file("QUAKEGAM.BIN", game),
+        rnse::fat::Entry::file("PAK0.PAK", pak),
+    ];
+    // RNSE_QUAKE_ARG: QUAKE.ARG for a run by hand (`+timedemo demo1`).
+    let arg = std::env::var("RNSE_QUAKE_ARG").ok();
+    if let Some(arg) = &arg {
+        entries.push(rnse::fat::Entry::file("QUAKE.ARG", arg.as_bytes().to_vec()));
+    }
+    let card = rnse::fat::card("QUAKE", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let ms = m.cycles_per_ms();
+    m.watchdog.longest = 0;
+    let console = |m: &Machine| String::from_utf8_lossy(&m.console).into_owned();
+    let tail = |m: &Machine| { let t = console(m); t[t.len().saturating_sub(1500)..].to_string() };
+    let shot = |m: &Machine, what: &str| {
+        if let Some(dir) = &shots {
+            let (w, h, rgb) = m.render();
+            std::fs::write(dir.join(format!("{}.png", what)), rnse::png::encode_rgb(w, h, &rgb)).unwrap();
+        }
+    };
+
+    // Until the console says `what`, a second at a time, the console's
+    // end shown when the unit stops.
+    let wait_for = |m: &mut Machine, from: usize, what: &str, seconds: u64| -> Option<usize> {
+        for _ in 0..seconds {
+            let stop = m.run(1_000 * ms);
+            let text = String::from_utf8_lossy(&m.console).into_owned();
+            assert_eq!(stop, Stop::Budget, "{:?} at {} ms: {}", m.cpu.fault, m.cpu.cycles / ms, &text[text.len().saturating_sub(1500)..]);
+            if let Some(at) = text.get(from..).and_then(|t| t.find(what)) {
+                return Some(from + at);
+            }
+        }
+        None
+    };
+
+    wait_for(&mut m, 0, "quake: PAK0.PAK", 60).unwrap_or_else(|| panic!("{}: the game did not start: {:?}", name, tail(&m)));
+    wait_for(&mut m, 0, "Quake Initialized", 120).unwrap_or_else(|| { shot(&m, "fail"); panic!("{}: Quake did not come up: {:?}", name, tail(&m)) });
+    if arg.as_deref().is_some_and(|a| a.contains("timedemo")) {
+        let at = wait_for(&mut m, 0, " fps", 600).unwrap_or_else(|| panic!("{}: no timedemo result: {:?}", name, tail(&m)));
+        eprintln!("timedemo: {}", console(&m)[at.saturating_sub(60)..at + 4].trim());
+        return;
+    }
+    let press = |m: &mut Machine, key: &str, hold: u64| {
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(hold * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert!(m.panel_key(key, false));
+    };
+    // Quake's 320x200, centred on the 400x235 screen: how many colours,
+    // and the pixels themselves.
+    let window = |m: &Machine| {
+        let (w, h, pixels) = m.render();
+        let bytes = pixels.len() / (w * h);
+        let mut out = Vec::new();
+        for y in 17..217 {
+            out.extend_from_slice(&pixels[(y * w + 40) * bytes..(y * w + 360) * bytes]);
+        }
+        let colours: std::collections::HashSet<&[u8]> = out.chunks(bytes).collect();
+        (colours.len(), out.clone())
+    };
+    let text = console(&m);
+    let silent = arg.as_deref().is_some_and(|a| a.contains("-nosound"));
+    assert!(silent || text.contains("quake: sound from card processor 1"), "{}: no sound: {:?}", name, tail(&m));
+
+    // The first demo, read from the card as it plays: the picture moves
+    // and is heard.
+    wait_for(&mut m, 0, "Playing demo from demo1.dem", 30).unwrap_or_else(|| panic!("{}: no demo: {:?}", name, tail(&m)));
+    assert_eq!(m.run(10_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    shot(&m, "demo");
+    let (colours, first) = window(&m);
+    assert!(colours > 40, "{}: {} colours in Quake's window", name, colours);
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let (_, second) = window(&m);
+    assert_ne!(first, second, "{}: the demo does not move", name);
+    let dsp = &m.board.media.dsps[1];
+    assert!(dsp.fault.is_none(), "{}: {:?}", name, dsp.fault);
+    assert!(silent || dsp.loud_frames > 0, "{}: the other card processor sends its converter only silence ({} samples)", name, dsp.frames);
+
+    // While the card is read and the demo plays: the display folds down
+    // and up.
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos <= 94, "{}: the display is at {} in the demo", name, m.board.display_pos);
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos >= 894, "{}: the display is at {}", name, m.board.display_pos);
+
+    // The menu (SETUP), Single Player, New Game: the start map.  Then
+    // forward and a turn.
+    let before = console(&m).len();
+    press(&mut m, "SETUP", 150);
+    assert_eq!(m.run(800 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    shot(&m, "menu");
+    for _ in 0..2 {
+        press(&mut m, "SELECT", 150);
+        assert_eq!(m.run(800 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    }
+    wait_for(&mut m, before, "quake: playing start", 60).unwrap_or_else(|| { shot(&m, "fail"); panic!("{}: no game began: {:?}", name, tail(&m)) });
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    shot(&m, "start");
+    let (_, standing) = window(&m);
+    press(&mut m, "NEXT", 1_000);
+    assert!(m.panel_knob("main", 4));
+    assert_eq!(m.run(500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    shot(&m, "moved");
+    let (_, moved) = window(&m);
+    assert_ne!(standing, moved, "{}: the view did not change with NEXT and the knob", name);
+
+    // While it plays: the disc comes out; a short RETURN is Quake's (the
+    // menu), not the way back.
+    let ejects = m.atapi().ejects;
+    press(&mut m, "CD_EJECT", 200);
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert_eq!(m.atapi().ejects, ejects + 1, "{}: no eject in the game", name);
+    let before = console(&m).len();
+    press(&mut m, "RETURN", 300);
+    assert_eq!(m.run(1_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(!console(&m)[before..].contains("rnse sdk: sdboot"), "{}: a short RETURN left the game", name);
+
+    // RETURN held: back to sdboot, with the status of a RETURN held.
+    let before = console(&m).len();
+    press(&mut m, "RETURN", 2_500);
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = console(&m);
+    assert!(text[before..].contains("rnse sdk: sdboot") && text[before..].contains("TEST ENDED BY HOLDING RETURN"), "{}: {:?}", name, &text[before..]);
+    assert!(!text[before..].lines().any(|l| l.trim_end() == "rnse sdk: quake"), "{}: Quake was started again", name);
+
+    // (A game built with -DRNSE_DEBUG_IDLE says how long the faceplate
+    // went unanswered at most.)
+    for line in console(&m).lines().filter(|l| l.starts_with("idle:")) {
+        eprintln!("{}: {}", name, line);
+    }
+
+    // The watchdog was served throughout, card reads included (it resets
+    // the unit 105 ms after the last edge), and the caches never handed
+    // out anything stale.
+    let longest = m.watchdog.longest / ms;
+    assert!(longest < 40, "{}: the watchdog waited {} ms, until {} ms, PC {:08x}", name, longest, m.watchdog.longest_end / ms, m.watchdog.longest_pc);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}

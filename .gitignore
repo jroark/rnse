@@ -28,3 +28,7 @@ __pycache__/
 /win311/work/
 /win311/out/
 *.IMG
+/quake/work/
+/quake/out/
+*.pak
+*.PAK

@@ -97,9 +97,11 @@ carries along, so that the unit is its ordinary self again.  And
 by the SD loader: unencrypted DVD-Video discs, MPEG-2 decoded at half
 width, AC-3, MPEG and LPCM sound ([docs/dvd.md](docs/dvd.md)).
 Bigger programs come from an SD card through the SD loader: Linux
-(`docs/linux.md`), the shareware Doom (`docs/doom.md`), which runs on
-the kit's own drivers, built by `doom/build.sh` from doomgeneric and
-id's shareware WAD, both downloaded and neither kept here, and a Mac
+(`docs/linux.md`), the shareware Doom (`docs/doom.md`) and the shareware
+Quake (`docs/quake.md`), which run on the kit's own drivers, built by
+`doom/build.sh` and `quake/build.sh` from doomgeneric, id's GPL Quake
+source and id's shareware data, all downloaded and none kept here
+(Quake reads its 18 MB of data from the card as it plays), and a Mac
 Plus (`docs/umac.md`): Matt Evans's umac, built by `umac/build.sh`,
 running the Mac's own ROM and System from the card at 384 x 235, with
 the two knobs as its mouse; and a PC
