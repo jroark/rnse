@@ -2979,3 +2979,115 @@ fn doom_runs_from_an_sd_card() {
     let cache = &m.cpu.cache.trouble;
     assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
 }
+
+/// umac, a Mac Plus emulator, on the 192 from an SD card (docs/umac.md):
+/// the stock software starts sdboot, sdboot's only program is macboot
+/// (MAC.BIN), which reads umac (MACEMU.BIN), the Mac Plus ROM and a disk
+/// image and starts umac.  Needs RNSE_UMAC=umac/out (umac/build.sh) and,
+/// since neither may be in the repository, RNSE_MAC_ROM (the Mac Plus's
+/// third ROM, 128 KiB) and RNSE_MAC_DISK (a raw image of a disk with a
+/// System that boots).  Screenshots go to out/umac/.
+#[test]
+fn mac_runs_from_an_sd_card() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let (Some(dir), Some(rom), Some(disk)) =
+        (std::env::var_os("RNSE_UMAC"), std::env::var_os("RNSE_MAC_ROM"), std::env::var_os("RNSE_MAC_DISK"))
+    else {
+        return;
+    };
+    let umac = std::fs::read(std::path::Path::new(&dir).join("MACEMU.BIN")).expect("RNSE_UMAC has no MACEMU.BIN");
+    let rom = std::fs::read(rom).expect("RNSE_MAC_ROM is not readable");
+    let disk = std::fs::read(disk).expect("RNSE_MAC_DISK is not readable");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "macboot").is_none() { return }
+    let macboot = std::fs::read(sdk.join("out/macboot-192.bin")).unwrap();
+    let entries = vec![
+        rnse::fat::Entry::file("MAC.BIN", macboot),
+        rnse::fat::Entry::file("MACEMU.BIN", umac),
+        rnse::fat::Entry::file("MACPLUS.ROM", rom),
+        rnse::fat::Entry::file("MAC.DSK", disk),
+    ];
+    let card = rnse::fat::card("MAC", &entries, None).unwrap();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let ms = m.cycles_per_ms();
+    m.watchdog.longest = 0;
+    let console = |m: &Machine| String::from_utf8_lossy(&m.console).into_owned();
+    let tail = |m: &Machine| { let t = console(m); t[t.len().saturating_sub(800)..].to_string() };
+    let press = |m: &mut Machine, key: &str, hold: u64| {
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(hold * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        assert!(m.panel_key(key, false));
+    };
+    // The Mac's 384x235 at x = 8 of the 400x235 screen, black (true) or
+    // white, one bool a pixel, saved as a PNG on the way.
+    let shot = |m: &Machine, file: &str| -> Vec<Vec<bool>> {
+        let (w, h, rgb) = m.render();
+        std::fs::create_dir_all("out/umac").unwrap();
+        std::fs::write(format!("out/umac/{file}.png"), rnse::png::encode_rgb(w, h, &rgb)).unwrap();
+        let bytes = rgb.len() / (w * h);
+        (0..h).map(|y| (8..392).map(|x| rgb[(y * w + x) * bytes] < 128).collect()).collect()
+    };
+
+    until(&mut m, 0, "READING MAC.DSK", 60).unwrap_or_else(|| panic!("{}: macboot did not read the card: {:?}", name, tail(&m)));
+    until(&mut m, 0, "umac: 384x235", 60).unwrap_or_else(|| panic!("{}: umac did not start: {:?}", name, tail(&m)));
+    let text = console(&m);
+    assert!(text.lines().any(|l| l.trim_end() == "rnse sdk: umac"), "{}: {:?}", name, tail(&m));
+
+    // The Mac boots from the disk into the Finder: its menu bar is a
+    // white band across the top over a black line (the pointer may
+    // cross it), with the desktop's pattern below.
+    let mut finder = None;
+    for second in (5..=90).step_by(5) {
+        assert_eq!(m.run(5_000 * ms), Stop::Budget, "{}: {:?} {:?}", name, m.cpu.fault, tail(&m));
+        let pixels = shot(&m, &format!("boot-{second:02}s"));
+        let line = (15..24).find(|&y| pixels[y].iter().filter(|&&b| b).count() >= 370);
+        if let Some(y) = line {
+            if pixels[y + 4].iter().any(|&b| b) && pixels[y + 4].iter().any(|&b| !b) {
+                finder = Some((second, y));
+                break;
+            }
+        }
+    }
+    let (second, menu_line) = finder.unwrap_or_else(|| panic!("{}: no Finder after 90 s: {:?}", name, tail(&m)));
+    eprintln!("{}: the Finder after about {} s, the menu bar's line at y = {}", name, second, menu_line);
+    assert!(!console(&m).contains("Attempted to read"), "{}: {:?}", name, tail(&m));
+
+    // The knobs move the pointer: the picture changes where it was and
+    // where it goes, and nothing else does.
+    assert_eq!(m.run(2_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let before = shot(&m, "pointer-before");
+    assert!(m.panel_knob("main", 6));
+    assert!(m.panel_knob("volume", 6));
+    assert_eq!(m.run(1_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let after = shot(&m, "pointer-after");
+    let changed: Vec<(usize, usize)> = (0..235).flat_map(|y| (0..384).map(move |x| (x, y)))
+        .filter(|&(x, y)| before[y][x] != after[y][x]).collect();
+    assert!(!changed.is_empty(), "{}: the knobs did not move the pointer", name);
+    let (x0, x1) = (changed.iter().map(|c| c.0).min().unwrap(), changed.iter().map(|c| c.0).max().unwrap());
+    let (y0, y1) = (changed.iter().map(|c| c.1).min().unwrap(), changed.iter().map(|c| c.1).max().unwrap());
+    assert!(x1 - x0 < 120 && y1 - y0 < 120, "{}: more than the pointer changed: {}..{} x {}..{}", name, x0, x1, y0, y1);
+
+    // The display folds down and up while the Mac runs.
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos <= 94, "{}: the display is at {} under the Mac", name, m.board.display_pos);
+    press(&mut m, "EJECT", 200);
+    assert_eq!(m.run(2_500 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.board.display_pos >= 894, "{}: the display is at {}", name, m.board.display_pos);
+
+    // RETURN held: back to sdboot, with the status of a RETURN held.
+    let before = console(&m).len();
+    press(&mut m, "RETURN", 2_500);
+    assert_eq!(m.run(3_000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let text = console(&m);
+    assert!(text[before..].contains("rnse sdk: sdboot") && text[before..].contains("TEST ENDED BY HOLDING RETURN"), "{}: {:?}", name, &text[before..]);
+
+    // The watchdog was served throughout, and the caches never handed
+    // out anything stale.
+    let longest = m.watchdog.longest / ms;
+    assert!(longest < 40, "{}: the watchdog waited {} ms, until {} ms, PC {:08x}", name, longest, m.watchdog.longest_end / ms, m.watchdog.longest_pc);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
