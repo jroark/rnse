@@ -344,6 +344,17 @@ leave its "system software is being checked" notice until this
 processor has reported a software version that matches the `AUDVER`
 entry of the installed set.
 
+**It restarts the unit when the main processor goes quiet.**  The stock
+software sends it one thing on a schedule, `81 [06]`, every 60 s (seen
+in the emulator; acknowledged `20 [00]` like any setting), and a unit
+whose main processor sent it nothing, a program in the SD loader's menu
+or Linux on a bench, came up in the stock software again after about
+seven minutes.  What the frame means is not known, nor whether other
+frames would do: the SDK (`radio_keepalive`, from `panel_service`) and
+Linux (`rnse-controls.c`) send this one, once a minute.  The emulator
+restarts a 192 after 420 s without it (`--radio-keepalive S`; that
+seven minutes is the bench's figure, not a measurement).
+
 Frames: `start, command, length (16 bit, big-endian), data, checksum`
 with start = 0x01 from the unit and 0x00 from the radio, and the
 checksum the complement of the sum of everything before it.  The unit
