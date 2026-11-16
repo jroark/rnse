@@ -2512,6 +2512,8 @@ fn linux_is_installed_in_flash() {
 /// going but never counts a start as one that worked, and at the fifth
 /// start in a row the guard takes the program out; the boot ROM installs
 /// the stock disc that is in the drive.  Nothing else erases anything.
+/// Each start's CD EJECT is tried while linuxboot waits; the stock disc
+/// goes in before the power cycle that follows.
 #[test]
 fn linux_in_flash_with_a_spoilt_kernel_is_taken_out_by_the_guard() {
     let (Some(image), Some(rom)) = (disc(), boot_rom()) else { return };
@@ -2533,10 +2535,16 @@ fn linux_in_flash_with_a_spoilt_kernel_is_taken_out_by_the_guard() {
         assert!(m.panel_key("CD_EJECT", false));
         assert_eq!(m.run(3_000 * ms), Stop::Budget);
         assert_eq!(m.atapi().ejects, ejects + 1, "start {}: CD EJECT did nothing", n);
-        m.atapi().insert(Some(image.clone()));
+        // Off and on with the stock disc put in: the drive comes up with
+        // it, as at power-on.  (m.cpu.reset() resets the processor only;
+        // a disc inserted while the unit ran would leave the emulated
+        // drive with its "medium changed" still to tell, which a power
+        // cut clears on a unit, and the boot ROM does not get past it.)
+        m.atapi().load(image.clone());
         m.cpu.reset();
     }
-    let back = until(&mut m, 0, "*** Jump User RESET ***", 600).expect("the ROM did not install the stock disc");
+    let tail = |m: &Machine| { let t = String::from_utf8_lossy(&m.console).into_owned(); t[t.len().saturating_sub(1500)..].to_string() };
+    let back = until(&mut m, 0, "*** Jump User RESET ***", 600).unwrap_or_else(|| panic!("the ROM did not install the stock disc: {:?}", tail(&m)));
     assert_eq!(count(&m), 4, "linuxboot was started a fifth time");
     until(&mut m, back, "[fw] SOUND_TSK START", 60).expect("the stock software did not start");
     stock_is_in_flash(&m, &image);
