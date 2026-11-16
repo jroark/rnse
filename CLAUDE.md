@@ -8,6 +8,39 @@ An emulator for the Audi RNS-E navigation unit (Aisin AW, SH-4 CPU), written fro
 
 Firmware is copyrighted and must never be committed. `.gitignore` blocks `*.iso`, `*.bin`, `*.KWI`, `*.MOT`, `/firmware/`, `/out/`; do not add firmware-derived files (flash dumps, extracted modules, SD card images) to the repository under other names either.
 
+## Mandatory hardware behavior
+
+- **Always preserve physical ejection.** Every custom firmware, loader,
+  diagnostic and test payload must support opening/folding down the display
+  and ejecting the disc. Keep faceplate polling and eject handling responsive
+  on normal screens, error screens and during long-running operations. Do not
+  repurpose the display/open key without another accessible physical way to
+  open the display and reach the disc-eject control. SDK `KEY_DISPLAY` is
+  emulator `EJECT`; `KEY_CD_EJECT` is a separate key. Verify the actual eject
+  command path before providing hardware test builds, including across handoffs.
+- **Hold RETURN for two seconds to return to the loader.** Every payload
+  launched by the SD loader must implement this shortcut from every screen,
+  close active apps and stop playback before calling `loader_return(status)`.
+  A short RETURN retains its normal back/cancel behavior; a long hold must not
+  also trigger that short action or immediately relaunch the payload after
+  returning. Return directly to the resident loader without resetting or
+  invoking an updater. Outside a loader session, report that return is
+  unavailable and remain operable, with eject still working.
+- **No firmware-flash option unless the user explicitly asks for it.** Default
+  custom loaders, test payloads and UIs must neither flash firmware nor expose
+  any updater/install/restore/erase option or hidden button sequence that can
+  do so. This includes double-SETUP, `stock_update()`, firmware removal and
+  automatic updater handoffs. Permission to build, test, recover, return to
+  the loader or eject a disc is not permission to flash. Existing updater
+  mechanisms described elsewhere in this file are technical background, not
+  authorization to expose or invoke them. Include a flash option only when
+  explicitly requested by the user.
+
+Hardware incident reported 2026-11-15: double-SETUP on the original loader
+invoked an updater and flashed firmware whose eject button did not work. The
+disc was trapped and the user had to disassemble the RNS-E. These requirements
+apply to all future hardware builds.
+
 ## Commands
 
 ```sh
