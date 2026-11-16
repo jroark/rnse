@@ -19,3 +19,7 @@ __pycache__/
 /doom/out/
 *.wad
 *.WAD
+/quake/work/
+/quake/out/
+*.pak
+*.PAK

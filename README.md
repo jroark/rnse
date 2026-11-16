@@ -94,9 +94,11 @@ carries along, so that the unit is its ordinary self again.  And
 `--strict` lists what a program used that the emulator has no model of.
 `--gdb PORT` puts the machine under GDB's control.
 Bigger programs come from an SD card through the SD loader: Linux
-(`docs/linux.md`) and the shareware Doom (`docs/doom.md`), which runs on
-the kit's own drivers, built by `doom/build.sh` from doomgeneric and
-id's shareware WAD, both downloaded and neither kept here.
+(`docs/linux.md`), the shareware Doom (`docs/doom.md`) and the shareware
+Quake (`docs/quake.md`), which run on the kit's own drivers, built by
+`doom/build.sh` and `quake/build.sh` from doomgeneric, id's GPL Quake
+source and id's shareware data, all downloaded and none kept here.
+Quake reads its 18 MB of data from the card as it plays.
 One example, `report`, is meant for a real unit: it reads the
 processor's registers and the boot ROM (which is on no disc) and gets
 them out, on the screen and over the CAN bus, where `rnse report`

@@ -125,6 +125,12 @@ pub struct Cpu {
     pub fault: Option<String>,
     pub breakpoints: Vec<u32>,
     /// Ring buffer of recently executed PCs (for post-mortem traces).
+    /// A physical range [from, to) whose stores by the CPU are noted in
+    /// store_log as (PC, address, value, size): what wrote over
+    /// something, when nothing else says.  The log keeps the last few
+    /// thousand.
+    pub store_watch: Option<(u32, u32)>,
+    pub store_log: Vec<(u32, u32, u32, u32)>,
     pub pc_hist: Vec<u32>,
     pub pc_hist_pos: usize,
     pub trace_exceptions: bool,
@@ -194,6 +200,8 @@ impl Cpu {
             insn_pc: 0,
             fault: None,
             breakpoints: Vec::new(),
+            store_watch: None,
+            store_log: Vec::new(),
             pc_hist: vec![0; 256],
             calls: None,
             pc_hist_pos: 0,
@@ -356,12 +364,25 @@ impl Cpu {
         Ok(bus.read32(pa))
     }
 
+    #[cold]
+    fn note_store(&mut self, addr: u32, v: u32, size: u32) {
+        if self.store_log.len() >= 8192 {
+            self.store_log.drain(..4096);
+        }
+        self.store_log.push((self.pc, addr, v, size));
+    }
+
     #[inline(always)]
     pub fn write8<B: Bus>(&mut self, bus: &mut B, addr: u32, v: u8) -> Result<(), Exc> {
         if addr >= 0xe000_0000 {
             return self.p4_write(bus, addr, 1, v as u32);
         }
         let pa = self.translate(addr, Access::Write)?;
+        if let Some((from, to)) = self.store_watch {
+            if pa & 0x1fff_ffff >= from && pa & 0x1fff_ffff < to {
+                self.note_store(addr, v as u32, 1);
+            }
+        }
         if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
             self.cache.write(bus, pa, 1, v as u32, addr);
             return Ok(());
@@ -379,6 +400,11 @@ impl Cpu {
             return self.p4_write(bus, addr, 2, v as u32);
         }
         let pa = self.translate(addr, Access::Write)?;
+        if let Some((from, to)) = self.store_watch {
+            if pa & 0x1fff_ffff >= from && pa & 0x1fff_ffff < to {
+                self.note_store(addr, v as u32, 2);
+            }
+        }
         if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
             self.cache.write(bus, pa, 2, v as u32, addr);
             return Ok(());
@@ -396,6 +422,11 @@ impl Cpu {
             return self.p4_write(bus, addr, 4, v);
         }
         let pa = self.translate(addr, Access::Write)?;
+        if let Some((from, to)) = self.store_watch {
+            if pa & 0x1fff_ffff >= from && pa & 0x1fff_ffff < to {
+                self.note_store(addr, v, 4);
+            }
+        }
         if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
             self.cache.write(bus, pa, 4, v as u32, addr);
             return Ok(());
