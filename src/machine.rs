@@ -73,6 +73,10 @@ pub struct Watchdog {
     pub last: u64,
     /// Longest time between two edges, in cycles.
     pub longest: u64,
+    /// Cycle count at the edge that ended the longest pause, and the
+    /// PC there: where the program was when it strobed again.
+    pub longest_end: u64,
+    pub longest_pc: u32,
 }
 
 pub struct Machine {
@@ -1675,7 +1679,11 @@ impl Machine {
                 let now = self.cpu.cycles;
                 if edges != self.watchdog.edges {
                     if self.watchdog.edges != 0 || self.watchdog_always {
-                        self.watchdog.longest = self.watchdog.longest.max(now - self.watchdog.last);
+                        if now - self.watchdog.last > self.watchdog.longest {
+                            self.watchdog.longest = now - self.watchdog.last;
+                            self.watchdog.longest_end = now;
+                            self.watchdog.longest_pc = self.cpu.pc;
+                        }
                     }
                     self.watchdog.edges = edges;
                     self.watchdog.last = now;

@@ -803,7 +803,7 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         if w.edges == 0 {
             eprintln!("watchdog: never strobed");
         } else {
-            eprintln!("watchdog: {} edges on the strobe, longest pause {} ms, last edge {} ms before the end", w.edges, w.longest / ms, (m.cpu.cycles - w.last) / ms);
+            eprintln!("watchdog: {} edges on the strobe, longest pause {} ms (ended at {} ms, PC {:08x}), last edge {} ms before the end", w.edges, w.longest / ms, w.longest_end / ms, w.longest_pc, (m.cpu.cycles - w.last) / ms);
         }
     }
     if o.strict {
