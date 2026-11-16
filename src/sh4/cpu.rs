@@ -124,13 +124,13 @@ pub struct Cpu {
 
     pub fault: Option<String>,
     pub breakpoints: Vec<u32>,
-    /// Ring buffer of recently executed PCs (for post-mortem traces).
     /// A physical range [from, to) whose stores by the CPU are noted in
     /// store_log as (PC, address, value, size): what wrote over
     /// something, when nothing else says.  The log keeps the last few
     /// thousand.
     pub store_watch: Option<(u32, u32)>,
     pub store_log: Vec<(u32, u32, u32, u32)>,
+    /// Ring buffer of recently executed PCs (for post-mortem traces).
     pub pc_hist: Vec<u32>,
     pub pc_hist_pos: usize,
     pub trace_exceptions: bool,
@@ -369,7 +369,7 @@ impl Cpu {
         if self.store_log.len() >= 8192 {
             self.store_log.drain(..4096);
         }
-        self.store_log.push((self.pc, addr, v, size));
+        self.store_log.push((self.insn_pc, addr, v, size));
     }
 
     #[inline(always)]
@@ -401,7 +401,7 @@ impl Cpu {
         }
         let pa = self.translate(addr, Access::Write)?;
         if let Some((from, to)) = self.store_watch {
-            if pa & 0x1fff_ffff >= from && pa & 0x1fff_ffff < to {
+            if (pa & 0x1fff_ffff) + 2 > from && pa & 0x1fff_ffff < to {
                 self.note_store(addr, v as u32, 2);
             }
         }
@@ -423,7 +423,7 @@ impl Cpu {
         }
         let pa = self.translate(addr, Access::Write)?;
         if let Some((from, to)) = self.store_watch {
-            if pa & 0x1fff_ffff >= from && pa & 0x1fff_ffff < to {
+            if (pa & 0x1fff_ffff) + 4 > from && pa & 0x1fff_ffff < to {
                 self.note_store(addr, v, 4);
             }
         }
