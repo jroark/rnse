@@ -2854,3 +2854,66 @@ fn modern_builtins() {
     assert_eq!(latest(&reboot),location);
     assert_eq!(m.resets,0);
 }
+
+/// The DVD player (`sdk/examples/dvd`) as a unit starts it: the stock
+/// software starts the SD loader from the disc, the loader the player
+/// from the card (DVD.BIN), CD EJECT takes the loader's disc out (the
+/// player says it is no DVD-Video disc), a DVD goes in, SELECT plays
+/// its first title with the caches modelled, and RETURN held goes back
+/// to the loader.  Needs `RNSE_DVD` as well (`sdk/tests/check-dvd.sh`
+/// makes one, and `tests/dvd.rs` has the player's own tests, which need
+/// no firmware).
+#[test]
+fn dvd_player_from_the_sd_loader() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let Some(dvd) = std::env::var_os("RNSE_DVD") else { return };
+    let dvd = std::fs::read(dvd).expect("RNSE_DVD is not readable");
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "dvd").is_none() { return }
+    let player = std::fs::read(sdk.join("out/dvd-192.bin")).unwrap();
+    let flash = m.board.flash.clone();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    let card = rnse::fat::card("DVD", &[rnse::fat::Entry::file("DVD.BIN", player)], None).unwrap();
+    let at = m.console.len();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let started = until(&mut m, at, "rnse sdk: dvd", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    until(&mut m, started, "NOT A DVD-VIDEO DISC", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[started..])));
+    // The loader's disc out, and the DVD in.
+    assert!(m.panel_key("CD_EJECT", true));
+    assert_eq!(m.run(300 * ms), Stop::Budget);
+    assert!(m.panel_key("CD_EJECT", false));
+    assert_eq!(m.run(8000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.atapi().image.is_none(), "{}: the loader's disc was not ejected", name);
+    let at = m.console.len();
+    m.atapi().insert(Some(dvd));
+    until(&mut m, at, "READING THE DISC", 40).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    assert_eq!(m.run(3000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    assert!(m.panel_key("SELECT", true));
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    assert!(m.panel_key("SELECT", false));
+    assert_eq!(m.run(5000 * ms), Stop::Budget, "{}: {:?}", name, m.cpu.fault);
+    let (_, _, rgb) = m.render();
+    let colour = rgb.chunks(3).filter(|p| {
+        let (r, g, b) = (p[0] as i32, p[1] as i32, p[2] as i32);
+        (r - g).abs() > 40 || (g - b).abs() > 40 || (r - b).abs() > 40
+    }).count();
+    let text = String::from_utf8_lossy(&m.console[at..]).into_owned();
+    assert!(colour > 20_000, "{}: {} colourful pixels: {}", name, colour, text);
+    assert!(text.contains("fps*10"), "{}: {}", name, text);
+    // RETURN held: the player stops its sound and puts the caches back,
+    // and the loader is there again.
+    let at = m.console.len();
+    assert!(m.panel_key("RETURN", true));
+    assert_eq!(m.run(2600 * ms), Stop::Budget);
+    assert!(m.panel_key("RETURN", false));
+    until(&mut m, at, "TEST ENDED BY HOLDING RETURN", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    let text = String::from_utf8_lossy(&m.console[started..]).into_owned();
+    assert!(!text.contains("unexpected"), "{}: {}", name, text);
+    assert_eq!(m.board.flash, flash, "{}", name);
+    let cache = &m.cpu.cache.trouble;
+    assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
+}
