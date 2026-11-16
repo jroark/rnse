@@ -32,3 +32,6 @@ __pycache__/
 /quake/out/
 *.pak
 *.PAK
+/sdbridge/work/
+/sdbridge/out/
+*.UF2
