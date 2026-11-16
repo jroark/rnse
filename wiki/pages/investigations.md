@@ -60,10 +60,3 @@ What has been found:
 The [modern 192 interface](/custom-firmware/#built-on-it) already has an
 experimental client for a real module, built to dial and answer through those same
 commands.
-
-## Linux on the 192
-
-An early experiment: a Linux kernel and a tiny init, loaded from an SD card by an SDK
-program, with a console on the Coral graphics chip and the faceplate's keys as input.
-It boots in the emulator, keeps the watchdog fed and still honours eject and the
-two-second RETURN. It has not been run on the unit yet.
