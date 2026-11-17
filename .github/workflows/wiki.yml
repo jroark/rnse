@@ -1,0 +1,83 @@
+# Build rns-e.com (the wiki and the browser emulator, wiki/build.sh) and
+# publish it (wiki/deploy.sh) when what it is made of changes on main, or
+# by hand (Actions → Deploy rns-e.com → Run workflow).
+#
+# No AWS keys are stored: the job signs in with GitHub's OpenID Connect
+# token to an IAM role that trusts only this repository's main branch.
+# The repository's Actions variables say where to:
+#   AWS_ROLE_ARN       the role to assume
+#   AWS_REGION         the bucket's region
+#   WIKI_BUCKET        the S3 bucket behind the site
+#   WIKI_DISTRIBUTION  the CloudFront distribution in front of it
+# The role needs s3:ListBucket on the bucket, s3:GetObject, PutObject and
+# DeleteObject on its objects, and cloudfront:CreateInvalidation on the
+# distribution.  Nothing else.
+name: Deploy rns-e.com
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - wiki/**
+      - web/**
+      - tools/wiki.py
+      - src/**
+      - assets/**
+      - docs/*.png
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/wiki.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+# One deployment at a time; a newer one waits for the one under way.
+concurrency:
+  group: wiki-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # The OIDC role trusts main only; a run from another branch would fail
+    # to sign in, so it does not try.
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Check the settings
+        env:
+          ROLE: ${{ vars.AWS_ROLE_ARN }}
+          REGION: ${{ vars.AWS_REGION }}
+          BUCKET: ${{ vars.WIKI_BUCKET }}
+          DISTRIBUTION: ${{ vars.WIKI_DISTRIBUTION }}
+        run: |
+          missing=""
+          [ -n "$ROLE" ] || missing="$missing AWS_ROLE_ARN"
+          [ -n "$REGION" ] || missing="$missing AWS_REGION"
+          [ -n "$BUCKET" ] || missing="$missing WIKI_BUCKET"
+          [ -n "$DISTRIBUTION" ] || missing="$missing WIKI_DISTRIBUTION"
+          if [ -n "$missing" ]; then
+            echo "::error::Set these repository variables (Settings → Secrets and variables → Actions → Variables):$missing"
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Rust with the WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Build the site
+        run: sh wiki/build.sh
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+          role-session-name: rnse-wiki-${{ github.run_id }}
+
+      - name: Publish
+        env:
+          BUCKET: ${{ vars.WIKI_BUCKET }}
+          DISTRIBUTION: ${{ vars.WIKI_DISTRIBUTION }}
+        run: sh wiki/deploy.sh

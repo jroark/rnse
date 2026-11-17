@@ -4,6 +4,8 @@
 #   AWS_PROFILE=... BUCKET=name DISTRIBUTION=id wiki/deploy.sh
 # The bucket is made to match the site: files no longer in it are deleted.
 # Nothing that looks like firmware, a disc or a card image ever goes up.
+# .github/workflows/wiki.yml runs this on pushes to main (no stored keys:
+# an IAM role that trusts the repository's main branch; see the workflow).
 set -e
 cd "$(dirname "$0")/../target/wiki/site"
 : "${BUCKET:?name of the bucket}" "${DISTRIBUTION:?id of the CloudFront distribution}"
