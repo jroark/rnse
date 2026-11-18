@@ -3223,6 +3223,72 @@ fn mac_runs_from_an_sd_card() {
     assert_eq!((cache.stale_fetches, cache.dirty_discarded), (0, 0), "{}: {:?}", name, cache);
 }
 
+/// The slot benchmark (`sdk/examples/linkbench`) as it was run on a unit
+/// on 2026-11-16: the SD loader started by the stock software, a card
+/// with LINKTEST.BIN in the first slot (there the RP2040 bridge) and the
+/// benchmark as LINKBENC.BIN in the second.  The stock way runs first,
+/// then the benchmark's own card processor program takes over from the
+/// stock one with its pins (which tests/linkbench.rs, with no stock
+/// software, never does).
+#[test]
+fn link_benchmark_from_the_sd_loader() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "linkbench").is_none() { return }
+    let bench = std::fs::read(sdk.join("out/linkbench-192.bin")).unwrap();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    // LINKTEST.BIN as tools/linktest.py writes it.
+    let file: Vec<u8> = (0..(2u32 << 20) / 4).flat_map(|j| {
+        let mut x = j.wrapping_add(1).wrapping_mul(0x9e37_79b1);
+        x ^= x >> 16;
+        x = x.wrapping_mul(0x85eb_ca6b);
+        x ^= x >> 13;
+        x.to_be_bytes()
+    }).collect();
+    let link = rnse::fat::card("LINK", &[rnse::fat::Entry::file("LINKTEST.BIN", file)], None).unwrap();
+    // An old card, as the 32 MB one tried on a unit: no answer to CMD8,
+    // busy for a few rounds of ACMD41.
+    m.board.media.old_cards = true;
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(link).unwrap()));
+    m.board.media.old_cards = false;
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    let card = rnse::fat::card("RNSE", &[rnse::fat::Entry::file("LINKBENC.BIN", bench.clone())], None).unwrap();
+    let at = m.console.len();
+    // The only program on the card: the loader starts it by itself.
+    assert!(m.insert_card(1, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let started = until(&mut m, at, "rnse sdk: linkbench", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    until(&mut m, started, "DONE.", 400).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[started..])));
+    let text = String::from_utf8_lossy(&m.console[started..]).into_owned();
+    println!("{}", text);
+    assert!(text.contains("SLOT 1, STOCK PROGRAM"), "{}: {}", name, text);
+    assert!(text.contains("CARD STARTED") && !text.contains("OWN PROGRAM: STEP"), "{}: {}", name, text);
+    let summary = &text[text.find("LINKBENCH 1: KB/S").unwrap()..];
+    for line in summary.lines().filter(|l| l.contains(" KB/S ")) {
+        assert!(line.contains(" B0 T0 L0") && !line.contains("FAIL"), "{}: {}", name, line);
+    }
+    assert!(!summary.contains("NOT RUN"), "{}: {}", name, summary);
+    // The card in the other slot has the program: the results go through
+    // it (as through the RP2040 bridge, whose log has them), and the
+    // program waits for a new one there and runs it (a bridge gets it
+    // over USB from sdbridge/link.py; here the card is changed).
+    assert!(text.contains("SLOT 2: LINKBENC.BIN ") && text.contains("RESULTS THROUGH THE OTHER CARD"), "{}: {}", name, text);
+    until(&mut m, started, "WAITING FOR A NEW LINKBENC.BIN IN SLOT 2", 60).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[started..])));
+    assert_eq!(m.run(5000 * ms), Stop::Budget);
+    assert!(!String::from_utf8_lossy(&m.console[started..]).contains("A NEW ONE"));
+    let mut newer = bench;
+    newer.extend_from_slice(&[0; 4]);
+    let card = rnse::fat::card("RNSE", &[rnse::fat::Entry::file("LINKBENC.BIN", newer)], None).unwrap();
+    m.eject_card(1);
+    assert!(m.insert_card(1, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let again = until(&mut m, started, "A NEW ONE: STARTING IT", 60).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[started..])));
+    let again = until(&mut m, again, "rnse sdk: linkbench", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[again..])));
+    until(&mut m, again, "RESULTS THERE", 60).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[again..])));
+}
+
 /// The DVD player (`sdk/examples/dvd`) as a unit starts it: the stock
 /// software starts the SD loader from the disc, the loader the player
 /// from the card (DVD.BIN), CD EJECT takes the loader's disc out (the

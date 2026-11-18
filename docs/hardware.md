@@ -775,6 +775,68 @@ What is not modelled, or assumed:
   with its 20 us before each word; the same driver gets one in 0.72 ms
   from the emulator's card, which answers at once.  The card's start
   took 4.61 s there against 3.96 s here.
+* **A program of one's own must not count on HST.HAWE to hold its
+  writes to HDT.**  `sdk/examples/linkbench`'s first program sent words
+  to the host by `rep` with a parallel move into HDT through a pointer
+  (`*dp4 = r0h`), each write meant to wait until the host had read the
+  one before; the emulator holds such a write.  On a unit (2026-11-17)
+  the host got the first word written plainly and lost the repeated
+  ones, so the main processor gave up.  Which of the two (the repetition
+  or the pointer) does not wait there is not known.  Plain writes
+  (`*0x3806 = r0l`) after polling HST bit 1 work (the program since,
+  like `report` and `sdk/src/pcm.c`'s reads); the model still holds
+  every write.
+* **CMD12 leaves a word behind.**  When a multiple-block read (CMD18) is
+  stopped, the card has already begun its next block, and with no
+  buffer transfer set up one word of it stays in the card interface's
+  data register (0x3810), with SDCTL bit 0 ("a word there") and error
+  bit 5 set (status 8020).  The next buffer transfer starts with that
+  word, so every following sector comes one 16-bit word late
+  (`linkbench` on a unit, 2026-11-17: `1B06640C` where `640CA17E` was
+  due, at the start of every command).  What takes it was tried
+  on the unit (`linkbench`'s "stray word" lines, 2026-11-17): reading
+  the data register clears bit 0 and leaves the word for the next
+  transfer; the interface's reset (SDCTL bit 8) does the same; a buffer
+  transfer of one word into spare memory takes it.  So a program runs
+  one-word transfers while bit 0 is set before it sets up a read
+  (`linkbench`'s "drain"), and never reads the data register for it.
+  The model does all of this (`Sd::stray`).  SDCTL read `0C07` there
+  with the word waiting (bits 0-2), the error bit 5 already gone,
+  where the model keeps it (`8C27`).  The stock program never uses CMD18.
+* **The response register (0x3815) goes round.**  Reads give the last
+  response's words, 3 of a short one or 8 of a long one (bit 6 of the
+  command register), round and round from where the last read left
+  off, and the place carries over into the next response, also a
+  command's that got none.  A program that read 8 words of every short
+  response (`linkbench` on a unit, 2026-11-18) got ACMD41's answer
+  `FF80 00FF 3F00 FF80 ...`: a word late, a busy card's OCR read as
+  ready.  The stock program reads exactly 3 or 8 and never sees it.
+  Something puts the place back to the first word: after the setting
+  stored with no command before CMD2 (or after CMD2's long answer:
+  which is not known) CMD3's answer came out in place.  The model takes
+  it to be the setting (`Sd::rpr_at`).
+* **SDCTL bit 2, the interrupts, and ACMD41's answer** (measured on a
+  unit, 2026-11-18, `linkbench` reading the interrupts that came and
+  SDCTL after each command of a 32 MB card's start).  Interrupt 10
+  (vector 0x238) comes for a good response, short (CMD55, CMD3) or long
+  (CMD2), and bit 2 goes up.  ACMD41's answer (R3: index and CRC fields
+  all ones, as the specification has it) raises none of 0-3, 6, 7, 10,
+  11, leaves bit 2 down and sets error flag 0x40 and bit 15 (`B842`);
+  its words are in the response register all the same.  Bit 2 is not
+  cleared by writing a 1 to it (3806 written back read 3806); it is
+  down after the card interface's setting has been written with no
+  command, after the 8 words of a long response have been read, and
+  after a command that got no answer; reading the 3 words of a short
+  one leaves it up.  So a program that polls bit 2 straight after
+  starting a command can see the last response's (`linkbench` got
+  CMD55's answer for ACMD41's), and a program that waits for interrupt
+  10 waits in vain for ACMD41: `linkbench` now ends the wait on
+  interrupt 10 or error flag 0x58.  How the stock program, which waits
+  for interrupt 10 with a timeout, gets ACMD41's answer is not known;
+  the model still gives R3 an interrupt, without which the stock
+  program's start does not get through.  The 32 MB card gave no
+  answer to `linkbench`'s CMD9 (the address from CMD3 right; CMD7 with
+  it then worked), which is not understood either.
 * **A word sent too soon after another is lost, by the program's own
   design.**  It takes the words of a message's head in its host
   interrupt (0x0230, into a ring of 32 words at 0x0a64), but the words
