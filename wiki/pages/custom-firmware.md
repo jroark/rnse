@@ -41,8 +41,8 @@ about 40 s before it starts the program again.
 
 ## The rules
 
-After the [eject incident](/reverse-engineering/#when-it-went-wrong), every program
-meant for a real unit follows three rules:
+Every program meant for a real unit follows three rules, so that the unit and the
+disc in it can always be got back:
 
 1. **Physical ejection always works.** Every program keeps polling the faceplate
    and answers the display/eject key on normal screens, error screens and during
@@ -131,6 +131,45 @@ run, remove, reinstall stock) has been done on the bench unit.
   ([Investigations](/investigations/)).
 - **linuxboot**: a second stage that starts a Linux kernel and a BusyBox shell from
   the card ([Linux on the 192](/linux/)).
+
+## Games and other computers
+
+The same kit, with a small C library of its own, carries bigger programs. Each of
+these runs bare on the 192, with no operating system underneath, started from an SD
+card by the loader, and each answers the eject key and returns to the loader when
+RETURN is held. None of them carries anything that is not free to give away: the
+games' shareware data is fetched by their build scripts, and everything else (an
+operating system, a ROM, a game) comes from the person running it.
+
+![Doom on the unit](/media/doom.jpg "The shareware Doom on the bench unit's 400 × 240 screen, driven by the knob and the keys.")
+
+**Doom**: the shareware Doom 1.9, through doomgeneric (a port of Chocolate Doom),
+with the kit's drivers for the screen, the controls and its sound effects.
+
+![Quake on the unit](/media/quake.jpg "Quake on the bench unit, its sound at 44.1 kHz from a card processor.")
+
+**Quake**: id Software's GPL release of WinQuake with the shareware data. The SH-4's
+floating-point unit carries the renderer; the 18 MB of game data is read from the
+card as it is needed, while the sound plays through the other slot's card processor.
+
+![Windows Program Manager on the unit](/media/win311-program-manager.jpg "Windows 3.11 on a PC emulated by the 192's SH-4: the two knobs drive the mouse pointer.")
+
+**Windows 3.11**: a whole PC, Tiny386 (a 486 with VGA and an IDE disk) running
+MS-DOS and Windows from a disk image on the card. The image is made from one's own
+floppies; the knobs are the mouse.
+
+![The Macintosh Finder on the unit](/media/mac-finder.jpg "A Mac Plus (umac with the Musashi 68000) on the 192, its ROM patched for a 384 × 235 screen.")
+
+**A Mac Plus**: umac, a Macintosh Plus emulator, with the Mac's own ROM and System
+disk supplied from the card.
+
+![An NES game on the unit](/media/nes.jpg "The NES emulator (nofrendo) running a game image from the SD card.")
+
+**NES**: the nofrendo emulator with a browser for the game images on the card.
+
+There is also a **DVD player** (MPEG-1 and MPEG-2 video at half width, AC-3, MPEG and
+LPCM sound, titles and chapters from the disc's own tables), for discs without copy
+protection only.
 
 ## What this does not establish
 

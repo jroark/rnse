@@ -177,18 +177,6 @@ version and status, and the whole battery-backed memory. That memory image lets 
 emulator start with a unit's real settings, and it is private: it holds
 destinations and the car's details.
 
-## When it went wrong
-
-> On 15 November 2026 a double press of SETUP on the original custom loader invoked
-> an updater, which flashed a firmware **whose eject did not work**. The disc was
-> trapped behind the display, and the unit had to be taken apart to get it out.
-
-That incident turned into rules that every custom program here now follows:
-**physical eject always works**, on every screen and during every long operation.
-**Holding RETURN for two seconds** returns to the loader. And **no program offers a
-way to flash firmware** unless that is what was explicitly asked for.
-[Custom firmware](/custom-firmware/#the-rules) explains them.
-
 ## Measured or assumed
 
 The project keeps one distinction above all: what has been **measured on a unit**
@@ -203,4 +191,5 @@ seen on a bench, is all inference so far, and every page on it says so.
 | 12 Nov | SH-4 core and disc parser; the 192's update loader runs end to end; the main OS boots with a boot ROM stand-in; its debug log is surfaced; CAN, graphics, faceplate and a browser front end; the 193's loader and OS start |
 | 13 Nov | the 193 reads a map DVD and draws the map; GPS fix and a moving car; the WebAssembly build goes on rns-e.com; the SDK and a GDB stub; the cache model; audio CDs play |
 | 14 Nov | the boards photographed and their parts identified; the NEC card processors emulated, MP3 from SD on the 192; the first programs on a real unit; the report reads the boot ROM; drive, watchdog and clocks measured; programs from an SD card; the SDK's MP3 player heard on the unit |
-| 15 Nov | a program installed in flash and removed again; a base firmware with radio and MP3 player; a modern interface for the 192; a persistent SD test loader; the eject incident and the rules that came from it |
+| 15 Nov | a program installed in flash and removed again; a base firmware with radio and MP3 player; a modern interface for the 192; a persistent SD test loader |
+| 16–17 Nov | Doom, Quake, Windows 3.11, a Mac Plus and an NES emulator, each from an SD card; a DVD player; a benchmark of the SD slots; an SD bridge on a Raspberry Pi Pico, through which a phone projects Android Auto |

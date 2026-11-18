@@ -32,3 +32,11 @@ __pycache__/
 /quake/out/
 *.pak
 *.PAK
+/sdbridge/work/
+/sdbridge/out/
+*.UF2
+# Keys and certificates stay out of the repository.
+*.pem
+*.key
+*.crt
+*.der

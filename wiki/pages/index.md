@@ -41,5 +41,9 @@ on that unit.
   programs that read the unit's registers and boot ROM and send them back. See
   [Reverse engineering](/reverse-engineering/).
 - **Software of one's own** now runs on a real 192. It is started from a CD or an SD
-  card, or installed in flash, always with a way back to the stock software. See
-  [Custom firmware](/custom-firmware/).
+  card, or installed in flash, always with a way back to the stock software. Doom,
+  Quake, Windows 3.11, a Mac Plus and an NES emulator have run on the bench unit. See
+  [Custom firmware](/custom-firmware/#games-and-other-computers).
+- A small board in an SD slot could make a 192 an **Android Auto** head unit. On a
+  Raspberry Pi Pico, a phone already projects Android Auto over USB. See
+  [Investigations](/investigations/).
