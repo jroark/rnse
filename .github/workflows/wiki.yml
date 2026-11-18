@@ -1,6 +1,9 @@
 # Build rns-e.com (the wiki and the browser emulator, wiki/build.sh) and
-# publish it (wiki/deploy.sh) when what it is made of changes on main, or
-# by hand (Actions → Deploy rns-e.com → Run workflow).
+# publish it (wiki/deploy.sh) when the site itself changes on main: its
+# pages and media (wiki/), the emulator's page (web/) or the generator
+# (tools/wiki.py).  Changes to the emulator's code alone do not publish;
+# to put a new emulator on the site, run it by hand (Actions → Deploy
+# rns-e.com → Run workflow).
 #
 # No AWS keys are stored: the job signs in with GitHub's OpenID Connect
 # token to an IAM role that trusts only this repository's main branch.
@@ -21,12 +24,6 @@ on:
       - wiki/**
       - web/**
       - tools/wiki.py
-      - src/**
-      - assets/**
-      - docs/*.png
-      - Cargo.toml
-      - Cargo.lock
-      - .github/workflows/wiki.yml
   workflow_dispatch:
 
 permissions:
