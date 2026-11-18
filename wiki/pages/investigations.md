@@ -74,6 +74,62 @@ The phone side has run with a real phone, a Pixel, on the Pico:
 The head unit certificate the phone requires is not published here, and like firmware
 it never will be.
 
+### Building one
+
+![The bridge prototype on a Raspberry Pi Pico](/media/sdbridge-pico.jpg "The prototype: a Raspberry Pi Pico, three 100 Ω resistors in the signal lines to an SD card extension's ribbon, and a cut USB cable bringing 5 V to VBUS for the phone side.")
+
+Everything is off the shelf and soldered by hand; there is no board to order.
+
+| Part | Notes |
+|---|---|
+| Raspberry Pi Pico | any RP2040 board will do; the firmware is also built for a Waveshare RP2040-Zero, whose pins differ |
+| SD card extension cable | a card-shaped end on a ribbon. Its card end goes in the slot; the ribbon's far end is cut open and its wires soldered to the Pico |
+| 3 resistors, 100 Ω | in series in CLK, CMD and DAT0; ordinary ¼ W through-hole ones |
+| micro-USB OTG adapter | micro-USB (male) to USB-A (female), for the phone side |
+| 5 V supply, 1 A or more | for the phone side: a USB charger or power bank; a cut USB cable works |
+| USB serial adapter (3.3 V) | optional, to read the firmware's log |
+
+![Schematic of the bridge on a Raspberry Pi Pico](/media/sdbridge-schematic.svg "The wiring. GP2, GP3 and GP4 reach the card end's CLK, CMD and DAT0 through 100 Ω each; the grounds are joined; the card end's VDD and DAT1 to DAT3 stay unconnected.")
+
+| Pico pin | Signal | SD card end contact |
+|---|---|---|
+| 4 (GP2) | CLK, through 100 Ω | 5 |
+| 5 (GP3) | CMD, through 100 Ω | 2 |
+| 6 (GP4) | DAT0, through 100 Ω | 7 |
+| 3 (GND) | ground | 3 and 6 (VSS) |
+| none | VDD | 4: **not connected** |
+| none | DAT1, DAT2, DAT3 | 8, 9, 1: not connected |
+| 40 (VBUS), 38 (GND) | 5 V in, phone side only | none |
+| 1 (GP0) | the log's TX, to the adapter's RX, optional | none |
+
+On the card end, contact 1 is at the notched corner and the others follow in order:
+1 DAT3, 2 CMD, 3 VSS, 4 VDD, 5 CLK, 6 VSS, 7 DAT0, 8 DAT1, 9 DAT2. On the Pico,
+pin 1 is the corner next to the micro-USB socket; pins 1 to 20 run down that side and
+21 to 40 back up the other, so pin 40 is the other corner by the socket.
+
+Points that matter:
+
+- **The Pico never takes power from the slot.** The card end's VDD is left open: two
+  supplies joined would fight. Only the ground is shared.
+- **Power the Pico before the unit, and keep it powered while it is plugged in.** An
+  unpowered RP2040 takes current through its pins from a host that drives them; the
+  resistors limit that, and the current while both sides drive a line. At the slot's
+  16.9 MHz and with a short ribbon, 100 Ω costs nothing.
+- **One supply at a time.** With the card firmware the Pico is powered from its
+  micro-USB socket, from a computer that also shows its log. With the phone firmware the
+  socket belongs to the phone, through the OTG adapter and the phone's own USB-A to
+  USB-C cable, and the Pico is powered with 5 V on VBUS (pin 40, ground on pin 38),
+  which also feeds the phone's side of the cable.
+- **Keep the ribbon short**, with a ground wire beside CLK.
+- **The slot knows a card by its switch**, so the card end has to go in fully.
+- **Leave the display open** while the ribbon is in, and lay the cable clear of the
+  display's motor and the drive's opening.
+
+The firmware is built with the Raspberry Pi pico-sdk, and each part comes as a UF2 file:
+hold BOOTSEL while plugging the Pico into a computer and copy the file onto the drive
+that appears. On a Pico the board's LED shows the state by blinking: a short flash every
+2 s while it waits, steady once it is working, three short flashes after a failure.
+
 Still open: the Pico as a card in the slot, measured on the unit; writing to the
 card for the way back to the phone; the two halves joined; and on the 192, the
 decoder's hottest loops in hand-written code and the sound.
