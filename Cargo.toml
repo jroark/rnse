@@ -17,6 +17,13 @@ path = "src/bin/rnse.rs"
 
 [dependencies]
 
+# sdk/ is a member only for its tests (sdk/tests/emulated.rs):
+# cargo test --release -p rnse-sdk.
+[workspace]
+members = ["sdk"]
+# Its own crate, with its own profile and target/ (macos/build.sh).
+exclude = ["macos/bridge"]
+
 [profile.release]
 opt-level = 3
 debug = 1
