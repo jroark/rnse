@@ -20,7 +20,7 @@ path = "src/bin/rnse.rs"
 # sdk/ is a member only for its tests (sdk/tests/emulated.rs):
 # cargo test --release -p rnse-sdk.
 [workspace]
-members = ["sdk", "sdbridge", "ports"]
+members = ["sdk", "sdbridge", "ports", "linux"]
 # Its own crate, with its own profile and target/ (macos/build.sh).
 exclude = ["macos/bridge"]
 

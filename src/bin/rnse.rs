@@ -4,7 +4,7 @@ use rnse::sh4::cpu::Stop;
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse repack <disc.iso | LOADING.KWI> <dir> <out>   a copy of the disc with the\n                                       modules in <dir> (as extract writes\n                                       them) put in, checksums put right\n  rnse custom <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n                                       a copy of the disc with a program of\n                                       your own as that variant's loader,\n                                       and optionally another software index\n                                       (see docs/custom-firmware.md)\n  rnse firmware <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n               [--swap <swap.bin>] [--kernel <VMLINUX.BIN>]\n                                       a copy of the disc with a program of\n                                       the SDK in the operating system's\n                                       place: installed by the disc's own\n                                       loader, started by the boot ROM at\n                                       every start (192; see \"A program in\n                                       flash\" in docs/custom-firmware.md).\n                                       --swap: what a unit without software\n                                       runs from this disc in place of the\n                                       installation (sdk/examples/swap)\n                                       --kernel: a Linux kernel in the\n                                       application's place, for\n                                       sdk/examples/linuxboot as the program\n                                       (docs/linux.md; needs --swap)\n  rnse report <can-log> [--rom <out.bin>]
+        "usage:\n  rnse info <disc.iso | LOADING.KWI>\n  rnse extract <disc.iso | LOADING.KWI> <out-dir>\n  rnse repack <disc.iso | LOADING.KWI> <dir> <out>   a copy of the disc with the\n                                       modules in <dir> (as extract writes\n                                       them) put in, checksums put right\n  rnse custom <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n                                       a copy of the disc with a program of\n                                       your own as that variant's loader,\n                                       and optionally another software index\n                                       (see docs/custom-firmware.md)\n  rnse firmware <disc.iso> <variant> <program.bin> <out.iso> [--index NNNN]\n               [--swap <swap.bin>] [--kernel <VMLINUX.BIN>]\n                                       a copy of the disc with a program of\n                                       the SDK in the operating system's\n                                       place: installed by the disc's own\n                                       loader, started by the boot ROM at\n                                       every start (192; see \"A program in\n                                       flash\" in docs/custom-firmware.md).\n                                       --swap: what a unit without software\n                                       runs from this disc in place of the\n                                       installation (sdk/examples/swap)\n                                       --kernel: a Linux kernel in the\n                                       application's place, for\n                                       linux/linuxboot as the program\n                                       (linux/docs/linux.md; needs --swap)\n  rnse report <can-log> [--rom <out.bin>]
                                        what sdk/examples/report sent from a
                                        unit: its registers, and its boot ROM
                                        into a file (candump logs and others)
@@ -154,7 +154,7 @@ fn firmware(path: &str, variant: &str, program: &str, out: &str, rest: &[String]
     if kernel.is_some() && swap.is_none() {
         // A unit whose Linux has been taken out must not install it again
         // from this disc: the guard is the only way out of it.
-        return Err("firmware: --kernel wants --swap too (docs/linux.md, \"Linux in flash\")".into());
+        return Err("firmware: --kernel wants --swap too (linux/docs/linux.md, \"Linux in flash\")".into());
     }
     let mut new = fw::firmware_disc_with_kernel(&image, &variant.to_uppercase(), &payload, swap.as_deref(), kernel.as_deref())?;
     if let Some(index) = &index {
@@ -164,13 +164,13 @@ fn firmware(path: &str, variant: &str, program: &str, out: &str, rest: &[String]
     std::fs::write(out, new)?;
     println!("wrote {}: an update disc whose operating system is the program.", out);
     if let Some(k) = &kernel {
-        println!("The application's place holds a Linux kernel of {} bytes for the program to start (docs/linux.md).", k.len());
+        println!("The application's place holds a Linux kernel of {} bytes for the program to start (linux/docs/linux.md).", k.len());
     }
     println!("The disc's loader installs it; the boot ROM then starts the program at every start, and the stock");
     if kernel.is_some() {
         println!("software is gone until the guard takes Linux out: switch the unit off and on four times before");
         println!("the GUI has been up for ten seconds, with the stock disc in the drive.  Read \"Linux in flash\" in");
-        println!("docs/linux.md first.");
+        println!("linux/docs/linux.md first.");
     } else {
         println!("software is gone until an update disc puts it back (the program's firmware_remove, then a restart");
         println!("with the stock disc in the drive).  Read \"A program in flash\" in docs/custom-firmware.md first.");
