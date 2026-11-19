@@ -9,11 +9,11 @@ The stock firmware is involved only in the initial disc launch.
 Build from the isolated worktree:
 
 ```sh
-PATH="$PWD/tools/sh4-docker:$PATH" sh tools/build-sd-loader.sh /path/to/stock.iso 0380
+PATH="$PWD/sdk/tools/sh4-docker:$PATH" sh sdk/tools/build-sd-loader.sh /path/to/stock.iso 0380
 ```
 
 Use a disc index higher than the installed index. Output is
-`out/sd-loader/sdboot.iso`, sample `RNSE.BIN`, `disc-info.txt`, and
+`sdk/out/sd-loader/sdboot.iso`, sample `RNSE.BIN`, `disc-info.txt`, and
 `SHA256SUMS`. Burn the ISO as a disc image. Only the V222 loader is replaced;
 this is not a 193 loader. The sample completes with status 17.
 
@@ -21,7 +21,7 @@ Build tests with this worktree's SDK and copy the resulting binary to the
 card as `RNSE.BIN`:
 
 ```sh
-PATH="$PWD/tools/sh4-docker:$PATH" sdk/build.sh 192 returntest
+PATH="$PWD/sdk/tools/sh4-docker:$PATH" sdk/build.sh 192 returntest
 cp sdk/out/returntest-192.bin /Volumes/YOUR_CARD/RNSE.BIN
 ```
 
@@ -57,15 +57,15 @@ loader, menu and all.  So: the new `sdboot-192.bin` on the card as
 `RNSE.BIN`, the tests under other names:
 
 ```sh
-PATH="$PWD/tools/sh4-docker:$PATH" sdk/build.sh 192 sdboot
+PATH="$PWD/sdk/tools/sh4-docker:$PATH" sdk/build.sh 192 sdboot
 cp sdk/out/sdboot-192.bin /Volumes/YOUR_CARD/RNSE.BIN
-PATH="$PWD/tools/sh4-docker:$PATH" sdk/build.sh 192 returntest
-PATH="$PWD/tools/sh4-docker:$PATH" sdk/build.sh 192 returntest2
+PATH="$PWD/sdk/tools/sh4-docker:$PATH" sdk/build.sh 192 returntest
+PATH="$PWD/sdk/tools/sh4-docker:$PATH" sdk/build.sh 192 returntest2
 cp sdk/out/returntest-192.bin /Volumes/YOUR_CARD/TEST17.BIN
 cp sdk/out/returntest2-192.bin /Volumes/YOUR_CARD/SECOND.BIN
 ```
 
-`tests/disc.rs`, `sd_loader_offers_a_menu_of_programs`, checks the menu,
+`sdk/tests/emulated.rs`, `sd_loader_offers_a_menu_of_programs`, checks the menu,
 the return to it, RETURN, and a loader chosen from the menu taking over.
 
 At the loader, a card already present runs once. Otherwise insert a card;
@@ -96,6 +96,16 @@ cache maintenance, interrupts masked, timers and DMA stopped, and watchdog
 service during copying. The SDK startup runs again and consumes the return
 status without going through the ROM reset entry.
 
+A program goes back to the loader only between two exchanges with a
+card processor: RETURN held during a read takes effect at the read's
+end (`sd_busy` in `sdk/src/sd.c`, `follow_return` in `sdk/src/cd.c`).
+The loader then takes the card as the program left it (`sd_attach`);
+a card that has gone in since is started the stock driver's way, on
+the processor's program without a reset (`sd_restart`), and only when
+that fails is the processor started anew (`sd_init`).  When all three
+fail the screen says what `sd_attach` and `sd_restart` answered above
+the load error; CAN records 0x7f8 carry them as items 4 and 6 (+ slot).
+
 Reserve `0x8c7c0000..0x8c800000` (including its uncached aliases) in all tests:
 control data starts at `0x8c7c0000`, the restore trampoline and parameters at
 `+0x1000` and `+0x1800`, the recovery stack ends at `0x8c7e0000`, and the
@@ -106,8 +116,8 @@ respect this memory. Arbitrary hangs or memory corruption require a reset.
 ## Verification
 
 ```sh
-PATH="$PWD/tools/sh4-docker:$PATH" RNSE_DISC=/path/to/stock.iso \
-  cargo test --release --test disc sd_loader_returns_and_rearms_on_reinsertion -- --nocapture
+PATH="$PWD/sdk/tools/sh4-docker:$PATH" RNSE_DISC=/path/to/stock.iso \
+  cargo test --release -p rnse-sdk --test emulated sd_loader_returns_and_rearms_on_reinsertion -- --nocapture
 cargo test --release --lib
 ```
 
@@ -118,7 +128,7 @@ returns status 23. A second visible test, `returntest2`, displays
 "SECOND SD TEST" for five seconds before returning status 23:
 
 ```sh
-PATH="$PWD/tools/sh4-docker:$PATH" sdk/build.sh 192 returntest2
+PATH="$PWD/sdk/tools/sh4-docker:$PATH" sdk/build.sh 192 returntest2
 cp sdk/out/returntest2-192.bin /Volumes/YOUR_CARD/RNSE.BIN
 ```
 

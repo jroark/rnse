@@ -1,0 +1,19 @@
+/target
+out/
+# Firmware and anything derived from it stays out of the repository.
+/firmware/
+*.iso
+*.bin
+*.BIN
+*.KWI
+*.MOT
+*.img
+*.IMG
+*.RNA
+*.ROM
+*.rom
+# Keys and certificates stay out of the repository.
+*.pem
+*.key
+*.crt
+*.der

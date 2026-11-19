@@ -6,7 +6,7 @@
 PROGRAM.elf is the program as sdk/build.sh links it (sdk/out/NAME-192.elf).
 The function an address belongs to is the nearest text symbol at or below
 it, as `nm -n` lists them; NM defaults to sh4-linux-gnu-nm (with
-tools/sh4-docker on the PATH, the one in the container).  Samples outside
+sdk/tools/sh4-docker on the PATH, the one in the container).  Samples outside
 the ELF's symbols (the unit's own software, the boot ROM) are counted as
 "(elsewhere)".
 """

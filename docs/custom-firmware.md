@@ -153,7 +153,7 @@ card.
 
 Before direct return was added, the original restart-based path was tested
 in the emulator in both slots, with the stock software and
-a unit's boot ROM at both ends (`tests/disc.rs`,
+a unit's boot ROM at both ends (`sdk/tests/emulated.rs`,
 `programs_come_from_an_sd_card`).  On a unit (a North American 192
 with software 0371, a 32 MB card formatted FAT16 by macOS, in either
 slot) it runs: the card processor takes its program, the card starts in
@@ -187,8 +187,54 @@ standard and high-capacity cards so, in 40 ms.  On the unit it read
 that 512 MB card: 30 ms for the card, 50 ms for the file, and a round
 of that restart-based loop is 56.8 s with it, round after round.  It wants the card
 in its slot before the disc goes in, so that the stock software has
-started it.  Three
-things a unit taught on the way:
+started it.
+
+That left the 512 MB card unreadable once it had been out of its slot,
+or after Quake: the persistent loader could not attach it, and
+`sd_init` answered -7.  What was wrong showed when the loader put the
+words of a failed start on the screen: the card is of version 2 and
+answers CMD8, the first CMD55 and the first ACMD41 (busy, as cards are
+at first), and then nothing more.  The notes above, "CMD8 unanswered",
+were mistaken.  Between two rounds of ACMD41 the driver set the card
+interface's register 0x3814 again, which is what the stock driver does
+for a card that leaves CMD8 unanswered (the 32 MB card); for one that
+answers it the stock driver does not, and asks ACMD41 a second time
+without CMD55 instead (a card takes that for an illegal command and
+does not answer), every step 150 ms apart.  The emulator's cards were
+ready at their first ACMD41, so that loop had never run in it; they are
+busy for three rounds now, as real ones are.  The driver follows that
+loop since.  The stock software also never resets a card processor for
+a card that goes in while it runs; it starts the card on the program as
+it runs, and says `0200` to the processor when a card goes
+([hardware.md](hardware.md), "Messages").  `sd_restart` and
+`sd_card_out` do that, and `sdboot` opens a card by `sd_attach` (not
+for a card it saw go in), then `sd_restart`, then `sd_init`; when all
+fail it shows each answer and the first 48 words of the restart (CAN:
+items 4, 6, 8 + slot and 0x40 on).  A program's return to the loader
+waits for the end of an exchange with the processor (`sd_busy`); in the
+emulator the processor's program drops half a message by itself, so
+this is a precaution.  Not yet run on a unit.
+
+None of that was what stopped the 512 MB card, as `linkbench` showed
+on the unit the same day (its card tests, run with the RP2040 bridge in
+the other slot carrying the program and the results:
+[sdbridge.md](sdbridge.md)).  With the words of `sd_init`'s exchange
+kept, the card went through its busy rounds and answered its last
+ACMD41 ready; what went unanswered was the CMD55 after that, the step
+"once more without the claim" that the driver asks of a standard card
+that answered CMD8.  A card that is ready has no application commands
+until it has an address, so it says nothing, and the driver gave up
+with -7.  The stock driver asks the same and gets the same silence,
+and then starts the card anew (CMD0, CMD1) and goes round again as for
+a card that left CMD8 unanswered, which the card takes; `sd_init` does
+that since, and started the card on the unit.  The emulator's card had
+answered CMD55 in any state, so the step never failed there; it answers
+nothing to CMD55 in the ready and identification states now.  (Bit 2 of
+the card interface's SDCTL, which `linkbench` found holding back the
+response interrupt, was not it: the installed program takes it down
+itself, by reading SDCTL after each response's words.)
+
+Three things a unit taught on the way:
 
 - **A card's start wants the stock driver's pace.**  That driver leaves
   150 ms between any two steps.  With the steps one behind the other
@@ -234,7 +280,7 @@ heard is the radio processor's business, which has the amplifier:
 same).  `sdk/examples/player` is a player made of the two with the
 faceplate's keys and knobs.  In the emulator it plays the test file's
 two tones out of the speaker at the right pitch on the right sides
-and the volume knob moves the amplifier (`tests/disc.rs`,
+and the volume knob moves the amplifier (`sdk/tests/emulated.rs`,
 `sdk_player_plays_an_mp3`).  Standard cards only.
 
 On a unit (the North American 192, the player from a 32 MB card, a
@@ -319,7 +365,7 @@ what to put in, and restarts the unit when a disc has gone in and is
 ready.  Always make a firmware disc with it.
 
 In the emulator, under a unit's boot ROM and with arbitrary RAM and the
-caches modelled, all of it runs (`tests/disc.rs`,
+caches modelled, all of it runs (`sdk/tests/emulated.rs`,
 `a_program_is_installed_in_flash_and_taken_out_again`,
 `a_firmware_disc_left_in_the_drive_does_not_install_again` and
 `a_program_in_flash_that_never_gets_going_takes_itself_out`): the
@@ -398,8 +444,8 @@ software may not do) and what `8a` is for are not known.
 
 You need an SH-4 GCC that can produce big-endian code without its
 libraries; Debian's and Ubuntu's `gcc-sh4-linux-gnu` will do.  Where
-there is none to install (macOS), `tools/sh4-docker` runs that one in a
-container: `PATH=$PWD/tools/sh4-docker:$PATH sdk/build.sh 192`.
+there is none to install (macOS), `sdk/tools/sh4-docker` runs that one in a
+container: `PATH=$PWD/sdk/tools/sh4-docker:$PATH sdk/build.sh 192`.
 
     sdk/build.sh 193                 # or 192; writes sdk/out/hello-193.bin
     rnse custom disc.iso V574 sdk/out/hello-193.bin hello.iso
@@ -699,7 +745,7 @@ its ends read; it stays open for the disc change, whose CD EJECT is
 behind it, and closes after), and at the end the watchdog: the
 strobe stops and records follow every 10 ms until the unit is reset,
 which is how long the watchdog waits.  It writes nothing anywhere and ends in a restart, so the disc
-can be used again.  `tests/disc.rs` runs it against the emulator's own
+can be used again.  `sdk/tests/emulated.rs` runs it against the emulator's own
 models; the header of `main.c` has the records.
 
 ### What it would settle
@@ -718,7 +764,7 @@ runs in the emulator (`docs/boot-rom.md`, "The real one, in the
 emulator").
 
 In the emulator the program reads back the emulator's own stand-ins
-(`tests/disc.rs`, `report_program_sends_the_boot_rom`), which proves
+(`sdk/tests/emulated.rs`, `report_program_sends_the_boot_rom`), which proves
 the plumbing and nothing about a unit.  The registers of the 192's
 list are in the SH7750R's manual and reading them does nothing; that
 the processor in the package is one where that holds is likely and
@@ -995,7 +1041,7 @@ Not tried on the unit: receiving on CAN.
 
 ## What this does and does not establish
 
-Established, by the tests in `tests/disc.rs`: the examples build and
+Established, by the tests in `sdk/tests/emulated.rs`: the examples build and
 behave as written on both emulated units; and the stock software of
 both units, European and North American, running in the emulator,
 takes a disc made by `rnse custom` with a higher index for an update,

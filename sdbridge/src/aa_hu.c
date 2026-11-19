@@ -162,12 +162,75 @@ int aa_hu_discovery(uint8_t *out, uint32_t cap)
     return b.err ? -1 : (int)b.len;
 }
 
-static void focus(struct aa_hu *h)
+static void focus_as(struct aa_hu *h, int mode)
 {
     struct aap_pb b;
     queue(h, AA_CH_VIDEO, 0, AA_VIDEO_FOCUS_INDICATION, &b);
-    aap_pb_varint(&b, 1, 1);  /* focused */
+    aap_pb_varint(&b, 1, (uint64_t)mode);  /* 1 focused (projected), 2 not (the head unit's own) */
     aap_pb_varint(&b, 2, 0);  /* not unrequested */
+    done(h, &b);
+}
+
+static void focus(struct aa_hu *h)
+{
+    focus_as(h, 1);
+}
+
+void aa_hu_ask_key_frame(struct aa_hu *h)
+{
+    LOG("asking for a key frame: video focus away and back\n");
+    focus_as(h, 2);
+    focus_as(h, 1);
+}
+
+/* An input event: the timestamp (microseconds), then the event as field
+ * 4 (buttons) or 6 (relative input), each a list of one, as aasdk's
+ * InputEventIndication, ButtonEvents/ButtonEvent (scan code 1, pressed
+ * 2, meta 3, long press 4) and RelativeInputEvents/RelativeInputEvent
+ * (scan code 1, delta 2) have them. */
+static void input_event(struct aa_hu *h, uint64_t us, int field, const uint8_t *event, uint32_t n)
+{
+    struct aap_pb b, list;
+    uint8_t buf[32];
+    aap_pb_init(&list, buf, sizeof buf);
+    aap_pb_bytes(&list, 1, event, n);
+    queue(h, AA_CH_INPUT, 0, AA_INPUT_EVENT, &b);
+    aap_pb_varint(&b, 1, us);
+    aap_pb_bytes(&b, (uint32_t)field, buf, list.len);
+    done(h, &b);
+}
+
+void aa_hu_key(struct aa_hu *h, uint64_t us, uint32_t code, int pressed)
+{
+    struct aap_pb e;
+    uint8_t ev[16];
+    aap_pb_init(&e, ev, sizeof ev);
+    aap_pb_varint(&e, 1, code);
+    aap_pb_varint(&e, 2, pressed ? 1 : 0);
+    aap_pb_varint(&e, 3, 0);
+    aap_pb_varint(&e, 4, 0);
+    input_event(h, us, 4, ev, e.len);
+    h->inputs++;
+}
+
+void aa_hu_rotary(struct aa_hu *h, uint64_t us, int32_t delta)
+{
+    struct aap_pb e;
+    uint8_t ev[24];
+    aap_pb_init(&e, ev, sizeof ev);
+    aap_pb_varint(&e, 1, 65536);                       /* the rotary controller */
+    aap_pb_varint(&e, 2, (uint64_t)(int64_t)delta);    /* int32: a negative one as ten bytes */
+    input_event(h, us, 6, ev, e.len);
+    h->inputs++;
+}
+
+void aa_hu_video_ack(struct aa_hu *h)
+{
+    struct aap_pb b;
+    h->v.acks++;
+    queue(h, AA_CH_VIDEO, 0, AA_AV_ACK, &b);
+    aap_pb_varint(&b, 1, (uint64_t)(int64_t)h->session);
+    aap_pb_varint(&b, 2, 1);
     done(h, &b);
 }
 
@@ -446,6 +509,8 @@ int aa_hu_media_frame(struct aa_hu *h, uint8_t channel, uint8_t flags, const uin
             v->messages++;
             if (len > v->largest)
                 v->largest = len;
+            if (h->defer_video_acks)
+                return 1;
             v->acks++;
         } else {
             h->audio_messages++;

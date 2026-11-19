@@ -30,7 +30,7 @@ with zipfile.ZipFile(OUT / 'nes-can-hardware.zip', 'w', zipfile.ZIP_DEFLATED) as
 
 sources = ('sdk/src', 'sdk/include', 'sdk/third_party', 'sdk/examples/nes',
            'sdk/examples/nesboot', 'sdk/link.ld', 'sdk/build.sh', 'sdk/nes-build.sh',
-           'tools/sh4-docker', 'tools/package-nes.py', 'tests/nes', 'docs/nes.md')
+           'sdk/tools/sh4-docker', 'tools/package-nes.py', 'tests/nes', 'docs/nes.md')
 with tarfile.open(OUT / 'nes-source.tar.gz', 'w:gz') as archive:
     for name in sources:
         path = ROOT / name

@@ -1,6 +1,6 @@
 title: Investigations
 order: 80
-summary: Open questions under way: whether a 192 can be an Android Auto head unit with a small board in an SD slot, and the factory telephone module.
+summary: Work under way: Android Auto on a 192 through a small board in an SD slot (now showing a phone's Maps on the unit), and the factory telephone module.
 ---
 Not everything is finished. These are the investigations in progress, with what has
 been measured kept apart from what is assumed.
@@ -45,9 +45,17 @@ How fast can a slot go? The stock route, the unit's own card program with a mess
 for every sector, measured **297 KB/s** on the bench unit. That is not enough for
 video and sound together. A benchmark, **linkbench**, loads a program of its own
 into the card processor that runs the card itself and streams sectors without a
-message each. In the emulator it reaches the card interface's modelled rate, about
-**2.1 MB/s** at the stock clock, with every word checked against a test file. The
-unit's own figure is still to be taken.
+message each, every word checked against a test file. On the bench unit, with a real
+card and with the bridge below, it reads **about 2 MB/s** in long multi-block reads
+at the stock card clock and 2.6 MB/s at a faster one, every word right: seven times
+the stock route, and more than Android Auto's video needs.
+
+Getting there took two days of runs on the unit, because the card interface does not
+behave as its manual suggests: the response register is a small ring whose read
+position carries over from one answer to the next, the response interrupt fires only
+on a rising flag, and a read stopped early leaves a stray word behind that spoils the
+next one. Each was found on the unit, then modelled in the emulator, which now
+reproduces the unit's screens.
 
 ### A bridge on a Raspberry Pi Pico
 
@@ -73,6 +81,38 @@ The phone side has run with a real phone, a Pixel, on the Pico:
 
 The head unit certificate the phone requires is not published here, and like firmware
 it never will be.
+
+### Android Auto on the unit
+
+![Google Maps from a phone on the 192's display](/media/android-auto-maps.jpg "Android Auto on the bench 192, 18 November: Google Maps from a Pixel, through the bridge's ribbon in slot 2, decoded by the 192's own processor and shown on its own display. Street names blurred.")
+
+On 18 November the two halves were joined, and **a phone's Android Auto ran on the
+192's own display**. The bridge, one RP2040, is at once the phone's USB host and a
+card in slot 2. It decrypts the phone's video and serves it to the slot as a file
+that grows as it is read: a window onto the stream. A picture is acknowledged to the
+phone only once the 192 has read its last block, so the phone sends at the 192's pace.
+
+On the 192, a viewer started from the SD loader takes the slot over with the card
+processor program from linkbench, reads the pictures in long runs, decodes each one
+with the same H.264 decoder as h264bench, and shows it at half size on the 400 × 240
+panel, in 256 colours.
+
+- Google Maps came through at **10 to 13 pictures a second**, the bridge sending
+  120 to 150 KB/s and spending about 30 % of its time decrypting.
+- **The unit's knob and keys drive the phone.** The bridge's card has no write path
+  yet, so the viewer sends input by which sector it reads: the bridge turns each into
+  Android Auto's input event. The select knob is the rotary controller and its push
+  ENTER, RETURN is BACK, NAV is home, MEDIA, NEXT and PREV are the media keys, and the
+  corner keys move. Holding RETURN, the display key and eject stay the unit's own.
+- Its first pictures were grey with a lilac cast, and the unit reset after a few of
+  them. Both were found from the unit's screen and fixed: the colour conversion's
+  centre was off and the palette was rebuilt, and a 48-byte buffer overflowed the stack.
+
+![Android Auto's split screen on the 192](/media/android-auto-split.jpg "The same evening: Android Auto's split screen, media on the left and directions on the right, with the bridge on top of the unit, its ribbon to slot 2 and the phone's USB cable behind it. Street names blurred.")
+
+It is a picture and a knob for now: there is **no sound yet**. Turning the knob
+shows its effect a picture or two later, because each turn travels to the phone and
+comes back as video.
 
 ### Building one
 
@@ -130,9 +170,10 @@ hold BOOTSEL while plugging the Pico into a computer and copy the file onto the 
 that appears. On a Pico the board's LED shows the state by blinking: a short flash every
 2 s while it waits, steady once it is working, three short flashes after a failure.
 
-Still open: the Pico as a card in the slot, measured on the unit; writing to the
-card for the way back to the phone; the two halves joined; and on the 192, the
-decoder's hottest loops in hand-written code and the sound.
+Still open: the sound (the phone's music and voice through a card processor);
+drawing faster, which now costs nearly as much as decoding; the decoder's hottest
+loops in hand-written code; and a board that fits in the car in place of a Pico on
+a ribbon.
 
 ## The factory telephone module
 
