@@ -1,0 +1,32 @@
+# Builds the programs with Debian's SH-4 GCC and runs the tests that need
+# no firmware.  The end-to-end tests need an update disc, which is never
+# stored here or in CI: they report success without one, so this run
+# proves the programs build, not that they work on a unit.
+name: build
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: SH-4 cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-sh4-linux-gnu binutils-sh4-linux-gnu
+      - name: Launchers, DVD player and NES
+        run: |
+          for p in doom/doomboot quake/quakeboot umac/macboot win311/pcboot dvd/dvd; do
+            for u in 192 193; do ./sdk/build.sh $u $PWD/$p >/dev/null; echo "built $p for the $u"; done
+          done
+          sh nes/build.sh >/dev/null && echo "built the NES emulator"
+      - name: NES protocol (host)
+        run: cc -Wall -Wextra -Werror -Isdk/include -Ines/nes nes/tests/protocol.c nes/nes/protocol.c -o /tmp/p && /tmp/p
+      - name: Emulator tests (the end-to-end ones skip without a disc)
+        run: cargo test --release

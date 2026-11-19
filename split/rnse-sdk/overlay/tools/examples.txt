@@ -1,5 +1,5 @@
-# The examples rnse-sdk keeps, and the units each builds for (verify.sh,
-# the CI).  modern is 192-only by design (build.sh refuses the 193).
+# The examples rnse-sdk keeps, and the units each builds for
+# (tools/build-all.sh, the CI).  modern is 192-only by design (build.sh refuses the 193).
 base 192 193
 beacon 192 193
 can 192 193
