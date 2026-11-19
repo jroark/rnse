@@ -711,7 +711,20 @@ has been seen so far:
 | a card command: the interface's command register value, argument high, argument low | `d104` + 3 words of response + the control register, or `d209` + 8 words for a long response | **the main processor runs the card itself**: CMD0, ACMD41, CMD2, CMD3, CMD9, CMD10, CMD7, CMD16 arrive this way, the program only passes them to the card interface |
 | a read of sectors | data by DMA | the program has the card interface fill its data memory through the buffer transfer unit, a sector (CMD17) at a time, and hands the words on |
 | play: where the file's data is on the card, as a byte address and a length (8000 bytes at a time) | `c701 001f` when it wants the next piece | the program reads the sectors itself, finds the MP3 frames, decodes, and sends the samples out of the audio serial interface; `c500` ends it (also on an error of the decoder) |
+| `0200` | `f000` | a card has gone: sent when the slot's switch says so.  The card interface's clock stays off until the next card's start |
 | others | `f000`, or `ee01 code` for an error | port pins, clock stop (the processor's STOP instruction), status |
+
+**A card that goes in while the unit runs is started, its processor is
+not.**  The North American software (V2220371) resets a processor and
+downloads its program once, at its own start, with or without a card
+in the slot (`1202`, `7301`, `3301`, `3101`, `3201` follow the
+download).  A card in the slot then is started right after that; a card
+that goes in later gets the same card start on the program as it runs:
+register 0x3814 of the interface (`3802`, the slow clock), data word
+0x4fb1, `0301 0000`, CMD0, CMD8 and on, 150 ms between steps, with no
+reset and no download (`rnse boot --sd-in MS --trace-dsp`).  When the
+card goes, the driver says `0200`.  The SDK's `sd_restart` and
+`sd_card_out` do the same.
 
 Playing, word for word, as the North American driver does it (and
 `sdk/src/sd.c` after it): read register 0x3801 (`2203 0000 3801 0001`,
@@ -762,6 +775,17 @@ What is not modelled, or assumed:
   In HALT the real part runs on a divided clock; whether that slows
   its timer is not clear from the manual, and the emulator does not
   slow it.
+* Every card is busy for its first three rounds of ACMD41 (or CMD1), as
+  a unit's 512 MB card was at its first.  For a card that answered CMD8
+  the stock driver's loop is CMD55, ACMD41 and, while busy, ACMD41 again
+  without CMD55, 150 ms apart, with no word to the interface's register
+  0x3814 until the card is ready; for one that did not, it sets 0x3814
+  again between rounds.  When ready, a standard card that answered CMD8 is asked CMD55 and
+  ACMD41 once more without the claim to know high-capacity cards; a
+  ready card does not answer CMD55 (none in the ready and identification
+  states: the unit's 512 MB card, 2026-11-18, and the model since), and
+  the stock driver then starts it anew, CMD0, CMD1, and round again as
+  an old card.
 * Cards other than a plain SD card are the model's guesses made to
   see what the stock driver does with them, not measurements:
   `--sd-old` (no answer to CMD8, busy for three rounds), `--sd-deaf N`
