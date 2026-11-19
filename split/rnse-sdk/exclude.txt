@@ -1,7 +1,8 @@
 # Paths (in the new repository, after sdk/ became its root) that stay
 # behind in rnse for the repositories of later phases (split/PLAN.md).
-# git filter-repo --invert-paths --paths-from-file; finish.py --prune
-# deletes them from a plain copy.
+# git filter-repo --invert-paths --paths-from-file (split/extract.sh's
+# pass 3, which also leaves out every old name history.py finds for the
+# other repositories).
 # rnse-ports: programs and launchers built on the SDK
 examples/doomboot/
 examples/macboot/
