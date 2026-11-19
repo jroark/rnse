@@ -13,7 +13,10 @@ ids=$(git log --all --format='%ae%n%ce' | sort -u | grep -vE '^(noreply@anthropi
 [ -z "$ids" ] || bad "identities other than noreply ones: $ids"
 n=$(git log --all --format=%B | grep -ciE 'gmail\.com|claude\.ai/code/session|session_0' || true)
 [ "$n" = 0 ] || bad "$n private strings in commit messages"
-for s in gmail.com /Users/ /home/jroark claude.ai/code/session; do
+# The strings are put together here so that this file does not contain
+# them, or the audit would find itself.
+g=gmail; u=Users; h=home; c=claude.ai
+for s in "$g.com" "/$u/" "/$h/" "$c/code/session"; do
     c=$(git log --all --oneline -S"$s" | wc -l | tr -d ' ')
     [ "$c" = 0 ] || bad "'$s' in the files of $c commits: $(git log --all --format=%h -S"$s" | tr '\n' ' ')"
 done
