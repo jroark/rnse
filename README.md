@@ -97,7 +97,7 @@ carries along, so that the unit is its ordinary self again.  And
 by the SD loader: unencrypted DVD-Video discs, MPEG-2 decoded at half
 width, AC-3, MPEG and LPCM sound ([ports/docs/dvd.md](ports/docs/dvd.md)).
 Bigger programs come from an SD card through the SD loader: Linux
-(`docs/linux.md`), the shareware Doom (`ports/docs/doom.md`) and the shareware
+(`linux/docs/linux.md`), the shareware Doom (`ports/docs/doom.md`) and the shareware
 Quake (`ports/docs/quake.md`), which run on the kit's own drivers, built by
 `ports/doom/build.sh` and `ports/quake/build.sh` from doomgeneric, id's GPL Quake
 source and id's shareware data, all downloaded and none kept here
@@ -316,7 +316,7 @@ Copyright (c) 2026 John Roark. Unless a directory says otherwise:
 |---|---|
 | everything not listed below: the emulator, its front ends, the docs, the wiki | MIT ([LICENSE](LICENSE)) |
 | `sdk/` (the kit), `sdbridge/` (the RP2040 bridge) | MIT ([sdk/LICENSE](sdk/LICENSE), [sdbridge/LICENSE](sdbridge/LICENSE)) |
-| `ports/` (Doom, Quake, umac, Windows 3.11, NES, DVD, with their launchers) and `linux/` with the SDK program that starts it (`sdk/examples/linuxboot`) | GPL-2.0-only ([ports/LICENSE](ports/LICENSE), [linux/LICENSE](linux/LICENSE)): they are built with, or patch, GPLv2 code |
+| `ports/` (Doom, Quake, umac, Windows 3.11, NES, DVD, with their launchers) and `linux/` (the kernel's support, drivers and user space, and `linuxboot`, which starts it) | GPL-2.0-only ([ports/LICENSE](ports/LICENSE), [linux/LICENSE](linux/LICENSE)): they are built with, or patch, GPLv2 code |
 | `hardware/` (the KiCad boards) | CERN-OHL-P-2.0 ([hardware/LICENSE](hardware/LICENSE)) |
 
 Third-party code keeps its own licence: `sdbridge/third_party/h264bsd`

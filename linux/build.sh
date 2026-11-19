@@ -4,7 +4,7 @@
 # The result is linux/out/VMLINUX.BIN, the kernel's image from its zero
 # page on (to be loaded at 0x8c001000 and entered at 0x8c002000) with a
 # BusyBox initramfs built in, and linux/out/vmlinux, the same as an ELF
-# file for `rnse boot --gdb`.  sdk/examples/linuxboot, copied to an SD
+# file for `rnse boot --gdb`.  linuxboot, copied to an SD
 # card as RNSE.BIN beside VMLINUX.BIN, loads and starts it: see
 # docs/linux.md.
 #

@@ -6,7 +6,7 @@ SH-4, 64 MiB SDRAM), started one of two ways:
 - from an SD card, through the same chain as any program of the SDK's:
   the stock software starts `sdboot` from the disc, `sdboot` starts
   `RNSE.BIN` from the card, and here `RNSE.BIN` is
-  `sdk/examples/linuxboot`, which reads the kernel, `VMLINUX.BIN`, from
+  `linuxboot`, which reads the kernel, `VMLINUX.BIN`, from
   the same card and enters it;
 - or installed in the flash in the stock software's place, by an update
   disc that `rnse firmware ... --kernel` makes, and started by the boot
@@ -72,7 +72,7 @@ What is ours, besides the configuration:
 | `linux/userland/` | `rnse`, one static program with four names: `rnse-gui`, `rnse-radio`, `rnse-play`, `rnse-can` |
 | `linux/initramfs.list`, `linux/rootfs/` | the initramfs: BusyBox's init as `/init`, `/etc/inittab` (the GUI on the screen's first console, `tty1`, a shell on the second and one on the serial port), `/etc/init.d/rcS`, `/etc/profile` |
 | `linux/toolchain/`, `linux/busybox.config` | the user-space toolchain and BusyBox's configuration |
-| `sdk/examples/linuxboot` | the second stage on the card |
+| `linuxboot` | the second stage on the card |
 
 ## Running it
 
