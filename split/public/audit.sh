@@ -17,8 +17,9 @@ n=$(git log --all --format=%B | grep -ciE 'gmail\.com|claude\.ai/code/session|se
 # them, or the audit would find itself.
 g=gmail; u=Users; h=home; c=claude.ai
 for s in "$g.com" "/$u/" "/$h/" "$c/code/session"; do
-    c=$(git log --all --oneline -S"$s" | wc -l | tr -d ' ')
-    [ "$c" = 0 ] || bad "'$s' in the files of $c commits: $(git log --all --format=%h -S"$s" | tr '\n' ' ')"
+    # (Not in this file: its first version spelled the patterns out.)
+    c=$(git log --all --oneline -S"$s" -- . ':!split/public/audit.sh' | wc -l | tr -d ' ')
+    [ "$c" = 0 ] || bad "'$s' in the files of $c commits: $(git log --all --format=%h -S"$s" -- . ':!split/public/audit.sh' | tr '\n' ' ')"
 done
 p=$(git log --all --format= --name-only | sort -u | grep -iE '\.(iso|bin|kwi|mot|img|sal|pem|key|crt|der|p12|pfx|wad|pak|dsk|rom|zip|xlsx)$' || true)
 [ -z "$p" ] || bad "firmware, keys, archives or data by name: $p"
