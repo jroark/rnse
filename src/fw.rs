@@ -771,7 +771,7 @@ pub fn firmware_disc(image: &[u8], variant: &str, payload: &[u8], swap: Option<&
 /// Where a kernel image starts in the module that [`kernel_module`]
 /// makes, and the mark of its header (at 0x100): `RNSELNX1`, its length
 /// and its CRC-32 (IEEE, as zlib's), big-endian, then where it is loaded
-/// and entered.  `sdk/examples/linuxboot` checks all of it.
+/// and entered.  `linux/linuxboot` checks all of it.
 pub const KERNEL_AT: usize = 0x200;
 pub const KERNEL_MARK: &[u8; 8] = b"RNSELNX1";
 
@@ -789,7 +789,7 @@ pub fn crc32(data: &[u8]) -> u32 {
 
 /// The application module's place (APM) with a Linux kernel image in it,
 /// for a firmware disc whose operating system's place holds
-/// `sdk/examples/linuxboot` (docs/linux.md, "Linux in flash").  Header,
+/// `linux/linuxboot` (linux/docs/linux.md, "Linux in flash").  Header,
 /// load address and length are the stock module's, so that its loader
 /// writes it where the stock application was; nothing of the stock
 /// application is left.  The three entry points go to an `rts` of their

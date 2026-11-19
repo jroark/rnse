@@ -7,6 +7,13 @@ name = "rnse"
 version = "0.1.0"
 
 [[package]]
+name = "rnse-linux"
+version = "0.1.0"
+dependencies = [
+ "rnse",
+]
+
+[[package]]
 name = "rnse-ports"
 version = "0.1.0"
 dependencies = [
