@@ -86,7 +86,8 @@ So that phase 1 is a plain subdirectory extraction:
   helpers they use (`disc`, `sdk_example`, `started_by_stock_software*`,
   `boot_rom`, `rom_192`, `until`, `stock_is_in_flash`) and of
   `tests/data/tones.mp3`. `tests/disc.rs` keeps the emulator-only tests
-  and those of Linux and the ports (28 each, 56 as before).
+  and those of Linux, the ports and the SD link (28 of the 56 there were;
+  `link_benchmark_from_the_sd_loader`, added since, makes 29).
 - `sdk/build.sh 192|193 DIR` builds an example from any directory (a
   path with a slash). The output is byte-identical to the in-tree build.
 - `tools/sh4-docker` and `tools/build-sd-loader.sh` moved to `sdk/tools/`.
@@ -238,7 +239,8 @@ Finally delete the paths from rnse.
 - **rnse-sdbridge** (phase 4): `sdbridge/` (never `sdbridge/work/` or
   `sdbridge/out/`; the pico-sdk is cloned by `build.sh`; certificates and
   keys stay outside), `linkbench`, `h264bench`, `tests/linkbench.rs`,
-  `tests/data/margin.*`, `sdk_decodes_h264_from_a_card`, the tools and
+  `tests/data/margin.*`, `sdk_decodes_h264_from_a_card`,
+  `link_benchmark_from_the_sd_loader`, `sdbridge/link.py`, the tools and
   docs named in the table.
 - **rnse-nes-can** (phase 5): `hardware/nes-can`, `tests/nes/protocol.c`.
   Split `tools/package-nes.py` into the hardware half (here) and the
