@@ -44,6 +44,7 @@ on that unit.
   card, or installed in flash, always with a way back to the stock software. Doom,
   Quake, Windows 3.11, a Mac Plus and an NES emulator have run on the bench unit. See
   [Custom firmware](/custom-firmware/#games-and-other-computers).
-- A small board in an SD slot could make a 192 an **Android Auto** head unit. On a
-  Raspberry Pi Pico, a phone already projects Android Auto over USB. See
-  [Investigations](/investigations/).
+- A small board in an SD slot makes a 192 an **Android Auto** head unit: a phone's
+  Google Maps runs on the bench unit's own display at 10 to 13 pictures a second,
+  decoded by its own processor and driven with its own knob. Sound is still to come.
+  See [Investigations](/investigations/#android-auto-on-the-unit).
