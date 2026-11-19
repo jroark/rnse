@@ -308,6 +308,25 @@ The firmware is copyrighted by its owners and is deliberately kept out of
 the repository (`.gitignore` blocks the usual file types); use an image
 of a disc you own.
 
+## Licences
+
+Copyright (c) 2026 John Roark. Unless a directory says otherwise:
+
+| What | Licence |
+|---|---|
+| everything not listed below: the emulator, its front ends, the docs, the wiki | MIT ([LICENSE](LICENSE)) |
+| `sdk/` (the kit), `sdbridge/` (the RP2040 bridge) | MIT ([sdk/LICENSE](sdk/LICENSE), [sdbridge/LICENSE](sdbridge/LICENSE)) |
+| `linux/`, `doom/`, `quake/`, `umac/`, `win311/`, and the SDK programs that go with them (`sdk/examples/linuxboot`, `doomboot`, `quakeboot`, `macboot`, `pcboot`, `nes`, `nesboot`, `dvd`) | GPL-2.0-only (`LICENSE` in each directory): they are built with, or patch, GPLv2 code |
+| `hardware/` (the KiCad boards) | CERN-OHL-P-2.0 ([hardware/LICENSE](hardware/LICENSE)) |
+
+Third-party code keeps its own licence: `sdk/third_party/h264bsd`
+(`LICENSE.md`), `sdk/third_party/nofrendo` (GPLv2 and LGPLv2,
+`COPYING`, `COPYING.LIB`); the code that the build scripts download
+(the Linux kernel, BusyBox, musl, doomgeneric, Quake, umac, Musashi,
+Tiny386, SeaBIOS, the pico-sdk, mbedTLS) is not in this repository and
+carries its own. No licence here covers the unit's firmware, map data,
+game data or anyone's ROMs and disk images, none of which are included.
+
 ## NES on the 192
 
 The [bare-metal NES application](docs/nes.md) loads ROMs from SD and takes two
