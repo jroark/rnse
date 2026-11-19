@@ -93,20 +93,20 @@ program can end by handing over to the stock loader, which the image
 carries along, so that the unit is its ordinary self again.  And
 `--strict` lists what a program used that the emulator has no model of.
 `--gdb PORT` puts the machine under GDB's control.
-`sdk/examples/dvd` is a DVD player for the 192, started from an SD card
+`ports/dvd/dvd` is a DVD player for the 192, started from an SD card
 by the SD loader: unencrypted DVD-Video discs, MPEG-2 decoded at half
-width, AC-3, MPEG and LPCM sound ([docs/dvd.md](docs/dvd.md)).
+width, AC-3, MPEG and LPCM sound ([ports/docs/dvd.md](ports/docs/dvd.md)).
 Bigger programs come from an SD card through the SD loader: Linux
-(`docs/linux.md`), the shareware Doom (`docs/doom.md`) and the shareware
-Quake (`docs/quake.md`), which run on the kit's own drivers, built by
-`doom/build.sh` and `quake/build.sh` from doomgeneric, id's GPL Quake
+(`docs/linux.md`), the shareware Doom (`ports/docs/doom.md`) and the shareware
+Quake (`ports/docs/quake.md`), which run on the kit's own drivers, built by
+`ports/doom/build.sh` and `ports/quake/build.sh` from doomgeneric, id's GPL Quake
 source and id's shareware data, all downloaded and none kept here
 (Quake reads its 18 MB of data from the card as it plays), and a Mac
-Plus (`docs/umac.md`): Matt Evans's umac, built by `umac/build.sh`,
+Plus (`ports/docs/umac.md`): Matt Evans's umac, built by `ports/umac/build.sh`,
 running the Mac's own ROM and System from the card at 384 x 235, with
 the two knobs as its mouse; and a PC
 (Tiny386) that runs MS-DOS and Windows 3.11 from a disk image installed
-from your own floppies, the knobs as its mouse (`docs/win311.md`).
+from your own floppies, the knobs as its mouse (`ports/docs/win311.md`).
 One example, `report`, is meant for a real unit: it reads the
 processor's registers and the boot ROM (which is on no disc) and gets
 them out, on the screen and over the CAN bus, where `rnse report`
@@ -316,11 +316,11 @@ Copyright (c) 2026 John Roark. Unless a directory says otherwise:
 |---|---|
 | everything not listed below: the emulator, its front ends, the docs, the wiki | MIT ([LICENSE](LICENSE)) |
 | `sdk/` (the kit), `sdbridge/` (the RP2040 bridge) | MIT ([sdk/LICENSE](sdk/LICENSE), [sdbridge/LICENSE](sdbridge/LICENSE)) |
-| `linux/`, `doom/`, `quake/`, `umac/`, `win311/`, and the SDK programs that go with them (`sdk/examples/linuxboot`, `doomboot`, `quakeboot`, `macboot`, `pcboot`, `nes`, `nesboot`, `dvd`) | GPL-2.0-only (`LICENSE` in each directory): they are built with, or patch, GPLv2 code |
+| `ports/` (Doom, Quake, umac, Windows 3.11, NES, DVD, with their launchers) and `linux/` with the SDK program that starts it (`sdk/examples/linuxboot`) | GPL-2.0-only ([ports/LICENSE](ports/LICENSE), [linux/LICENSE](linux/LICENSE)): they are built with, or patch, GPLv2 code |
 | `hardware/` (the KiCad boards) | CERN-OHL-P-2.0 ([hardware/LICENSE](hardware/LICENSE)) |
 
 Third-party code keeps its own licence: `sdbridge/third_party/h264bsd`
-(`LICENSE.md`), `sdk/third_party/nofrendo` (GPLv2 and LGPLv2,
+(`LICENSE.md`), `ports/nes/nofrendo` (GPLv2 and LGPLv2,
 `COPYING`, `COPYING.LIB`); the code that the build scripts download
 (the Linux kernel, BusyBox, musl, doomgeneric, Quake, umac, Musashi,
 Tiny386, SeaBIOS, the pico-sdk, mbedTLS) is not in this repository and
@@ -329,6 +329,6 @@ game data or anyone's ROMs and disk images, none of which are included.
 
 ## NES on the 192
 
-The [bare-metal NES application](docs/nes.md) loads ROMs from SD and takes two
+The [bare-metal NES application](ports/docs/nes.md) loads ROMs from SD and takes two
 original NES controllers through the [dual-controller CAN adapter](hardware/nes-can/README.md).
 The adapter includes KiCad sources, routed PCB, manufacturing plots and MCU firmware.
