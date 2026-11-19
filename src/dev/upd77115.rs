@@ -2052,13 +2052,13 @@ mod tests {
         assert!(command(&mut d, 0x4800, 0).is_empty(), "CMD0 has no response");
         assert_eq!(command(&mut d, 0x4c37, 0), [0x3700, 0x0001, 0x2083], "CMD55");
         assert_ne!(d.pending & 1 << irq::SDCR, 0);
-        assert_eq!(command(&mut d, 0x4c29, 0x00ff_8000), [0x3f80, 0xff80, 0x00ff], "ACMD41");
+        // (Before the card is ready: a ready card answers no CMD55.)
         // Five reads more of a short response go round it, and the next
         // response is read from where they left off.
         let r = command(&mut d, 0x4c37, 0);
         let more: Vec<u16> = (0..5).map(|_| d.io_read(0x15)).collect();
         assert_eq!(more, [r[0], r[1], r[2], r[0], r[1]]);
-        assert_eq!(command(&mut d, 0x4c29, 0x00ff_8000), [0x00ff, 0x3f80, 0xff80], "ACMD41 read late");
+        assert_eq!(command(&mut d, 0x4c29, 0x00ff_8000), [0x00ff, 0x3f00, 0xff80], "ACMD41 (busy) read late");
         d.io_read(0x15);
         // SDCTL bit 2: up with a response and after its 3 words are
         // read; what is written to SDCTL does not take it down, and a
@@ -2082,7 +2082,19 @@ mod tests {
         (0..3).for_each(|_| _ = d.io_read(0x15));
         assert_ne!(d.io_read(0x14) & 4, 0, "the read after the words sees it up");
         assert_eq!(d.io_read(0x14) & 4, 0, "and takes it down");
-        assert_eq!(command(&mut d, 0x4c29, 0x00ff_8000)[0], 0x3f80, "the application command CMD55 began");
+        // The bit 2 test's CMD55s: an ACMD41 to end the second.
+        command(&mut d, 0x4c29, 0x00ff_8000);
+        // Busy for the first rounds, as real cards are; then ready.
+        let mut ready = false;
+        for _ in 0..4 {
+            command(&mut d, 0x4c37, 0);
+            if command(&mut d, 0x4c29, 0x00ff_8000)[0] == 0x3f80 {
+                ready = true;
+                break;
+            }
+        }
+        assert!(ready, "ACMD41: ready after its busy rounds");
+        assert!(command(&mut d, 0x4c37, 0).is_empty(), "no CMD55 for a ready card");
         assert_eq!(command(&mut d, 0x4c42, 0).len(), 8, "CMD2, a long response");
         let r = command(&mut d, 0x4c03, 0);
         let rca = u32::from(r[0] & 0xff) << 24 | u32::from(r[1] & 0xff00) << 8;

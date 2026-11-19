@@ -40,8 +40,8 @@ pub struct SdCard {
     pub sectors_read: u64,
     /// A card of version 1 of the specification: it does not answer
     /// CMD8 (which counts as an illegal command, and shows in the
-    /// status of the next response), and like a real card it is busy
-    /// for a few rounds of ACMD41 before it is ready.
+    /// status of the next response).  (Every card is busy for a few
+    /// rounds of ACMD41 before it is ready.)
     pub old: bool,
     illegal: bool,
     busy: u32,
@@ -115,7 +115,12 @@ impl SdCard {
             (_, 0) => {
                 self.state = IDLE;
                 self.stream = None;
-                self.busy = if self.old || self.mmc { 3 } else { 0 };
+                // Busy for the first few rounds of ACMD41 (or CMD1), as real
+                // cards are: a unit's 512 MB card of version 2 answered
+                // its first ACMD41 busy.  The stock driver's loop for a
+                // card of version 2 is not the one for an old card, and
+                // with a card ready at once that loop never ran here.
+                self.busy = 3;
                 (Response::None, None)
             }
             (false, 8) if self.old || self.mmc => {
@@ -141,6 +146,13 @@ impl SdCard {
             }
             // A card of version 2 of the specification answers this one.
             (false, 8) if self.state == IDLE => (r1(arg & 0xfff), None),
+            // Not in the ready and identification states, where the
+            // specification has no application command: a card that has
+            // finished its ACMD41 rounds does not answer CMD55 until it
+            // has an address (on a unit, 2026-11-18, the 512 MB card
+            // left it unanswered after its ready ACMD41, where sd.c
+            // asked ACMD41 once more).
+            (_, 55) if self.state == READY || self.state == IDENT => (Response::None, None),
             (_, 55) => {
                 self.app = true;
                 (r1(status | 0x20), None)
@@ -262,6 +274,11 @@ mod tests {
         let mut c = SdCard::new(Card::from_bytes(image).unwrap());
         assert_eq!(c.command(0, 0).0, Response::None);
         assert_eq!(c.command(17, 0).0, Response::None, "not in the transfer state yet");
+        // Busy for a few rounds, as real cards are; then ready.
+        for _ in 0..3 {
+            c.command(55, 0);
+            assert_eq!(c.command(41, 0x00ff_8000).0, Response::Short(0x3f, 0x00ff_8000));
+        }
         c.command(55, 0);
         assert_eq!(c.command(41, 0x00ff_8000).0, Response::Short(0x3f, 0x80ff_8000));
         assert!(matches!(c.command(2, 0).0, Response::Long(_)));

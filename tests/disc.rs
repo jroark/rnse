@@ -1791,6 +1791,94 @@ fn sdk_player_plays_an_mp3() {
     assert_eq!(m.radio.volume, 10, "{}: two detents louder", name);
 }
 
+/// The SD loader opens its card again after a program and after a card
+/// swap the way the stock software would: the card as it was left
+/// (sd_attach, CAN item 4); a card that has gone in since, and that the
+/// loader saw go in at once, started on the processor's program as it
+/// runs (sd_restart, item 6), before anything else is said to it; and
+/// only then the processor reset as well (sd_init).  A unit's 512 MB card
+/// never answered sd_init once it had been in a slot ("LOAD ERROR: -7"
+/// after a swap and after Quake); the stock driver starts a card that
+/// goes in without a reset.  The emulator's card answers either way, so
+/// what is checked is which way the loader took.  And RETURN held while
+/// the program reads its card without a pause (sdk/examples/cardloop,
+/// as Quake reads) waits for the end of the read (sd_busy).
+#[test]
+fn sd_loader_reopens_its_card_after_a_return_or_a_swap() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let sdk = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    let loader = std::fs::read(sdk.join("out/sdboot-192.bin")).unwrap();
+    assert!(sdk_example(&image, Model::Rnse192, "cardloop").is_some());
+    let reader = std::fs::read(sdk.join("out/cardloop-192.bin")).unwrap();
+    assert!(sdk_example(&image, Model::Rnse192, "returntest").is_some());
+    let r17 = std::fs::read(sdk.join("out/returntest-192.bin")).unwrap();
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    let card = rnse::fat::card("READS", &[
+        rnse::fat::Entry::file("RNSE.BIN", loader),
+        rnse::fat::Entry::file("LOOP.BIN", reader),
+        rnse::fat::Entry::file("A17.BIN", r17),
+    ], None).unwrap();
+    let at = m.console.len();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let menu = until(&mut m, at, "> LOOP.BIN", 30).unwrap_or_else(|| panic!("{}: no menu: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    assert!(m.panel_key("SELECT", true));
+    assert_eq!(m.run(200 * ms), Stop::Budget);
+    assert!(m.panel_key("SELECT", false));
+    let reading = until(&mut m, menu, "READS 1024", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[menu..])));
+    // A few times over, so that RETURN comes in a read at different
+    // places of it.
+    let mut from = reading;
+    for round in 0..3 {
+        assert!(m.panel_key("RETURN", true));
+        assert_eq!(m.run((2_500 + 37 * round) * ms), Stop::Budget);
+        assert!(m.panel_key("RETURN", false));
+        let back = until(&mut m, from, "TEST ENDED BY HOLDING RETURN", 30).unwrap_or_else(|| panic!("{}: round {}: {}", name, round, String::from_utf8_lossy(&m.console[from..])));
+        let shown = until(&mut m, back, "> LOOP.BIN", 30).unwrap_or_else(|| panic!("{}: round {}: no menu: {}", name, round, String::from_utf8_lossy(&m.console[back..])));
+        let attached: Vec<u32> = m.can().tx.iter().filter(|f| f.id == 0x7f8 && f.data[0] == 0x20 && f.data[1] == 4)
+            .map(|f| u32::from_be_bytes([f.data[2], f.data[3], f.data[4], f.data[5]])).collect();
+        assert_eq!(attached.last(), Some(&0), "{}: round {}: the loader could not take the card as the program left it: {:?}", name, round, attached);
+        if round == 2 {
+            break;
+        }
+        assert_eq!(m.run(1000 * ms), Stop::Budget);
+        assert!(m.panel_key("SELECT", true));
+        assert_eq!(m.run(200 * ms), Stop::Budget);
+        assert!(m.panel_key("SELECT", false));
+        from = until(&mut m, shown, "READS 512", 30).unwrap_or_else(|| panic!("{}: round {}: {}", name, round, String::from_utf8_lossy(&m.console[shown..])));
+    }
+    // A card swap: the card that goes in is started without a reset of
+    // its processor.
+    let records = |m: &mut Machine, item: u8| -> Vec<i32> {
+        m.can().tx.iter().filter(|f| f.id == 0x7f8 && f.data[0] == 0x20 && f.data[1] == item)
+            .map(|f| i32::from_be_bytes([f.data[2], f.data[3], f.data[4], f.data[5]])).collect()
+    };
+    let restarts = records(&mut m, 6).len();
+    let attaches = records(&mut m, 4).len();
+    m.eject_card(0);
+    assert_eq!(m.run(1000 * ms), Stop::Budget);
+    let card = rnse::fat::card("SWAPPED", &[
+        rnse::fat::Entry::file("LOOP.BIN", std::fs::read(sdk.join("out/cardloop-192.bin")).unwrap()),
+        rnse::fat::Entry::file("A17.BIN", std::fs::read(sdk.join("out/returntest-192.bin")).unwrap()),
+    ], None).unwrap();
+    let at = m.console.len();
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    until(&mut m, at, "> LOOP.BIN", 30).unwrap_or_else(|| panic!("{}: the new card: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    // (Not asked for a sector first: the loader saw it go in.)
+    let attached = records(&mut m, 4);
+    let restarted = records(&mut m, 6);
+    assert_eq!(attached.len(), attaches, "{}: a card just put in was read before its start: {:?}", name, attached);
+    assert_eq!((restarted.len(), restarted.last()), (restarts + 1, Some(&0)), "{}: the new card was not started without a reset", name);
+    assert_eq!(records(&mut m, 0).last(), Some(&0), "{}", name);
+    // (The first card, too, went in under the loader's eyes: restarted.)
+    assert_eq!(records(&mut m, 6).first(), Some(&0), "{}", name);
+    let text = String::from_utf8_lossy(&m.console[reading..]).into_owned();
+    assert!(!text.contains("LOAD ERROR") && !text.contains("ATTACH FAILED"), "{}: {}", name, &text[text.len().saturating_sub(1500)..]);
+}
+
 /// The SD loader's menu (sdk/examples/sdboot): a card with several
 /// programs (NAME.BIN) offers them, a loader among them as RNSE.BIN
 /// left out; the select knob chooses, SELECT runs, the program comes
