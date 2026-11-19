@@ -128,7 +128,7 @@ run, remove, reinstall stock) has been done on the bench unit.
   an experimental client for the factory telephone module, and small native
   applications loaded from SD cards.
 - **h264bench**: a measurement of whether the 192 could decode video at all
-  ([Investigations](/investigations/)).
+  ([Android Auto](/android-auto/)).
 - **linuxboot**: a second stage that starts a Linux kernel and a BusyBox shell from
   the card ([Linux on the 192](/linux/)).
 
