@@ -826,9 +826,16 @@ What is not modelled, or assumed:
   of the response register since the response came (a long response's
   8 words; linkbench now reads it in threes until bit 2 is down before
   every command, 9 reads at most, which keeps the read position);
-  ACMD41's answer (R3: index and CRC fields all ones), which instead
-  sets error flag 0x40 and bit 15 (`B842`) and raises no interrupt at
-  all, its words in the register all the same; and, by all
+  ACMD41's answer (R3: index and CRC fields all ones) from the 32 MB
+  card (SD version 1), which instead sets error flag 0x40 and bit 15
+  (`B842`) and raises no interrupt at all, its words in the register
+  all the same (from the 512 MB card, version 2, the same day, ACMD41's
+  answer did raise the interrupt, set 0x40 and bit 15 and left bit 2
+  UP, `B846`, so that the next answer's interrupt comes only once
+  something takes bit 2 down: linkbench's own start, reading 0x3815 in
+  threes before each command, started that card and read it clean; the
+  SDK's start of it failed for another reason, a CMD55 after the card
+  was ready, above); and, by all
   appearances, a read of SDCTL after the 3 words of a short response,
   which is what the stock program does after each one (and it reads
   sectors at 353 KB/s on the unit, each waiting for this interrupt);
