@@ -1845,9 +1845,10 @@ fn link_benchmark_from_the_sd_loader() {
 /// laid into AALINK.BIN as a phone's messages), a card in the first with
 /// AAVIEW.BIN and AAVIEWER.IMG.  The loader starts AAVIEW.BIN, that loads
 /// the viewer and enters it, the viewer finds the bridge through the
-/// stock card program, takes the slot over with its own, and decodes
-/// every picture, each frame's CRC-32 as ffmpeg's (the viewer built with
-/// -DAA_CRC).  RETURN held goes back to the loader.  Needs a host C
+/// stock card program, takes the slot over with its own, decodes every
+/// picture, each frame's CRC-32 as ffmpeg's (the viewer built with
+/// -DAA_CRC), and plays the stream's sound (a tone) on the other card
+/// processor.  RETURN held goes back to the loader.  Needs a host C
 /// compiler as well (tests/aaviewer.rs has the viewer with no firmware).
 #[test]
 fn android_auto_viewer_from_the_sd_loader() {
@@ -1873,7 +1874,8 @@ fn android_auto_viewer_from_the_sd_loader() {
         .arg(src.join("aastream.c")).output() else { return };
     assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
     let bridge_image = dir.join("bridge.img");
-    assert!(std::process::Command::new(&tool).arg(&bridge_image).arg(root.join("tests/data/margin.264")).status().unwrap().success());
+    // With 2 s of a 1 kHz tone as the phone's media sound.
+    assert!(std::process::Command::new(&tool).arg(&bridge_image).arg(root.join("tests/data/margin.264")).arg("2000").status().unwrap().success());
     let bridge = std::fs::read(&bridge_image).unwrap();
     std::fs::remove_dir_all(&dir).ok();
     let want: Vec<String> = std::fs::read_to_string(root.join("tests/data/margin.crc")).unwrap()
@@ -1882,6 +1884,7 @@ fn android_auto_viewer_from_the_sd_loader() {
     let ms = m.cycles_per_ms();
     m.cpu.breakpoints.clear();
     assert_eq!(m.run(2000 * ms), Stop::Budget);
+    m.speaker = Some(Vec::new());
     assert!(m.insert_card(1, rnse::dev::sdhi::Card::from_bytes(bridge).unwrap()));
     assert_eq!(m.run(2000 * ms), Stop::Budget);
     let card = rnse::fat::card("RNSE", &[rnse::fat::Entry::file("AAVIEW.BIN", first), rnse::fat::Entry::file("AAVIEWER.IMG", viewer)], None).unwrap();
@@ -1899,6 +1902,13 @@ fn android_auto_viewer_from_the_sd_loader() {
         }
         assert_eq!(m.run(100 * ms), Stop::Budget, "{}: {:?}: {}", name, m.cpu.fault, String::from_utf8_lossy(&m.console[started..]));
     }
+    // The sound: the tone heard through the amplifier's decoder input
+    // (at the viewer's starting volume: quiet, but its pitch is there).
+    assert_eq!(m.run(2500 * ms), Stop::Budget);
+    let heard = m.speaker.take().unwrap();
+    let right: Vec<i16> = heard.iter().skip(1).step_by(2).copied().collect();
+    let pitches: Vec<u32> = right.chunks(22_050).map(|c| 2 * c.windows(2).filter(|w| w[0] < 0 && w[1] >= 0).count() as u32).collect();
+    assert!(pitches.iter().filter(|p| p.abs_diff(1000) <= 8).count() >= 2, "{}: the tone: {:?}", name, pitches);
     let text = String::from_utf8_lossy(&m.console[started..]).into_owned();
     println!("{}", text);
     assert!(text.contains("BRIDGE IN SLOT 2"), "{}: {}", name, text);
