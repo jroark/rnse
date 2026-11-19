@@ -319,7 +319,7 @@ Copyright (c) 2026 John Roark. Unless a directory says otherwise:
 | `linux/`, `doom/`, `quake/`, `umac/`, `win311/`, and the SDK programs that go with them (`sdk/examples/linuxboot`, `doomboot`, `quakeboot`, `macboot`, `pcboot`, `nes`, `nesboot`, `dvd`) | GPL-2.0-only (`LICENSE` in each directory): they are built with, or patch, GPLv2 code |
 | `hardware/` (the KiCad boards) | CERN-OHL-P-2.0 ([hardware/LICENSE](hardware/LICENSE)) |
 
-Third-party code keeps its own licence: `sdk/third_party/h264bsd`
+Third-party code keeps its own licence: `sdbridge/third_party/h264bsd`
 (`LICENSE.md`), `sdk/third_party/nofrendo` (GPLv2 and LGPLv2,
 `COPYING`, `COPYING.LIB`); the code that the build scripts download
 (the Linux kernel, BusyBox, musl, doomgeneric, Quake, umac, Musashi,

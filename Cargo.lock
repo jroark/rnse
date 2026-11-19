@@ -7,6 +7,13 @@ name = "rnse"
 version = "0.1.0"
 
 [[package]]
+name = "rnse-sdbridge"
+version = "0.1.0"
+dependencies = [
+ "rnse",
+]
+
+[[package]]
 name = "rnse-sdk"
 version = "0.1.0"
 dependencies = [
