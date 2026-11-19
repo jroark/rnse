@@ -6,11 +6,11 @@
 //!
 //!     RNSE_DISC=/path/to/disc.iso cargo test --release -- --nocapture
 //!
-//! The tests of programs built with the kit are in their own crates:
-//! the SDK's in `sdk/tests/emulated.rs` (cargo test --release -p
-//! rnse-sdk), and those of the ports, the SD bridge and Linux in
-//! `ports/`, `sdbridge/` and `linux/` (`-p rnse-ports`, `-p
-//! rnse-sdbridge`, `-p rnse-linux`).  Those here that compare with a real boot ROM need
+//! The tests of programs built with the kit are in the repositories
+//! split from this one (rnse-sdk's `tests/emulated.rs`, and those of
+//! rnse-ports, rnse-linux and rnse-sdbridge), which run them on this
+//! crate; `.github/workflows/downstream.yml` runs them against a change
+//! here.  Those here that compare with a real boot ROM need
 //! `RNSE_BOOT_ROM`, the file `rnse report --rom` writes: firmware, like
 //! the disc, and not in the repository.
 //!

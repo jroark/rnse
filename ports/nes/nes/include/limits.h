@@ -1,2 +1,0 @@
-#define PATH_MAX 512
-#define INT_MAX 2147483647

@@ -1,3 +1,0 @@
-# Fabrication archives are made by each board's script, not committed.
-*.zip
-__pycache__/

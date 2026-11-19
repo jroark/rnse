@@ -10,31 +10,18 @@
 *.zip
 *.img
 /out/
-/ports/out/
 __pycache__/
 
 /macos/bridge/target/
-/linux/work/
-/linux/out/
-/ports/doom/work/
-/ports/doom/out/
 *.wad
 *.WAD
-/ports/umac/work/
-/ports/umac/out/
 *.ROM
 *.rom
 *.dsk
 *.DSK
-/ports/win311/work/
-/ports/win311/out/
 *.IMG
-/ports/quake/work/
-/ports/quake/out/
 *.pak
 *.PAK
-/sdbridge/work/
-/sdbridge/out/
 *.UF2
 # Keys and certificates stay out of the repository.
 *.pem
