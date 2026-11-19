@@ -56,7 +56,7 @@ committed.
   *verbatim* into the `CLAUDE.md` of every repository that builds code
   for the unit: rnse-sdk, rnse-ports, rnse-linux and rnse-sdbridge
   (linkbench runs on the unit). Copy it by script from rnse's file, as
-  `rnse-sdk/finish.py` does, not by retyping it. Nothing in any phase
+  `split/finish.py` does, not by retyping it. Nothing in any phase
   adds, enables or exposes a firmware-flash path. The flash guard
   (`sdk/src/flash.c`) and the way back (`sdk/src/wayback.c`, "The way
   back" in `docs/custom-firmware.md`) move unchanged.
@@ -114,15 +114,86 @@ each extraction is done; phase 1b's submodule is no longer needed.
 |---|---|
 | 0. Prepare `sdk/` in rnse | done (branch `ccr-249b75e2-puy2ij`) |
 | A. Land or park outstanding work | mostly done (2026-11-18, PR #35): sound work committed; PR #31 merged with its ZIP replaced by `hardware/sdbridge-card/fab.sh` (kicad-cli; output checked identical); `hardware/ps2-can`, `sdk/examples/cardstart` committed; #5 closed (branch `carplay-ui-192` kept for porting). LICENSE files added (MIT root, `sdk/`, `sdbridge/`; GPL-2.0-only `linux/`, `doom/`, `quake/`, `umac/`, `win311/`; CERN-OHL-P `hardware/`; holder "John Roark", the user's choice; README "Licences"). Left: deleting the 22 merged remote branches and the clean, merged worktrees (the user does it; the agent was not permitted) |
-| B. Rewrite history; new public-ready rnse | done (2026-11-19): the rewritten history is the public `jroark/rnse`; the private repository is `jroark/rnse-archive`. The tooling stays in `split/public/`. Not checked from the agent's side: that `main` is protected and that the wiki deployed from the first push |
+| B. Rewrite history; new public-ready rnse | done (2026-11-19): the rewritten history is the public `jroark/rnse`; the private repository is `jroark/rnse-archive`. The tooling stays in `split/public/`. Not checked from the agent's side: that `main` is protected and that the wiki deployed from the first push. Two commits merged since (`2df80d7`, `897ce98`, PR #4) carry `Claude-Session:` lines; the user chose (2026-11-19) to leave `main`'s history as it is rather than force-push, so `public/audit.sh` does not count those two, and the split repositories strip such lines (`extract.sh`) |
 | C. Every future repository a self-contained directory in rnse | in progress. **sdbridge done** (branch `split-c`): `linkbench`, `h264bench`, `aaview`, `aaviewer` and `third_party/h264bsd` moved from `sdk/` into `sdbridge/`, with `tools/linktest.py`, `aa-streams.sh`, the three docs (`sdbridge/docs/`), `tests/linkbench.rs`, `aaviewer.rs`, `tests/data/margin.*` and the three end-to-end tests with copies of their helpers (`sdbridge/tests/disc.rs`); `sdbridge/` is the crate `rnse-sdbridge` (workspace member; the kit through `RNSE_SDK`, default `../sdk`). The kit's `build.sh` takes a `libs` line with a slash as a directory relative to the program, and `tools/sh4-docker/run` mounts the git working tree of every absolute path it is given (it mounted only `sdk/`). Checked: the seven binaries byte-identical from their new place; `cargo test -p rnse-sdbridge` with the compiler and a real disc, 11 tests, all run and passed. `tools/telephone_probe.py` stays in rnse (it reads the firmware; it is reverse engineering, not the bridge). **ports done** (branch `split-c2`): `doom/`, `quake/`, `umac/`, `win311/` under `ports/`, each with its launcher beside it (`doom/doomboot`, `quake/quakeboot`, `umac/macboot`, `win311/pcboot`: the folder names kept, since build.sh names its output after them); `ports/nes/` (`nes`, `nesboot`, `nofrendo`, `build.sh` from `sdk/nes-build.sh`, `tests/protocol.c`, `package.py`); `ports/dvd/` (`dvd`, `check.sh`, `tests/dvd_host.c`); the six docs in `ports/docs/`; one GPL `ports/LICENSE`; `ports/` is the crate `rnse-ports` (`tests/disc.rs` with the seven end-to-end tests, `tests/dvd.rs`). The build scripts find the kit through `RNSE_SDK` (default `../sdk` beside `ports/`) and mount the git working trees of both into the container. Checked: the launchers, DVD and NES byte-identical; the four games byte-identical once the build date (`__DATE__`/`__TIME__`, which made even two builds in one place differ) and the source paths (`-fmacro-prefix-map`) are pinned, old layout (a worktree of `main`) against new. `tools/package-nes.py` split into `ports/nes/package.py` and `hardware/nes-can/package.py`. `tests/nes/protocol.c` tests the game's side of the adapter protocol (the adapter's firmware shares no code with it), so it went to the port, and rnse-hardware pins nothing of rnse-ports. **linux done** (branch `claude/repo-split-planning-j2okvs`): `linuxboot` (from `sdk/examples`) and `docs/linux.md` under `linux/`; `linux/` is the crate `rnse-linux` (GPL-2.0-only; `tests/disc.rs` with the four `linux_*` tests, `linux_firmware_disc`, copies of their helpers and of `tests/data/tones.mp3`); rnse's `tests/disc.rs` then needs none of the kit's helpers. Checked: `linuxboot` byte-identical for both units from its new place; the workspace's tests build without warnings and pass, but no disc, kernel or boot ROM was available, so the Linux tests returned early. **hardware done** (same branch): it already needed nothing outside itself (the adapter's firmware has its own copy of the protocol, which the port owns); paths in it written from its own root, `hardware/README.md` and `hardware/.gitignore` added. The five repositories exist, empty and private (2026-11-19). Next: D |
-| D. Extract all from one commit | to do: generalise `split/rnse-sdk/` (`extract.sh`, `finish.py`, `verify.sh`) to take a repository name; `git filter-repo` is now installed, so run and inspect the passes for real; the user runs each repository's end-to-end tests with their disc, boot ROM and data |
+| D. Extract all from one commit | tooling done and tried (2026-11-19; "Phase D" below): all five extracted from one commit and verified, the trees equal to their directories, the histories audited clean. To do: extract from `main` once this tooling is merged (the commit the repositories pin must stay on GitHub), push each (with the user's approval), and the user runs each repository's end-to-end tests with their disc, boot ROM and data |
 | E. Publish in dependency order | to do: rnse public first (so the others' `git` dependency needs no token), then rnse-sdk `v0.1.0`, then rnse-ports, rnse-linux, rnse-sdbridge, rnse-hardware; CI, scanning and branch protection on each |
 | F. Clean up rnse (phase 7) | to do; wiki pages may then link to the public repositories |
-| 1. Create rnse-sdk | ready: tooling in `split/rnse-sdk/`, tree step tested; part of D |
+| 1. Create rnse-sdk | part of D (`split/extract.sh rnse-sdk`) |
 | 1b. `sdk/` as a submodule | dropped (see above) |
 | 2–5. ports, linux, sdbridge, hardware | part of C and D |
 | 6. rnse-wiki | decided: the wiki stays in rnse |
+
+## Phase D: extract all from one commit
+
+Tooling, in `split/` (standard library only):
+
+- `extract.sh NAME SOURCE DEST`: a fresh clone of SOURCE's branch into
+  DEST, three `git filter-repo` passes, `finish.py`, `cargo
+  generate-lockfile`, one commit. Nothing is pushed. `split/NAME/root`
+  names the directory that becomes the root. Pass 1 keeps it, the names
+  its files had before they moved into it, and `split/NAME/include.txt`,
+  and strips `Claude-Session:` lines and session links from commit
+  messages; pass 2 makes the directory the root; pass 3 drops
+  `split/NAME/exclude.txt` and, for every other repository, the old
+  names of its files under this root (what moved out of `sdk/`). The
+  lists it used are left beside DEST (`DEST.include.txt`,
+  `DEST.exclude.txt`) to inspect.
+- `tools/history.py ROOT`: those old names, from `git log --follow`,
+  renames only: the first copy met going back ends a file's history (a
+  LICENSE copied from nofrendo's COPYING, pcboot started as a copy of
+  doomboot), which stays with the file it was copied from. In
+  `--paths-from-file` a rename line only renames, so each old name also
+  gets a line of its own.
+- `finish.py NAME DEST`: relative markdown links leaving the repository
+  become links to the repository that has the file on GitHub (a link
+  that leads nowhere in rnse is an error); rnse-sdk's paths written from
+  rnse's root are rewritten (`sdk/build.sh` is `./build.sh`); in the
+  others the kit beside the directory (`../sdk`) becomes the checkout of
+  rnse-sdk beside the repository (`../rnse-sdk`); `Cargo.toml` takes
+  `rnse` from git at SOURCE's commit, with rnse's release profile;
+  `.gitignore` is the directory's own, rnse's rules that apply anywhere
+  (firmware, keys, data, `/firmware/`) and its own directory's;
+  `split/NAME/overlay/` is copied in (CLAUDE.md with the hardware rules
+  and the firmware rule pasted verbatim from rnse's, README.md, CI).
+- `verify.sh NAME DEST`: `public/audit.sh` on the history, nothing
+  firmware-like tracked, no broken relative link, the rules verbatim in
+  CLAUDE.md (all but rnse-hardware), no `../sdk` left, then
+  `split/NAME/verify.sh`: each repository's builds and tests
+  (`tools/cargo-test.sh`, which fails on warnings). `RNSE_LOCAL=DIR`
+  builds against a local rnse checkout instead of the pinned commit,
+  for trying the tooling out before that commit is on GitHub.
+  `VERIFY_GAMES=1` (ports), `VERIFY_KERNEL=1` (linux) and
+  `VERIFY_FIRMWARE=1` (sdbridge) add the builds that download.
+
+Tried on 2026-11-19, from one commit, all five into a scratch directory,
+side by side (so each finds the kit as `../rnse-sdk`), with
+`RNSE_LOCAL`:
+
+| Repository | Commits | Checked |
+|---|---|---|
+| rnse-sdk | 98 | every example for every unit in `tools/examples.txt`, the host tests, 29 tests |
+| rnse-ports | 35 | the launchers, the DVD player and nesboot for both units, the NES emulator, 10 tests |
+| rnse-linux | 23 | linuxboot for both units, 4 tests |
+| rnse-sdbridge | 32 | the host tests, linkbench, h264bench, aaview and aaviewer, 11 tests (linkbench and the viewer on the emulator for real: they need no firmware) |
+| rnse-hardware | 15 | the boards' sources, no ZIP in the history, the scripts compile |
+
+The tree before the finishing commit is the directory in rnse exactly
+(rnse-sdk's: `sdk/` and its three docs); every audit was clean. No
+disc, boot ROM, kernel or game data was available: the end-to-end tests
+returned early, so they have not run in the new repositories. The
+games, the kernel and the RP2040 firmwares were not built (downloads).
+
+Steps for the real run (each push only with the user's approval):
+
+1. Merge the tooling into rnse's `main`; clone `main` (that commit is the
+   one every repository pins, so it must stay there).
+2. `sh split/extract.sh NAME CLONE DIR/NAME` for all five, side by side.
+3. `RNSE_SDK=DIR/rnse-sdk sh split/verify.sh NAME DIR/NAME` for each
+   (no `RNSE_LOCAL`: the pinned commit is fetched).
+4. Push each one's `main` to its empty repository. rnse-sdk first and
+   tagged `v0.1.0`: the others' CI checks it out at that tag.
+5. The user runs the end-to-end tests of each with their data.
 
 ## Phase 0: prepare `sdk/` in rnse (done)
 
@@ -155,6 +226,9 @@ available). Every remaining example builds for both units
 (`modern` for the 192 only, by design).
 
 ## Phase 1: create rnse-sdk
+
+(Superseded by phase D's generic tooling, `split/extract.sh rnse-sdk`;
+kept as the record of how it was planned.)
 
 Tooling: `split/rnse-sdk/`
 
