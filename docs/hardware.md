@@ -815,28 +815,51 @@ What is not modelled, or assumed:
   stored with no command before CMD2 (or after CMD2's long answer:
   which is not known) CMD3's answer came out in place.  The model takes
   it to be the setting (`Sd::rpr_at`).
-* **SDCTL bit 2, the interrupts, and ACMD41's answer** (measured on a
-  unit, 2026-11-18, `linkbench` reading the interrupts that came and
-  SDCTL after each command of a 32 MB card's start).  Interrupt 10
-  (vector 0x238) comes for a good response, short (CMD55, CMD3) or long
-  (CMD2), and bit 2 goes up.  ACMD41's answer (R3: index and CRC fields
-  all ones, as the specification has it) raises none of 0-3, 6, 7, 10,
-  11, leaves bit 2 down and sets error flag 0x40 and bit 15 (`B842`);
-  its words are in the response register all the same.  Bit 2 is not
-  cleared by writing a 1 to it (3806 written back read 3806); it is
-  down after the card interface's setting has been written with no
-  command, after the 8 words of a long response have been read, and
-  after a command that got no answer; reading the 3 words of a short
-  one leaves it up.  So a program that polls bit 2 straight after
-  starting a command can see the last response's (`linkbench` got
-  CMD55's answer for ACMD41's), and a program that waits for interrupt
-  10 waits in vain for ACMD41: `linkbench` now ends the wait on
-  interrupt 10 or error flag 0x58.  How the stock program, which waits
-  for interrupt 10 with a timeout, gets ACMD41's answer is not known;
-  the model still gives R3 an interrupt, without which the stock
-  program's start does not get through.  The 32 MB card gave no
-  answer to `linkbench`'s CMD9 (the address from CMD3 right; CMD7 with
-  it then worked), which is not understood either.
+* **SDCTL bit 2, the response interrupt, and ACMD41's answer**
+  (measured on a unit, 2026-11-18, `linkbench`).  Interrupt 10 (vector
+  0x238) comes for a response when bit 2 ("a response in") goes up;
+  if bit 2 is still up from the last response, the next raises none.
+  Bit 2 stays up after the response's words are read, and writing
+  SDCTL does not take it down, with bit 2 written as 0 or 1 (a setting
+  written with no command before CMD9 left it up, and CMD9's answer,
+  which came, raised nothing).  What does take it down: the eighth read
+  of the response register since the response came (a long response's
+  8 words; linkbench now reads it in threes until bit 2 is down before
+  every command, 9 reads at most, which keeps the read position);
+  ACMD41's answer (R3: index and CRC fields all ones), which instead
+  sets error flag 0x40 and bit 15 (`B842`) and raises no interrupt at
+  all, its words in the register all the same; and, by all
+  appearances, a read of SDCTL after the 3 words of a short response,
+  which is what the stock program does after each one (and it reads
+  sectors at 353 KB/s on the unit, each waiting for this interrupt);
+  reads of SDCTL by pointer (`*dp0`, linkbench's `rdreg`) did not.  A
+  program that does none of these waits out every response after the
+  first: linkbench's single-block reads were 51 KB/s, every one late
+  (`RESP 4096` of the program's count), and its CMD18s after the first
+  of a test lost their first block's place while the card went on
+  sending; with the reads in threes, 653 KB/s and 2007 KB/s clean.
+  The model has all of it (`Sd::rpr_in`; it does not tell pointer
+  reads from direct ones, and it gives ACMD41's answer the interrupt,
+  which the stock program needs there and which on a unit it gets
+  somehow).  The 32 MB card's CMD9 "no answer" was the same thing.
+* **After CMD12, reset the interface and take one word.**  With bit 2
+  dealt with (above), a unit's CMD18s of 64 blocks at / 3 to / 5 still
+  came, now and then (1 to 10 commands of 64), with every block's last
+  16-bit word wrong: the block's CRC16 shifted 3-5 bits left with ones
+  after it, the last word stored ~20 bit times late, after the CRC and
+  end bit had gone through the shift register (the RP2040 bridge showed
+  the same in whole commands).  Whether a command does it is settled
+  when it begins and shows in no SDCTL bit; what the stopped read
+  leaves is one word every time (linkbench's drain took exactly one
+  before each command).  The cure, found on the unit (2026-11-18,
+  `linkbench`): after CMD12, the interface's reset (SDCTL bit 8, then
+  the setting) and a one-word buffer transfer into spare memory
+  whatever SDCTL bit 0 says (the reset hides the word but does not
+  take it).  With it, no wrong word in 2 MB at / 3 (2626 KB/s), / 4
+  (2007 KB/s) or / 5, every time; without it, 10 bad commands of 64 in
+  the same run.  A wait of 16 to 128 rounds before the next block's
+  transfer, a 1 ms pause, CMD13 between commands: none of these did.
+  The model does not have the late last word at all.
 * **A word sent too soon after another is lost, by the program's own
   design.**  It takes the words of a message's head in its host
   interrupt (0x0230, into a ring of 32 words at 0x0a64), but the words

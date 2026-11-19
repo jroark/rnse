@@ -188,20 +188,24 @@ struct Sd {
     /// 8 mod 3 = 2, and on), and the stock program reads just 3 or 8.
     /// A write of SDCTL without a command puts the position back to 0.
     /// SDCTL bit 2 ("a response in", `rpr_in`) stays up after the words
-    /// have been read, and through the next command: a 1 written to it
-    /// takes it down (the stock program starts each command by writing
-    /// back bits 0-2 as it read them), and so does a read past the
-    /// words.  The response's interrupt comes when it goes up, so none
-    /// comes for a response while it is still up.  Seen on a unit,
-    /// 2026-11-18, with programs that started commands writing bit 2 as
-    /// 0: reading 3 words of each and polling bit 2, ACMD41 got CMD55's
-    /// answer; reading 8, never; reading 3 and waiting for the
-    /// interrupt, CMD55 got one and ACMD41 none.
+    /// have been read and through the next command, whatever is written
+    /// to SDCTL.  What takes it down: a read of SDCTL once the response's
+    /// words have all been read (as the stock program reads it after
+    /// each response, and gets the next one's interrupt; on a unit,
+    /// 2026-11-18, reads by pointer, `*dp0`, did not, which the model
+    /// does not tell apart), the eighth read of the response register
+    /// since the response came, and ACMD41's answer.  A program that
+    /// does none of these gets no interrupt for its next response
+    /// (linkbench's single-block reads on a unit: every one 7 ms late).  The response's
+    /// interrupt comes when it goes up, so none comes for a response
+    /// while it is still up.  All seen on a unit, 2026-11-18
+    /// (docs/hardware.md).
     rpr: [u16; 8],
     rpr_len: usize,
     rpr_at: usize,
     rpr_left: usize,
     rpr_in: bool,
+    rpr_reads: usize,
     /// A response on its way from the card, and when it is complete.
     response: Option<(u64, Vec<u16>)>,
     /// A block of data on its way.
@@ -641,10 +645,24 @@ impl Dsp {
             let (_, words) = self.sd.response.take().unwrap();
             self.sd.rpr[..words.len()].copy_from_slice(&words);
             self.sd.rpr_left = words.len();
-            if !self.sd.rpr_in {
+            self.sd.rpr_reads = 0;
+            if words.len() == 3 && words[0] >> 8 == 0x3f {
+                // ACMD41's answer (R3: index and CRC fields all ones) is
+                // taken for a damaged one: error flag 0x40 (and bit 15),
+                // bit 2 down, the words in (on a unit, 2026-11-18: SDCTL
+                // B842 after it).  It raises the interrupt here, which is
+                // assumed: linkbench saw none for it on a unit, and the
+                // stock program, which waits for one, gets its answer
+                // there somehow.
+                self.sd.ctl |= 0x40;
+                self.sd.rpr_in = false;
                 self.request(irq::SDCR);
+            } else {
+                if !self.rpr_up() {
+                    self.request(irq::SDCR);
+                }
+                self.sd.rpr_in = true;
             }
-            self.sd.rpr_in = true;
         }
         if self.sd.block.as_ref().is_some_and(|b| now >= b.0) {
             let (_, words) = self.sd.block.take().unwrap();
@@ -718,6 +736,11 @@ impl Dsp {
 
     fn sd_div(&self) -> u64 {
         SD_DIV[((self.sd.ctl >> 10) & 15) as usize]
+    }
+
+    /// SDCTL bit 2 (see `Sd::rpr_in`).
+    fn rpr_up(&self) -> bool {
+        self.sd.rpr_in
     }
 
     /// The command in the command registers goes to the card.
@@ -1402,20 +1425,29 @@ impl Dsp {
             0x12 => self.sd.agh,
             0x13 => self.sd.agl,
             0x14 => {
+                let taken = self.sd.rpr_in && self.sd.rpr_left == 0 && self.sd.rpr_reads > 0;
                 let errors = self.sd.ctl & 0x78;
-                (self.sd.ctl & 0x3e78)
+                let v: u16 = (self.sd.ctl & 0x3e78)
                     | if errors != 0 { 0x8000 } else { 0 }
                     | if self.cycles < self.sd.cen_until { 0x4000 } else { 0 }
-                    | if self.sd.rpr_in { 4 } else { 0 }
+                    | if self.rpr_up() { 4 } else { 0 }
                     | 2
-                    | u16::from((!self.sd.words.is_empty() || self.sd.stray.is_some() && !self.sd.stray_read) && self.sd.pcr & 2 == 0)
+                    | u16::from((!self.sd.words.is_empty() || self.sd.stray.is_some() && !self.sd.stray_read) && self.sd.pcr & 2 == 0);
+                if taken {
+                    self.sd.rpr_in = false;
+                }
+                v
             }
             0x15 => {
                 // (No command since the reset: as a short response.)
                 let len = self.sd.rpr_len.max(3);
                 let w = self.sd.rpr[self.sd.rpr_at % len];
                 self.sd.rpr_at = (self.sd.rpr_at % len + 1) % len;
-                if self.sd.rpr_left == 0 {
+                // Eight reads since it came take bit 2 down (on a unit: a
+                // long response's 8 words did, a short one's 3 did not,
+                // 8 of a short one did).
+                self.sd.rpr_reads += 1;
+                if self.sd.rpr_reads >= 8 {
                     self.sd.rpr_in = false;
                 }
                 self.sd.rpr_left = self.sd.rpr_left.saturating_sub(1);
@@ -1526,12 +1558,9 @@ impl Dsp {
             0x12 => self.sd.agh = v,
             0x13 => self.sd.agl = v,
             0x14 => {
-                // The error flags are cleared by storing zeros, "a
-                // response in" by storing a one.
+                // The error flags are cleared by storing zeros ("a
+                // response in" is not: see `rpr_in`).
                 self.sd.ctl = (v & 0x3e00) | (self.sd.ctl & v & 0x78);
-                if v & 4 != 0 {
-                    self.sd.rpr_in = false;
-                }
                 if v & 0x100 != 0 {
                     // Reset of the interface.
                     // (The stray word stays, no longer flagged.)
@@ -1542,12 +1571,11 @@ impl Dsp {
                 if v & 0x4000 != 0 {
                     self.sd_command();
                 } else {
-                    // A setting with no command: the response register
-                    // is read from its first word again (assumed: on a
-                    // unit the eight-read program above got CMD3's
-                    // answer in place after the setting written before
-                    // CMD2; that CMD2's long answer did it is the other
-                    // explanation).
+                    // A setting with no command: the response register is
+                    // read from its first word again (assumed: on a unit the
+                    // eight-read program got CMD3's answer in place after
+                    // the setting written before CMD2; that CMD2's long
+                    // answer did it is the other explanation).
                     self.sd.rpr_at = 0;
                 }
             }
@@ -2000,15 +2028,22 @@ mod tests {
             d.io_write(0x12, (arg >> 16) as u16);
             d.io_write(0x13, arg as u16);
             let ctl = d.io_read(0x14);
-            d.io_write(0x14, (ctl & 0x7f87) | 0x4000);
+            d.io_write(0x14, (ctl & 0x7f83) | 0x4000);
             d.run(200_000);
-            // As the stock program: the response's interrupt, then its
-            // 3 or 8 words.
+            // The response's interrupt, then its 3 or 8 words; then, as
+            // linkbench does, the register read to 9 words in all, which
+            // takes SDCTL bit 2 down for the next one's interrupt.
             if d.pending & 1 << irq::SDCR == 0 {
                 return Vec::new();
             }
-            assert_ne!(d.io_read(0x14) & 4, 0);
-            (0..if idx & 0x40 != 0 { 8 } else { 3 }).map(|_| d.io_read(0x15)).collect()
+            assert!(d.io_read(0x14) & 0x44 != 0);
+            let n = if idx & 0x40 != 0 { 8 } else { 3 };
+            let words = (0..n).map(|_| d.io_read(0x15)).collect();
+            if n == 3 {
+                (0..6).for_each(|_| _ = d.io_read(0x15));
+            }
+            assert_eq!(d.io_read(0x14) & 4, 0);
+            words
         }
         // The clock is stopped after a reset: no answer.
         assert_eq!(d.io_read(0x14) & 0x200, 0x200);
@@ -2025,22 +2060,28 @@ mod tests {
         assert_eq!(more, [r[0], r[1], r[2], r[0], r[1]]);
         assert_eq!(command(&mut d, 0x4c29, 0x00ff_8000), [0x00ff, 0x3f80, 0xff80], "ACMD41 read late");
         d.io_read(0x15);
-        // SDCTL bit 2 stays up after the words are read, and through a
-        // command started with it written as 0, whose response then
-        // raises no interrupt; a 1 written takes it down.
-        command(&mut d, 0x4c37, 0);
-        assert_ne!(d.io_read(0x14) & 4, 0);
+        // SDCTL bit 2: up with a response and after its 3 words are
+        // read; what is written to SDCTL does not take it down, and a
+        // command started with it up gets no interrupt; a read of SDCTL
+        // after the words does.
         d.pending = 0;
         d.io_write(0x11, 0x4c37);
-        let ctl = d.io_read(0x14);
-        d.io_write(0x14, (ctl & 0x7f83) | 0x4000);
+        d.io_write(0x12, 0);
+        d.io_write(0x13, 0);
+        d.io_write(0x14, 0x7802);
         d.run(200_000);
-        assert_ne!(d.io_read(0x14) & 4, 0);
-        assert_eq!(d.pending & 1 << irq::SDCR, 0, "no interrupt for CMD55's");
+        assert_ne!(d.pending & 1 << irq::SDCR, 0);
+        assert_ne!(d.io_read(0x14) & 4, 0, "up");
+        d.io_write(0x14, 0x3802);
+        d.io_write(0x14, 0x3806);
+        assert_ne!(d.io_read(0x14) & 4, 0, "writes leave it, and so does a read before the words");
+        d.pending = 0;
+        d.io_write(0x14, 0x7802);
+        d.run(200_000);
+        assert_eq!(d.pending & 1 << irq::SDCR, 0, "no interrupt: it was still up");
         (0..3).for_each(|_| _ = d.io_read(0x15));
-        let ctl = d.io_read(0x14);
-        d.io_write(0x14, ctl & 0x3e07);
-        assert_eq!(d.io_read(0x14) & 4, 0, "taken down by a 1");
+        assert_ne!(d.io_read(0x14) & 4, 0, "the read after the words sees it up");
+        assert_eq!(d.io_read(0x14) & 4, 0, "and takes it down");
         assert_eq!(command(&mut d, 0x4c29, 0x00ff_8000)[0], 0x3f80, "the application command CMD55 began");
         assert_eq!(command(&mut d, 0x4c42, 0).len(), 8, "CMD2, a long response");
         let r = command(&mut d, 0x4c03, 0);

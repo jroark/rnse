@@ -3267,7 +3267,9 @@ fn link_benchmark_from_the_sd_loader() {
     assert!(text.contains("SLOT 1, STOCK PROGRAM"), "{}: {}", name, text);
     assert!(text.contains("CARD STARTED") && !text.contains("OWN PROGRAM: STEP"), "{}: {}", name, text);
     let summary = &text[text.find("LINKBENCH 1: KB/S").unwrap()..];
-    for line in summary.lines().filter(|l| l.contains(" KB/S ")) {
+    // (Not the comparison for a unit with commands started the old way,
+    // "OLD", which on a unit and here gets no response interrupt.)
+    for line in summary.lines().filter(|l| l.contains(" KB/S ") && !l.contains(" OLD ")) {
         assert!(line.contains(" B0 T0 L0") && !line.contains("FAIL"), "{}: {}", name, line);
     }
     assert!(!summary.contains("NOT RUN"), "{}: {}", name, summary);
