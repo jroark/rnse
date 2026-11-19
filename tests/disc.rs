@@ -1838,6 +1838,83 @@ fn link_benchmark_from_the_sd_loader() {
     until(&mut m, again, "RESULTS THERE", 60).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[again..])));
 }
 
+/// The phone's video on the 192 as a unit runs it (sdbridge/,
+/// SDLINK.UF2; sdk/examples/aaview and aaviewer): the SD loader started by
+/// the stock software, the bridge in the second slot (its card made up by
+/// the bridge's own code, sdbridge/tests/host.c, with tests/data/margin.264
+/// laid into AALINK.BIN as a phone's messages), a card in the first with
+/// AAVIEW.BIN and AAVIEWER.IMG.  The loader starts AAVIEW.BIN, that loads
+/// the viewer and enters it, the viewer finds the bridge through the
+/// stock card program, takes the slot over with its own, and decodes
+/// every picture, each frame's CRC-32 as ffmpeg's (the viewer built with
+/// -DAA_CRC).  RETURN held goes back to the loader.  Needs a host C
+/// compiler as well (tests/aaviewer.rs has the viewer with no firmware).
+#[test]
+fn android_auto_viewer_from_the_sd_loader() {
+    use rnse::board::Model;
+    let Some(image) = disc() else { return };
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let sdk = root.join("sdk");
+    let Some((mut m, name, _)) = started_by_stock_software(&image, Model::Rnse192, "sdboot") else { return };
+    if sdk_example(&image, Model::Rnse192, "aaview").is_none() { return }
+    let first = std::fs::read(sdk.join("out/aaview-192.bin")).unwrap();
+    let built = std::process::Command::new("sh").arg(sdk.join("build.sh")).args(["192", "aaviewer"])
+        .env("EXTRA_CFLAGS", "-DAA_CRC").output().unwrap();
+    assert!(built.status.success(), "{}", String::from_utf8_lossy(&built.stderr));
+    let viewer = std::fs::read(sdk.join("out/aaviewer-192.bin")).unwrap();
+    let _ = std::process::Command::new("sh").arg(sdk.join("build.sh")).args(["192", "aaviewer"]).output();
+    // The bridge's card, from its host test program.
+    let dir = std::env::temp_dir().join(format!("rnse-aaview-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let tool = dir.join("host");
+    let src = root.join("sdbridge/src");
+    let Ok(cc) = std::process::Command::new("cc").args(["-O2", "-o"]).arg(&tool).arg(root.join("sdbridge/tests/host.c"))
+        .arg(src.join("card.c")).arg(src.join("volume.c")).arg(src.join("crc.c")).arg(src.join("aap.c"))
+        .arg(src.join("aastream.c")).output() else { return };
+    assert!(cc.status.success(), "{}", String::from_utf8_lossy(&cc.stderr));
+    let bridge_image = dir.join("bridge.img");
+    assert!(std::process::Command::new(&tool).arg(&bridge_image).arg(root.join("tests/data/margin.264")).status().unwrap().success());
+    let bridge = std::fs::read(&bridge_image).unwrap();
+    std::fs::remove_dir_all(&dir).ok();
+    let want: Vec<String> = std::fs::read_to_string(root.join("tests/data/margin.crc")).unwrap()
+        .lines().map(|l| l.trim().to_ascii_lowercase()).filter(|l| !l.is_empty()).collect();
+
+    let ms = m.cycles_per_ms();
+    m.cpu.breakpoints.clear();
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    assert!(m.insert_card(1, rnse::dev::sdhi::Card::from_bytes(bridge).unwrap()));
+    assert_eq!(m.run(2000 * ms), Stop::Budget);
+    let card = rnse::fat::card("RNSE", &[rnse::fat::Entry::file("AAVIEW.BIN", first), rnse::fat::Entry::file("AAVIEWER.IMG", viewer)], None).unwrap();
+    let at = m.console.len();
+    // The only program on the card: the loader starts it by itself.
+    assert!(m.insert_card(0, rnse::dev::sdhi::Card::from_bytes(card).unwrap()));
+    let started = until(&mut m, at, "rnse sdk: aaviewer", 60).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[at..])));
+    let crcs = |m: &Machine| -> Vec<String> {
+        String::from_utf8_lossy(&m.console[started..]).lines().filter_map(|l| l.strip_prefix("aaviewer: frame "))
+            .filter_map(|l| l.split(" crc ").nth(1)).map(|c| c.trim().to_ascii_lowercase()).collect()
+    };
+    for _ in 0..1200 {
+        if crcs(&m).len() >= want.len() {
+            break;
+        }
+        assert_eq!(m.run(100 * ms), Stop::Budget, "{}: {:?}: {}", name, m.cpu.fault, String::from_utf8_lossy(&m.console[started..]));
+    }
+    let text = String::from_utf8_lossy(&m.console[started..]).into_owned();
+    println!("{}", text);
+    assert!(text.contains("BRIDGE IN SLOT 2"), "{}: {}", name, text);
+    let got = crcs(&m);
+    assert_eq!(got.len(), want.len(), "{}: {}", name, text);
+    for (i, (g, w)) in got.iter().zip(want.iter()).enumerate() {
+        assert_eq!(g.trim_start_matches('0'), w.trim_start_matches('0'), "{}: frame {}: {}", name, i, text);
+    }
+    // RETURN held: back to the loader, through aaview.
+    let before = m.console.len();
+    assert!(m.panel_key("RETURN", true));
+    assert_eq!(m.run(2500 * ms), Stop::Budget);
+    assert!(m.panel_key("RETURN", false));
+    until(&mut m, before, "TEST ENDED BY HOLDING RETURN", 30).unwrap_or_else(|| panic!("{}: {}", name, String::from_utf8_lossy(&m.console[before..])));
+}
+
 /// The DVD player (`sdk/examples/dvd`) as a unit starts it: the stock
 /// software starts the SD loader from the disc, the loader the player
 /// from the card (DVD.BIN), CD EJECT takes the loader's disc out (the

@@ -18,5 +18,7 @@ tests/dvd_host.c
 examples/linuxboot/
 # rnse-sdbridge: the SD link, Android Auto video
 examples/linkbench/
+examples/aaview/
+examples/aaviewer/
 examples/h264bench/
 third_party/h264bsd/
