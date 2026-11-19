@@ -75,44 +75,36 @@ processors").  `--wav` records what comes out:
         --cycles 7000000000 --key MEDIA@15000 --key SOFT_TR@18000 \
         --knob 1:1@20000 --key SELECT@21500 --wav out.wav
 
-`sdk/` has the start of a kit for writing software of your own for the
-unit: start-up code, a hardware layer for each generation and seven
-examples: one draws, keeps time and talks on the debug serial port, one
-reads the faceplate's keys and knobs, one reads a file from the CD, one
-listens and talks on the CAN bus, and three are meant for a real
-unit: `probe`, which only shows that it runs and hands back to the
-stock software, `report`, which reads out what the emulator has had to
-assume (the processor's registers, the boot ROM, and on the 192 the
-card processors' straps and clock) and shows and sends it, and `drive`,
-which logs what the CD drive answers while a disc goes out and in.
+## Related repositories
+
+Software for the unit itself, which this emulator runs and tests, was
+split out of this repository with its history (`split/PLAN.md`):
+
+| Repository | What it is |
+|---|---|
+| [rnse-sdk](https://github.com/jroark/rnse-sdk) | a kit for writing software of your own for the unit: start-up code, a hardware layer for each generation, drivers (faceplate, fold-down display, CD, CAN, SD cards, sound, the radio processor), a small C library, the SD loader and examples, among them `report` and `drive` for a real unit |
+| [rnse-ports](https://github.com/jroark/rnse-ports) | Doom, Quake, a Mac Plus (umac), Windows 3.11 on Tiny386, a NES emulator and a DVD player for the 192, from an SD card |
+| [rnse-linux](https://github.com/jroark/rnse-linux) | Linux for the 192: the kernel's board support and drivers, BusyBox, a GUI run with the faceplate |
+| [rnse-sdbridge](https://github.com/jroark/rnse-sdbridge) | an SD card slot of the 192 as a link into the unit: RP2040 firmware and the 192's programs, on the way to Android Auto |
+| [rnse-hardware](https://github.com/jroark/rnse-hardware) | KiCad boards: a NES controller adapter and a PS/2 adapter on CAN, the SD bridge card |
+
 `rnse custom` puts such a program in the update loader's place on a
 copy of a disc (it then runs from RAM and leaves the flash alone); the
 unit's own software, run in the emulator, takes such a disc for an
-update and starts the program, as a real unit would have to, and the
-program can end by handing over to the stock loader, which the image
-carries along, so that the unit is its ordinary self again.  And
-`--strict` lists what a program used that the emulator has no model of.
-`--gdb PORT` puts the machine under GDB's control.
-`ports/dvd/dvd` is a DVD player for the 192, started from an SD card
-by the SD loader: unencrypted DVD-Video discs, MPEG-2 decoded at half
-width, AC-3, MPEG and LPCM sound ([ports/docs/dvd.md](ports/docs/dvd.md)).
-Bigger programs come from an SD card through the SD loader: Linux
-(`linux/docs/linux.md`), the shareware Doom (`ports/docs/doom.md`) and the shareware
-Quake (`ports/docs/quake.md`), which run on the kit's own drivers, built by
-`ports/doom/build.sh` and `ports/quake/build.sh` from doomgeneric, id's GPL Quake
-source and id's shareware data, all downloaded and none kept here
-(Quake reads its 18 MB of data from the card as it plays), and a Mac
-Plus (`ports/docs/umac.md`): Matt Evans's umac, built by `ports/umac/build.sh`,
-running the Mac's own ROM and System from the card at 384 x 235, with
-the two knobs as its mouse; and a PC
-(Tiny386) that runs MS-DOS and Windows 3.11 from a disk image installed
-from your own floppies, the knobs as its mouse (`ports/docs/win311.md`).
-One example, `report`, is meant for a real unit: it reads the
-processor's registers and the boot ROM (which is on no disc) and gets
-them out, on the screen and over the CAN bus, where `rnse report`
-puts them back together.
-It runs in the emulator on both units; whether a real unit starts it is
-untested.  See [docs/custom-firmware.md](docs/custom-firmware.md).
+update and starts the program, as a real unit would have to.  `rnse
+firmware` puts one in the operating system's place, `rnse report`
+reassembles what the kit's `report` sends over CAN, `--strict` lists
+what a program used that the emulator has no model of, and `--gdb PORT`
+puts the machine under GDB's control.  What running in the emulator
+does and does not establish about a real unit is in rnse-sdk's
+[docs/custom-firmware.md](https://github.com/jroark/rnse-sdk/blob/main/docs/custom-firmware.md).  Each repository pins the commit
+of this one its tests run on; this repository's CI runs their tests
+against every change here (`.github/workflows/downstream.yml`).
+
+A path such as `sdk/examples/report`, `ports/docs/doom.md` or
+`linux/linuxboot` in this repository's comments and notes names a file
+of the repository of that name (`sdk/` is rnse-sdk's root), as it was
+here before the split.
 
 See [docs/hardware.md](docs/hardware.md) and
 [docs/hardware-193.md](docs/hardware-193.md) for what is known about the
@@ -121,7 +113,7 @@ and file formats, and [docs/boot-rom.md](docs/boot-rom.md) for how the
 missing boot ROM is replaced.
 
 A modern, rotary-controlled replacement firmware for the 192, including native
-SD apps, is described in [docs/modern-192.md](docs/modern-192.md).
+SD apps, is described in rnse-sdk's [docs/modern-192.md](https://github.com/jroark/rnse-sdk/blob/main/docs/modern-192.md).
 
 ## Building
 
@@ -295,9 +287,11 @@ written from the SH-4 manual instead (`src/sh4/tests.rs`).
     src/machine.rs  start-up sequences, boot ROM services, run loop
     src/fw.rs       ISO 9660, LOADING.KWI container, module headers
     src/bin/rnse.rs command line front end
-    sdk/            start-up code, hardware layers and an example for
-                    software of your own (docs/custom-firmware.md)
-    tools/          CPU test tooling
+    tests/          end-to-end tests with a disc image (tests/disc.rs)
+    tools/          CPU test tooling, the wiki's generator
+    web/, wiki/     the emulator in a browser, the site at rns-e.com
+    macos/          the native macOS app
+    split/          how the other repositories were split from this one
     docs/           notes on the hardware and the firmware
 
 ## Legal
@@ -310,25 +304,10 @@ of a disc you own.
 
 ## Licences
 
-Copyright (c) 2026 John Roark. Unless a directory says otherwise:
-
-| What | Licence |
-|---|---|
-| everything not listed below: the emulator, its front ends, the docs, the wiki | MIT ([LICENSE](LICENSE)) |
-| `sdk/` (the kit), `sdbridge/` (the RP2040 bridge) | MIT ([sdk/LICENSE](sdk/LICENSE), [sdbridge/LICENSE](sdbridge/LICENSE)) |
-| `ports/` (Doom, Quake, umac, Windows 3.11, NES, DVD, with their launchers) and `linux/` with the SDK program that starts it (`linux/linuxboot`) | GPL-2.0-only ([ports/LICENSE](ports/LICENSE), [linux/LICENSE](linux/LICENSE)): they are built with, or patch, GPLv2 code |
-| `hardware/` (the KiCad boards) | CERN-OHL-P-2.0 ([hardware/LICENSE](hardware/LICENSE)) |
-
-Third-party code keeps its own licence: `sdbridge/third_party/h264bsd`
-(`LICENSE.md`), `ports/nes/nofrendo` (GPLv2 and LGPLv2,
-`COPYING`, `COPYING.LIB`); the code that the build scripts download
-(the Linux kernel, BusyBox, musl, doomgeneric, Quake, umac, Musashi,
-Tiny386, SeaBIOS, the pico-sdk, mbedTLS) is not in this repository and
-carries its own. No licence here covers the unit's firmware, map data,
-game data or anyone's ROMs and disk images, none of which are included.
-
-## NES on the 192
-
-The [bare-metal NES application](ports/docs/nes.md) loads ROMs from SD and takes two
-original NES controllers through the [dual-controller CAN adapter](hardware/nes-can/README.md).
-The adapter includes KiCad sources, routed PCB, manufacturing plots and MCU firmware.
+Copyright (c) 2026 John Roark.  The emulator, its front ends, the
+docs and the wiki are MIT ([LICENSE](LICENSE)).  The repositories split
+from this one carry their own: MIT for rnse-sdk and rnse-sdbridge,
+GPL-2.0-only for rnse-ports and rnse-linux (they are built with, or
+patch, GPLv2 code), CERN-OHL-P-2.0 for rnse-hardware.  No licence here
+covers the unit's firmware, map data, game data or anyone's ROMs and
+disk images, none of which are included.

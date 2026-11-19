@@ -17,10 +17,10 @@ path = "src/bin/rnse.rs"
 
 [dependencies]
 
-# sdk/ is a member only for its tests (sdk/tests/emulated.rs):
-# cargo test --release -p rnse-sdk.
+# The repositories split from this one (rnse-sdk, rnse-ports, rnse-linux,
+# rnse-sdbridge) take this crate from git; .github/workflows/downstream.yml
+# runs their tests against this checkout.
 [workspace]
-members = ["sdk", "sdbridge", "ports", "linux"]
 # Its own crate, with its own profile and target/ (macos/build.sh).
 exclude = ["macos/bridge"]
 

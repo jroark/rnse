@@ -3,10 +3,11 @@
 
     tools/profile.py PROGRAM.elf PROFILE [--top N] [--nm NM]
 
-PROGRAM.elf is the program as sdk/build.sh links it (sdk/out/NAME-192.elf).
+PROGRAM.elf is the program as rnse-sdk's build.sh links it (out/NAME-192.elf
+there).
 The function an address belongs to is the nearest text symbol at or below
 it, as `nm -n` lists them; NM defaults to sh4-linux-gnu-nm (with
-sdk/tools/sh4-docker on the PATH, the one in the container).  Samples outside
+rnse-sdk's tools/sh4-docker on the PATH, the one in the container).  Samples outside
 the ELF's symbols (the unit's own software, the boot ROM) are counted as
 "(elsewhere)".
 """

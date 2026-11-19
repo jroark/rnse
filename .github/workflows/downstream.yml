@@ -1,0 +1,55 @@
+# The repositories split from this one run their programs on this crate,
+# pinned to a commit in their Cargo.toml.  This runs their tests against
+# the change at hand instead (a [patch] of the git dependency with this
+# checkout), so that a change to the emulator that breaks them shows up
+# here, before they move their pin: rnse-sdk's examples, the ports'
+# launchers, linuxboot and the SD bridge's programs, built with the kit
+# and run on the emulator.
+#
+# Each repository at its main, beside rnse-sdk's main (they find the
+# kit as ../rnse-sdk).  Ubuntu 24.04's GCC 13 is the kit's compiler
+# (rnse-sdk's tools/sh4-docker).  No firmware disc is stored here or in
+# CI: the end-to-end tests report success without one, so this proves
+# that the programs still build and that the tests which need no
+# firmware (the SD bridge's linkbench and viewer) still pass.
+name: downstream
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        repository: [rnse-sdk, rnse-ports, rnse-linux, rnse-sdbridge]
+    steps:
+      - name: rnse (this change)
+        uses: actions/checkout@v4
+        with:
+          path: rnse
+      - name: The kit (rnse-sdk)
+        uses: actions/checkout@v4
+        with:
+          repository: jroark/rnse-sdk
+          path: rnse-sdk
+      - name: ${{ matrix.repository }}
+        if: matrix.repository != 'rnse-sdk'
+        uses: actions/checkout@v4
+        with:
+          repository: jroark/${{ matrix.repository }}
+          path: ${{ matrix.repository }}
+      - name: SH-4 cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-sh4-linux-gnu binutils-sh4-linux-gnu
+      - name: Its tests on this rnse
+        working-directory: ${{ matrix.repository }}
+        run: |
+          cargo test --release \
+              --config "patch.\"https://github.com/jroark/rnse\".rnse.path=\"$GITHUB_WORKSPACE/rnse\""
