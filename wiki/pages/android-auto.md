@@ -1,11 +1,12 @@
 title: Android Auto
 order: 77
-summary: A phone's Android Auto on a 192's own display, decoded by its own processor and driven by its own knob, through a small board in an SD slot.
+summary: A phone's Android Auto on a 192's own display and speakers, decoded by its own processor and driven by its own knob, through a small board in an SD slot.
 ---
 **A 192 can be an Android Auto head unit.** On 18 November a phone's Google Maps ran
 on the bench unit's own display at 10 to 13 pictures a second, decoded by the unit's
 own processor and driven with its own knob and keys, through a small board in an SD
-slot ([on the unit](#on-the-unit)). There is no sound yet.
+slot ([on the unit](#on-the-unit)). The same evening the phone's music played through
+the unit's own sound.
 
 This page follows how it got there: whether the 192 could decode the video at all,
 how fast an SD slot can carry it, the bridge between the phone and the slot, the
@@ -116,9 +117,16 @@ panel, in 256 colours.
 
 ![Android Auto's split screen on the 192](/media/android-auto-split.jpg "The same evening: Android Auto's split screen, media on the left and directions on the right, with the bridge on top of the unit, its ribbon to slot 2 and the phone's USB cable behind it. Street names blurred.")
 
-It is a picture and a knob for now: there is **no sound yet**. Turning the knob
-shows its effect a picture or two later, because each turn travels to the phone and
-comes back as video.
+**The phone's sound plays too.** Its music (48 kHz stereo) and its navigation voice
+and own sounds (16 kHz mono) travel in the same stream as the pictures, their blocks
+between a picture's. On the 192 the card processor that the bridge is *not* in plays
+them: each source is resampled to the processor's 44.1 kHz and mixed, its pace
+nudged by how much is waiting so that the phone's clock and the unit's never drift
+apart, and the sound plays on by itself while a picture is decoded. The volume knob
+sets the unit's amplifier. Apple Music from the phone plays through the bench unit.
+
+Turning the select knob shows its effect a picture or two later, because each turn
+travels to the phone and comes back as video.
 
 ## Building one
 
@@ -176,7 +184,6 @@ hold BOOTSEL while plugging the Pico into a computer and copy the file onto the 
 that appears. On a Pico the board's LED shows the state by blinking: a short flash every
 2 s while it waits, steady once it is working, three short flashes after a failure.
 
-Still open: the sound (the phone's music and voice through a card processor);
-drawing faster, which now costs nearly as much as decoding; the decoder's hottest
-loops in hand-written code; and a board that fits in the car in place of a Pico on
+Still open: drawing faster, which now costs nearly as much as decoding; the
+decoder's hottest loops in hand-written code; and a board that fits in the car in place of a Pico on
 a ribbon.

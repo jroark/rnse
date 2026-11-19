@@ -40,3 +40,6 @@ __pycache__/
 *.key
 *.crt
 *.der
+
+# Logic analyser captures: a capture of the report example holds the boot ROM
+*.sal
