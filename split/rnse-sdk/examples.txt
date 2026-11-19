@@ -4,6 +4,7 @@ base 192 193
 beacon 192 193
 can 192 193
 cardloop 192
+cardstart 192
 cd 192 193
 display 192 193
 drive 192 193
