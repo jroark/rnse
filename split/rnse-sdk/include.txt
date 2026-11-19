@@ -1,0 +1,10 @@
+# Paths of the rnse repository that rnse-sdk takes, with their history
+# (git filter-repo --paths-from-file).  sdk/ becomes the new root
+# (extract.sh renames it); a line `old==>new` keeps the history a file
+# had before it moved into sdk/.
+sdk/
+tools/sh4-docker/==>tools/sh4-docker/
+tools/build-sd-loader.sh==>tools/build-sd-loader.sh
+docs/custom-firmware.md
+docs/sd-loader.md
+docs/modern-192.md

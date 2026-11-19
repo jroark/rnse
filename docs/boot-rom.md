@@ -156,7 +156,7 @@ risk: it is in the stock software, before the program runs.
 That is how an update normally starts, and it works in the emulator
 for all the software seen (`rnse boot disc.iso --installed-index 0640
 --disc-in 9000` runs the whole update on the European 192;
-`tests/disc.rs` `a_disc_put_in_while_the_unit_runs_starts_the_update`
+`sdk/tests/emulated.rs` `a_disc_put_in_while_the_unit_runs_starts_the_update`
 has both units of both discs start their loader that way).  It did not
 for a long time, and why is worth keeping, because it rests on an
 assumption about the drive that only a real drive can confirm.
