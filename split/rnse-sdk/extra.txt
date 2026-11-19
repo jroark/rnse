@@ -1,0 +1,5 @@
+# Paths outside sdk/ that rnse-sdk takes, with their history, and their
+# place in it (split/extract.py).
+docs/custom-firmware.md==>docs/custom-firmware.md
+docs/sd-loader.md==>docs/sd-loader.md
+docs/modern-192.md==>docs/modern-192.md

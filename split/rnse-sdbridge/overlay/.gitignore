@@ -1,0 +1,33 @@
+/target
+out/
+work/
+__pycache__/
+# Firmware and anything derived from it stays out of the repository.
+/firmware/
+*.iso
+*.bin
+*.BIN
+*.KWI
+*.MOT
+*.bz2*
+*.zip
+*.img
+*.IMG
+*.ROM
+*.rom
+*.dsk
+*.DSK
+*.wad
+*.WAD
+*.pak
+*.PAK
+*.UF2
+# Keys and certificates stay out of the repository.
+*.pem
+*.key
+*.crt
+*.der
+*.p12
+*.pfx
+# Logic analyser captures: one of rnse-sdk's report example holds the boot ROM.
+*.sal
