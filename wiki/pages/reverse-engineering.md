@@ -193,4 +193,4 @@ seen on a bench, is all inference so far, and every page on it says so.
 | 14 Nov | the boards photographed and their parts identified; the NEC card processors emulated, MP3 from SD on the 192; the first programs on a real unit; the report reads the boot ROM; drive, watchdog and clocks measured; programs from an SD card; the SDK's MP3 player heard on the unit |
 | 15 Nov | a program installed in flash and removed again; a base firmware with radio and MP3 player; a modern interface for the 192; a persistent SD test loader |
 | 16–17 Nov | Doom, Quake, Windows 3.11, a Mac Plus and an NES emulator, each from an SD card; a DVD player; a benchmark of the SD slots; an SD bridge on a Raspberry Pi Pico, through which a phone projects Android Auto |
-| 18 Nov | the SD slots read at 2 MB/s on the unit; Android Auto on the 192's own display, Google Maps at 10 to 13 pictures a second, driven by the unit's knob and keys |
+| 18 Nov | the SD slots read at 2 MB/s on the unit; Android Auto on the 192's own display, Google Maps at 10 to 13 pictures a second, driven by the unit's knob and keys, with the phone's sound |

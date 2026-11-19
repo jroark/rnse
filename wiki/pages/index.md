@@ -46,5 +46,6 @@ on that unit.
   [Custom firmware](/custom-firmware/#games-and-other-computers).
 - A small board in an SD slot makes a 192 an **Android Auto** head unit: a phone's
   Google Maps runs on the bench unit's own display at 10 to 13 pictures a second,
-  decoded by its own processor and driven with its own knob. Sound is still to come.
+  decoded by its own processor, driven with its own knob, and the phone's music
+  through its own sound.
   See [Android Auto](/android-auto/).
