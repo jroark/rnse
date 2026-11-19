@@ -13,9 +13,13 @@ ids=$(git log --all --format='%ae%n%ce' | sort -u | grep -vE '^(noreply@anthropi
 [ -z "$ids" ] || bad "identities other than noreply ones: $ids"
 n=$(git log --all --format=%B | grep -ciE 'gmail\.com|claude\.ai/code/session|session_0' || true)
 [ "$n" = 0 ] || bad "$n private strings in commit messages"
-for s in gmail.com /Users/ /home/jroark claude.ai/code/session; do
-    c=$(git log --all --oneline -S"$s" | wc -l | tr -d ' ')
-    [ "$c" = 0 ] || bad "'$s' in the files of $c commits: $(git log --all --format=%h -S"$s" | tr '\n' ' ')"
+# The strings are put together here so that this file does not contain
+# them, or the audit would find itself.
+g=gmail; u=Users; h=home; c=claude.ai
+for s in "$g.com" "/$u/" "/$h/" "$c/code/session"; do
+    # (Not in this file: its first version spelled the patterns out.)
+    c=$(git log --all --oneline -S"$s" -- . ':!split/public/audit.sh' | wc -l | tr -d ' ')
+    [ "$c" = 0 ] || bad "'$s' in the files of $c commits: $(git log --all --format=%h -S"$s" -- . ':!split/public/audit.sh' | tr '\n' ' ')"
 done
 p=$(git log --all --format= --name-only | sort -u | grep -iE '\.(iso|bin|kwi|mot|img|sal|pem|key|crt|der|p12|pfx|wad|pak|dsk|rom|zip|xlsx)$' || true)
 [ -z "$p" ] || bad "firmware, keys, archives or data by name: $p"
