@@ -1,10 +1,46 @@
-# Splitting rnse into several repositories
+# Splitting rnse into several repositories, and making them public
 
 This plan is for an agent that can create GitHub repositories and push
 to them. Work through it one phase at a time. Each phase ends with
 something verified and pushed, and the repositories work at every step
 in between. Record progress in the status table below and commit it to
 rnse.
+
+## Decisions (the user, 2026-11-18)
+
+- **Everything goes public**: rnse and every repository split from it.
+- **History**: rewritten once before the split (phase B): the two
+  personal Gmail addresses become `45201+jroark@users.noreply.github.com`,
+  and the `Claude-Session:` lines are stripped from commit messages. The
+  result is pushed as a **new** public `jroark/rnse`; the current private
+  repository is renamed to an archive first. (A force-push in place would
+  leave the old PRs' `refs/pull/*` with the original emails, visible once
+  public.)
+- **Licences**: MIT for rnse, rnse-sdk and rnse-sdbridge; GPL-2.0 for
+  rnse-ports and rnse-linux (they carry GPLv2 code); CERN-OHL-P for
+  rnse-hardware. Write the standard texts, with the user as copyright
+  holder; third-party code keeps its own licence files.
+- **Hardware**: one `rnse-hardware` repository for every KiCad board
+  (`nes-can`, `ps2-can`, `sdbridge-card`), replacing `rnse-nes-can`.
+  Generated fabrication ZIPs are not committed; a script makes them.
+- **Open PRs**: merge #31 (the SD bridge card) without its generated
+  ZIPs; close #5 (the CarPlay-style UI draft, blocked on hardware) and
+  port it to rnse-sdk after the split.
+- **The wiki stays in rnse** (phase 6 is answered: no rnse-wiki). Once
+  the repositories are public, wiki pages may link to them.
+
+## What the audit of 2026-11-18 found
+
+Run on every branch of the private repository (706 paths ever committed):
+no firmware, boot ROM, map data, keys or certificates
+(`sdbridge/tests/tzcert.py` rewrites a test certificate's dates; it holds
+none), no AWS account, bucket or distribution IDs, no unit serial, no
+local home paths, no firmware disassembly listings in docs. Largest blob
+1.4 MB (`assets/faceplate.png`); pack 19 MB. Repeat the audit on the
+rewritten history (phase B) and on each extracted repository (its
+`verify.sh`). Saleae captures (`*.sal`) can hold the boot ROM (the
+`report` example sends it over CAN), so they are ignored and never
+committed.
 
 ## Ground rules (they apply to every phase)
 
@@ -25,10 +61,15 @@ rnse.
   (`sdk/src/flash.c`) and the way back (`sdk/src/wayback.c`, "The way
   back" in `docs/custom-firmware.md`) move unchanged.
 - **Ask the user before anything outward-facing**: creating each
-  repository (name, owner `jroark`, **visibility**: private unless the
-  user says otherwise), pushing to rnse's `main`, making a repository
-  public, adding CI secrets, or changing the AWS role used by the wiki
-  deployment. Approval for one repository does not extend to the next.
+  repository (name, owner `jroark`; visibility is decided: public, but
+  only after its verification passed), pushing to rnse's `main`,
+  force-pushing or renaming anything, deleting branches, adding CI
+  secrets, or changing the AWS role used by the wiki deployment.
+  Approval for one repository does not extend to the next.
+- **Every public repository** gets secret scanning and push protection,
+  protection on `main`, and a README that states the hardware rules
+  (above) and that the user's unit, discs and data are their own risk
+  and their own property.
 - **Keep history** with `git filter-repo` (`pip install
   git-filter-repo`). Run it on fresh clones, never on the user's
   working copy.
@@ -45,34 +86,43 @@ rnse.
 
 | Repository | Contents | Depends on |
 |---|---|---|
-| `rnse` | the emulator crate and CLI (`src/`, `assets/`), `web/`, `macos/`, CPU fuzzing tools, emulator-only end-to-end tests, the reverse-engineering docs (`hardware*.md`, `boot-rom.md`, `firmware-format.md`, `telephone.md`) | nothing |
+| `rnse` | the emulator crate and CLI (`src/`, `assets/`), `web/`, `macos/`, CPU fuzzing tools, emulator-only end-to-end tests, the reverse-engineering docs (`hardware*.md`, `boot-rom.md`, `firmware-format.md`, `telephone.md`), the wiki (`wiki/`, `tools/wiki.py`, its workflow) | nothing |
 | `rnse-sdk` | `sdk/` as its root: kit, C library, driver/measurement examples, SD loader, `base`, `player`, `modern` + `apps/`, `tools/sh4-docker`, `docs/custom-firmware.md`, `sd-loader.md`, `modern-192.md`; a test crate running the programs on `rnse` | `rnse` (git dev-dependency, pinned rev) |
 | `rnse-ports` | Doom, Quake, umac, Windows 3.11 (`doom/`, `quake/`, `umac/`, `win311/` + their `*boot` launchers), NES (nofrendo, `nes`, `nesboot`), the DVD player; their docs and tests | `rnse-sdk` (tag, via `RNSE_SDK`), `rnse` (tests) |
 | `rnse-linux` | `linux/`, `linuxboot`, `docs/linux.md`, the `linux_*` tests | `rnse-sdk`, `rnse` |
-| `rnse-sdbridge` | `sdbridge/` (RP2040), `linkbench`, `h264bench` + `third_party/h264bsd`, `tools/linktest.py`, `aa-streams.sh`, `telephone_probe.py`, `tests/linkbench.rs`, `tests/data/margin.*`, `docs/sdbridge*.md`, `android-auto.md` | `rnse-sdk`, `rnse` |
-| `rnse-nes-can` | `hardware/nes-can` (KiCad), `tests/nes/protocol.c`, the hardware half of `tools/package-nes.py` | none (protocol shared with rnse-ports' NES code) |
-| `rnse-wiki` (optional; ask) | `wiki/`, `tools/wiki.py`, `.github/workflows/wiki.yml` | builds `rnse`'s `web/`; its AWS role trusts rnse's `main` only and would have to be changed by the user |
+| `rnse-sdbridge` | `sdbridge/` (RP2040 firmwares, `patches/`, `link.py`; never `work/` or `out/`), `linkbench`, `h264bench` + `third_party/h264bsd`, the Android Auto viewer (`aaview`, `aaviewer`), `tools/linktest.py`, `aa-streams.sh`, `telephone_probe.py`, `tests/linkbench.rs`, `tests/aaviewer.rs`, `tests/data/margin.*`, `docs/sdbridge*.md`, `android-auto.md` | `rnse-sdk`, `rnse` |
+| `rnse-hardware` | `hardware/nes-can`, `hardware/ps2-can`, `hardware/sdbridge-card` (KiCad sources, BOMs, scripts; fabrication ZIPs generated, not committed), `tests/nes/protocol.c`, the hardware half of `tools/package-nes.py` | none (the NES protocol header is owned by rnse-ports and pinned here) |
 
-Licensing, for the user to decide (do not write licence texts on your
-own): rnse's `Cargo.toml` says MIT but there is no `LICENSE` file.
-rnse-sdk inherits MIT. rnse-ports carries GPL code (nofrendo is
-vendored under GPLv2; Doom, Quake and umac's GPLv2 parts are downloaded)
-next to BSD-3 (Tiny386) and MIT, so it needs a GPL-compatible licence.
-Separating it is one of the reasons for the split.
+Licences (decided above): MIT for rnse, rnse-sdk and rnse-sdbridge
+(h264bsd keeps its own `LICENSE.md`; the TinyUSB patch is MIT; the
+pico-sdk and mbedTLS are downloaded, not committed); GPL-2.0 for
+rnse-ports (nofrendo vendored under GPLv2; Doom, Quake and umac's GPLv2
+parts downloaded; Tiny386's BSD-3 is compatible) and rnse-linux (kernel
+patches and drivers); CERN-OHL-P for rnse-hardware.
 
 ## Status
+
+The order changed on 2026-11-18, when the user decided to make
+everything public. Instead of extracting one repository at a time (with
+rnse's `sdk/` a submodule in between), every future repository is first
+made one self-contained top-level directory inside rnse (phase C), then
+all are extracted from the same commit (phase D) and published in
+dependency order (phase E). Phases 0, 1 and 2–5 below still describe how
+each extraction is done; phase 1b's submodule is no longer needed.
 
 | Phase | State |
 |---|---|
 | 0. Prepare `sdk/` in rnse | done (branch `ccr-249b75e2-puy2ij`) |
-| 1. Create rnse-sdk | ready: tooling in `split/rnse-sdk/`, tree step tested |
-| 1b. Move non-SDK programs out of `sdk/`; `sdk/` becomes a submodule | to do |
-| 2. rnse-ports | to do |
-| 3. rnse-linux | to do |
-| 4. rnse-sdbridge | to do |
-| 5. rnse-nes-can | to do |
-| 6. rnse-wiki | ask the user whether to do it |
-| 7. Clean up rnse | to do |
+| A. Land or park outstanding work | to do: commit the Android Auto sound work, `sdk/examples/cardstart`, `hardware/ps2-can`; merge #31 without its ZIPs; close #5; delete the 21 merged remote branches and stale worktrees (ask first); LICENSE files |
+| B. Rewrite history; new public-ready rnse | to do: on a fresh clone, `git filter-repo --mailmap` (both Gmail addresses to the noreply one) and `--message-callback` dropping `Claude-Session:` lines; repeat the audit; then, with the user's approval, rename the private repository (e.g. `rnse-archive`), create a new `jroark/rnse`, push `main`, re-add the Actions variables `AWS_ROLE_ARN`, `AWS_REGION`, `WIKI_BUCKET`, `WIKI_DISTRIBUTION`, and check the wiki deployment (the role trusts the repository by name). Every worktree and local clone must be re-cloned afterwards |
+| C. Every future repository a self-contained directory in rnse | to do (the moves of phase 1b step 1, for all repositories; byte-identical builds before and after) |
+| D. Extract all from one commit | to do: generalise `split/rnse-sdk/` (`extract.sh`, `finish.py`, `verify.sh`) to take a repository name; `git filter-repo` is now installed, so run and inspect the passes for real; the user runs each repository's end-to-end tests with their disc, boot ROM and data |
+| E. Publish in dependency order | to do: rnse public first (so the others' `git` dependency needs no token), then rnse-sdk `v0.1.0`, then rnse-ports, rnse-linux, rnse-sdbridge, rnse-hardware; CI, scanning and branch protection on each |
+| F. Clean up rnse (phase 7) | to do; wiki pages may then link to the public repositories |
+| 1. Create rnse-sdk | ready: tooling in `split/rnse-sdk/`, tree step tested; part of D |
+| 1b. `sdk/` as a submodule | dropped (see above) |
+| 2–5. ports, linux, sdbridge, hardware | part of C and D |
+| 6. rnse-wiki | decided: the wiki stays in rnse |
 
 ## Phase 0: prepare `sdk/` in rnse (done)
 
@@ -240,16 +290,21 @@ Finally delete the paths from rnse.
   `sdbridge/out/`; the pico-sdk is cloned by `build.sh`; certificates and
   keys stay outside), `linkbench`, `h264bench`, `tests/linkbench.rs`,
   `tests/data/margin.*`, `sdk_decodes_h264_from_a_card`,
-  `link_benchmark_from_the_sd_loader`, `sdbridge/link.py`, the tools and
-  docs named in the table.
-- **rnse-nes-can** (phase 5): `hardware/nes-can`, `tests/nes/protocol.c`.
-  Split `tools/package-nes.py` into the hardware half (here) and the
-  software half (rnse-ports). The protocol header shared with
-  `nes/protocol.h` needs one owner; make it rnse-ports and pin it here.
+  `link_benchmark_from_the_sd_loader`, `android_auto_viewer_from_the_sd_loader`,
+  `tests/aaviewer.rs`, `sdbridge/link.py`, the tools and docs named in the
+  table. The Android Auto head unit certificate and key stay outside every
+  repository (`~/rnse-hu-cert`), as do the bridge's logs (`sdbridge/work/`).
+- **rnse-hardware** (phase 5): `hardware/nes-can`, `hardware/ps2-can`,
+  `hardware/sdbridge-card` (from PR #31), `tests/nes/protocol.c`. Split
+  `tools/package-nes.py` into the hardware half (here) and the software
+  half (rnse-ports). The protocol header shared with `nes/protocol.h`
+  needs one owner; make it rnse-ports and pin it here. Fabrication ZIPs
+  are made by each board's script, not committed (`ps2-can`'s
+  `.gitignore` already does this).
 
-## Phase 6: rnse-wiki (optional)
+## Phase 6: rnse-wiki (decided: not done)
 
-Ask the user first. The site is built by `wiki/build.sh`, which also
+The user chose to keep the wiki in rnse. For the record: the site is built by `wiki/build.sh`, which also
 builds rnse's `web/` (the emulator in WebAssembly). Its deployment signs
 in to AWS through an IAM role that trusts rnse's `main` branch only.
 Moving it means the user changes that trust policy and the repository
