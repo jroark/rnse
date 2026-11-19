@@ -775,6 +775,91 @@ What is not modelled, or assumed:
   with its 20 us before each word; the same driver gets one in 0.72 ms
   from the emulator's card, which answers at once.  The card's start
   took 4.61 s there against 3.96 s here.
+* **A program of one's own must not count on HST.HAWE to hold its
+  writes to HDT.**  `sdk/examples/linkbench`'s first program sent words
+  to the host by `rep` with a parallel move into HDT through a pointer
+  (`*dp4 = r0h`), each write meant to wait until the host had read the
+  one before; the emulator holds such a write.  On a unit (2026-11-17)
+  the host got the first word written plainly and lost the repeated
+  ones, so the main processor gave up.  Which of the two (the repetition
+  or the pointer) does not wait there is not known.  Plain writes
+  (`*0x3806 = r0l`) after polling HST bit 1 work (the program since,
+  like `report` and `sdk/src/pcm.c`'s reads); the model still holds
+  every write.
+* **CMD12 leaves a word behind.**  When a multiple-block read (CMD18) is
+  stopped, the card has already begun its next block, and with no
+  buffer transfer set up one word of it stays in the card interface's
+  data register (0x3810), with SDCTL bit 0 ("a word there") and error
+  bit 5 set (status 8020).  The next buffer transfer starts with that
+  word, so every following sector comes one 16-bit word late
+  (`linkbench` on a unit, 2026-11-17: `1B06640C` where `640CA17E` was
+  due, at the start of every command).  What takes it was tried
+  on the unit (`linkbench`'s "stray word" lines, 2026-11-17): reading
+  the data register clears bit 0 and leaves the word for the next
+  transfer; the interface's reset (SDCTL bit 8) does the same; a buffer
+  transfer of one word into spare memory takes it.  So a program runs
+  one-word transfers while bit 0 is set before it sets up a read
+  (`linkbench`'s "drain"), and never reads the data register for it.
+  The model does all of this (`Sd::stray`).  SDCTL read `0C07` there
+  with the word waiting (bits 0-2), the error bit 5 already gone,
+  where the model keeps it (`8C27`).  The stock program never uses CMD18.
+* **The response register (0x3815) goes round.**  Reads give the last
+  response's words, 3 of a short one or 8 of a long one (bit 6 of the
+  command register), round and round from where the last read left
+  off, and the place carries over into the next response, also a
+  command's that got none.  A program that read 8 words of every short
+  response (`linkbench` on a unit, 2026-11-18) got ACMD41's answer
+  `FF80 00FF 3F00 FF80 ...`: a word late, a busy card's OCR read as
+  ready.  The stock program reads exactly 3 or 8 and never sees it.
+  Something puts the place back to the first word: after the setting
+  stored with no command before CMD2 (or after CMD2's long answer:
+  which is not known) CMD3's answer came out in place.  The model takes
+  it to be the setting (`Sd::rpr_at`).
+* **SDCTL bit 2, the response interrupt, and ACMD41's answer**
+  (measured on a unit, 2026-11-18, `linkbench`).  Interrupt 10 (vector
+  0x238) comes for a response when bit 2 ("a response in") goes up;
+  if bit 2 is still up from the last response, the next raises none.
+  Bit 2 stays up after the response's words are read, and writing
+  SDCTL does not take it down, with bit 2 written as 0 or 1 (a setting
+  written with no command before CMD9 left it up, and CMD9's answer,
+  which came, raised nothing).  What does take it down: the eighth read
+  of the response register since the response came (a long response's
+  8 words; linkbench now reads it in threes until bit 2 is down before
+  every command, 9 reads at most, which keeps the read position);
+  ACMD41's answer (R3: index and CRC fields all ones), which instead
+  sets error flag 0x40 and bit 15 (`B842`) and raises no interrupt at
+  all, its words in the register all the same; and, by all
+  appearances, a read of SDCTL after the 3 words of a short response,
+  which is what the stock program does after each one (and it reads
+  sectors at 353 KB/s on the unit, each waiting for this interrupt);
+  reads of SDCTL by pointer (`*dp0`, linkbench's `rdreg`) did not.  A
+  program that does none of these waits out every response after the
+  first: linkbench's single-block reads were 51 KB/s, every one late
+  (`RESP 4096` of the program's count), and its CMD18s after the first
+  of a test lost their first block's place while the card went on
+  sending; with the reads in threes, 653 KB/s and 2007 KB/s clean.
+  The model has all of it (`Sd::rpr_in`; it does not tell pointer
+  reads from direct ones, and it gives ACMD41's answer the interrupt,
+  which the stock program needs there and which on a unit it gets
+  somehow).  The 32 MB card's CMD9 "no answer" was the same thing.
+* **After CMD12, reset the interface and take one word.**  With bit 2
+  dealt with (above), a unit's CMD18s of 64 blocks at / 3 to / 5 still
+  came, now and then (1 to 10 commands of 64), with every block's last
+  16-bit word wrong: the block's CRC16 shifted 3-5 bits left with ones
+  after it, the last word stored ~20 bit times late, after the CRC and
+  end bit had gone through the shift register (the RP2040 bridge showed
+  the same in whole commands).  Whether a command does it is settled
+  when it begins and shows in no SDCTL bit; what the stopped read
+  leaves is one word every time (linkbench's drain took exactly one
+  before each command).  The cure, found on the unit (2026-11-18,
+  `linkbench`): after CMD12, the interface's reset (SDCTL bit 8, then
+  the setting) and a one-word buffer transfer into spare memory
+  whatever SDCTL bit 0 says (the reset hides the word but does not
+  take it).  With it, no wrong word in 2 MB at / 3 (2626 KB/s), / 4
+  (2007 KB/s) or / 5, every time; without it, 10 bad commands of 64 in
+  the same run.  A wait of 16 to 128 rounds before the next block's
+  transfer, a 1 ms pause, CMD13 between commands: none of these did.
+  The model does not have the late last word at all.
 * **A word sent too soon after another is lost, by the program's own
   design.**  It takes the words of a message's head in its host
   interrupt (0x0230, into a ring of 32 words at 0x0a64), but the words
