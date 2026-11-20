@@ -50,7 +50,7 @@ src, dst = (open(p).read() for p in sys.argv[1:])
 i = src.index("## Mandatory hardware behavior"); j = src.index("## Commands", i)
 sys.exit(src[i:j].rstrip() not in dst)
 PY
-    if grep -rnE '(^|[^A-Za-z0-9_.-])(\.\./)+sdk([^A-Za-z0-9_.-]|$)' --exclude-dir=.git --exclude-dir=target --exclude-dir=third_party . ; then
+    if grep -rnE '(^|[^A-Za-z0-9_.])(\.\./)+sdk([^A-Za-z0-9_.-]|$)' --exclude-dir=.git --exclude-dir=target --exclude-dir=third_party . ; then
         fail "rnse's kit beside the directory (../sdk) is still named (above)"
     fi
 fi
