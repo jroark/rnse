@@ -15,7 +15,7 @@ ids=$(git log --all --format='%ae%n%ce' | sort -u | grep -vE '^(noreply@anthropi
 # user's decision of 2026-11-19 (split/PLAN.md, phase B): theirs are not
 # counted.  Only in rnse; the split repositories strip them.
 known=$(for k in 2df80d72c022f2f54b1f219b7aa2230a92a66e92 897ce980bcf1da000cc045063b2b4a8e8c48335b; do git rev-parse --verify -q "$k^{commit}" 2>/dev/null || true; done | tr '\n' ' ')
-n=$(for c in $(git rev-list --all); do case " $known " in *" $c "*) continue ;; esac; git log -1 --format=%B "$c"; done |
+n=$(for c in $(git rev-list --all); do case " $known " in (*" $c "*) continue ;; esac; git log -1 --format=%B "$c"; done |
     grep -ciE 'gmail\.com|claude\.ai/code/session|session_0' || true)
 [ "$n" = 0 ] || bad "$n private strings in commit messages"
 # The strings are put together here so that this file does not contain
