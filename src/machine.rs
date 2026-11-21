@@ -1481,11 +1481,13 @@ impl Machine {
         self.cpu.bank0()[0] = ret;
     }
 
-    /// Put an SD card into a slot (0 or 1; the 193 model has the one its
-    /// software calls SD2 as slot 0).  False when there is no such slot.
+    /// Put an SD card into a slot (0 or 1; on the 193 slot 0 is the one
+    /// its software calls SD2, the unit's physical slot 2, and slot 1 is
+    /// physical slot 1, selected by bit 0 of the host's register +0x02).
+    /// False when there is no such slot.
     pub fn insert_card(&mut self, slot: usize, card: crate::dev::sdhi::Card) -> bool {
         match self.cpu.io.navi.as_mut() {
-            Some(navi) if slot == 0 => navi.sdhi.cards[0] = Some(card),
+            Some(navi) if slot < 2 => navi.sdhi.cards[slot] = Some(card),
             None if slot < 2 => self.board.media.insert(slot, card),
             _ => return false,
         }
@@ -1495,7 +1497,7 @@ impl Machine {
     /// Take the card out of a slot.
     pub fn eject_card(&mut self, slot: usize) {
         match self.cpu.io.navi.as_mut() {
-            Some(navi) if slot == 0 => navi.sdhi.cards[0] = None,
+            Some(navi) if slot < 2 => navi.sdhi.cards[slot] = None,
             None if slot < 2 => self.board.media.eject(slot),
             _ => {}
         }
