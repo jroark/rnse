@@ -47,5 +47,5 @@ on that unit.
 - A small board in an SD slot makes a 192 an **Android Auto** head unit: a phone's
   Google Maps runs on the bench unit's own display at 10 to 13 pictures a second,
   decoded by its own processor, driven with its own knob, and the phone's music
-  through its own sound.
+  through its own sound. A **193** runs it too, full screen at 30 pictures a second.
   See [Android Auto](/android-auto/).

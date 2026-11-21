@@ -1,12 +1,13 @@
 title: Android Auto
 order: 77
-summary: A phone's Android Auto on a 192's own display and speakers, decoded by its own processor and driven by its own knob, through a small board in an SD slot.
+summary: A phone's Android Auto on an RNS-E's own display, decoded by its own processor and driven by its own knob, through a small board in an SD slot: on the 192 since 18 November, on the 193 since 21 November.
 ---
 **A 192 can be an Android Auto head unit.** On 18 November a phone's Google Maps ran
 on the bench unit's own display at 10 to 13 pictures a second, decoded by the unit's
 own processor and driven with its own knob and keys, through a small board in an SD
 slot ([on the unit](#on-the-unit)). The same evening the phone's music played through
-the unit's own sound.
+the unit's own sound. On 21 November it ran on a **193** too, full screen at the
+phone's own 30 pictures a second ([on the 193](#on-the-193)).
 
 This page follows how it got there: whether the 192 could decode the video at all,
 how fast an SD slot can carry it, the bridge between the phone and the slot, the
@@ -183,6 +184,34 @@ The firmware is built with the Raspberry Pi pico-sdk, and each part comes as a U
 hold BOOTSEL while plugging the Pico into a computer and copy the file onto the drive
 that appears. On a Pico the board's LED shows the state by blinking: a short flash every
 2 s while it waits, steady once it is working, three short flashes after a failure.
+
+## On the 193
+
+The 193 has a faster system-on-chip, an 800 × 480 screen and an SD host of its own,
+so the same viewer was carried over to it. On 21 November, on a bench 193 (the
+North American 8J0 035 193), **a phone's Android Auto ran full screen** on the
+unit's own display: Google Maps in 3D beside the media card and the app bar, at the
+phone's own **30 pictures a second**, every picture shown.
+
+- **Its own processor decodes, about three times as fast as a 192's.** A picture
+  takes some 17 ms to decode, 15 ms to draw and 3 ms to read, so there is room to
+  spare at 30 a second.
+- **The SD slot is read by the chip itself**, not through a card processor, in long
+  multi-block reads: 2.9 MB/s from the bridge on the unit, every word right. The
+  phone's video needs about a tenth of that.
+- **It is shown whole**, 800 × 480, not halved.
+- The same bridge serves it, on a Raspberry Pi Pico running at 250 MHz, in the
+  unit's second slot; the viewer starts from a card in the first.
+- The unit's knob and keys drive the phone, as on the 192, and the eject key works.
+- **No sound yet.** The 193 plays sound through its own serial sound interface, for
+  which there is no driver yet.
+
+Two things had to be found on the unit first. The 193's display unit showed the
+kit's 256-colour picture as a flat light grey, though the stock software's own
+16-bit planes showed exactly what was written into them; the kit now draws the 193's
+screen in 16-bit colour. And the 193 reads the bridge so fast that the viewer took
+in a whole backlog of pictures each time and, decoding them one at a time, never
+reached the newest to show it; now it decodes them all and shows the last.
 
 Still open: drawing faster, which now costs nearly as much as decoding; the
 decoder's hottest loops in hand-written code; and a board that fits in the car in place of a Pico on
