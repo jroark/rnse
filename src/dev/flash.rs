@@ -4,10 +4,17 @@
 //! (Fujitsu MBM29XL12DF, by the marking on a unit's board), each with
 //! its own command state and its own eight small sectors at the bottom:
 //! the stock loader erases 8 KiB sectors from 0x01000000 as it does
-//! from 0x0000c000.  The 193's 64 MiB are treated as one chip with
-//! uniform sectors of 128 KiB, which is how its stock loader erases
-//! them (from 0x00400000 up; below that it erases nothing); its parts
-//! are not known.
+//! from 0x0000c000.
+//!
+//! The 193 has four Spansion S99PL127J (128 Mbit, 16 bits wide, by the
+//! markings on the bench unit's board) in two banks of 32 MiB, each bank
+//! a pair of chips side by side on the 32-bit bus: one half of every
+//! word in each chip.  Its stock loader writes every command to both at
+//! once (0x00aa00aa at 0x1554) and erases in 128 KiB steps, two 64 KiB
+//! sectors, except for 16 KiB steps from 0x01fe0000 to 0x0201c000: the
+//! pairs of 8 KiB sectors at the top of the first bank and at the
+//! bottom of the second.  A pair is emulated as one device with one
+//! command state, sectors twice the size of a chip's.
 //!
 //! Code executes in place from this memory, so plain reads are served
 //! directly by the board; this module only sees writes (the command
@@ -42,9 +49,9 @@ pub struct Flash {
     state: [State; 4],
     /// Size of a chip in bytes; 0 when the whole memory is one chip.
     chip: u32,
-    /// Size of every sector, or 0 for small sectors at the bottom of a
-    /// chip and 64 KiB above ([`sector`]).
-    uniform: u32,
+    /// Chips side by side on the bus as one device: 1 on the 192, 2 on
+    /// the 193 (two 16-bit chips), which doubles every sector.
+    width: u32,
     /// Statistics, for logs and tests.
     pub erased_sectors: u64,
     pub programmed_words: u64,
@@ -60,12 +67,20 @@ impl Default for Flash {
 /// Erase block containing `addr` in a chip of `size` bytes that starts
 /// at address 0: eight 8 KiB sectors at the bottom, eight more at the
 /// top, 64 KiB sectors between.  That is what the 192's chips say of
-/// themselves ([`QUERY`]); a `size` of 0 leaves the top ones out.
+/// themselves ([`QUERY`]), and the 193's by their data sheet; a `size`
+/// of 0 leaves the top ones out.
 pub fn sector(addr: u32, size: u32) -> (u32, u32) {
-    if addr < 0x1_0000 || (size != 0 && addr >= size - 0x1_0000) {
-        (addr & !0x1fff, 0x2000)
+    sector_of(addr, size, 1)
+}
+
+/// [`sector`] for `width` chips side by side, every sector `width`
+/// times the size.
+fn sector_of(addr: u32, size: u32, width: u32) -> (u32, u32) {
+    let (small, large) = (0x2000 * width, 0x1_0000 * width);
+    if addr < large || (size != 0 && addr >= size - large) {
+        (addr / small * small, small)
     } else {
-        (addr & !0xffff, 0x1_0000)
+        (addr / large * large, large)
     }
 }
 
@@ -80,14 +95,26 @@ pub const QUERY: [u8; 48] = [
     0x05, 0x00, 0x00, 0x00, 0x03, 0x07, 0x00, 0x20, 0x00, 0xfd, 0x00, 0x00, 0x01, 0x07, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
+/// The 193's chips, Spansion S29PL127J, from the data sheet, not read
+/// from a unit yet: what one chip answers to the query, word 0x10
+/// onwards, as far as the sheet's structure goes ("QRY", the AMD
+/// command set, 16 MiB, 16 bits wide, three regions: 8 of 4 Kwords,
+/// 254 of 32 Kwords, 8 of 4 Kwords).  The voltages and times (words
+/// 0x1b-0x26) are left 0 until a unit has said them.
+pub const QUERY_PL127J: [u8; 48] = [
+    0x51, 0x52, 0x59, 0x02, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x18,
+    0x01, 0x00, 0x00, 0x00, 0x03, 0x07, 0x00, 0x20, 0x00, 0xfd, 0x00, 0x00, 0x01, 0x07, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
 impl Flash {
     pub fn new() -> Self {
-        Flash { state: [State::Read; 4], chip: 0, uniform: 0, erased_sectors: 0, programmed_words: 0, trace: false }
+        Flash { state: [State::Read; 4], chip: 0, width: 1, erased_sectors: 0, programmed_words: 0, trace: false }
     }
 
-    /// One chip with sectors of `size` bytes throughout.
-    pub fn uniform(size: u32) -> Self {
-        Flash { uniform: size, ..Self::new() }
+    /// Banks of `size` bytes, each two 16-bit chips side by side (the
+    /// 193).
+    pub fn paired(size: u32) -> Self {
+        Flash { chip: size, width: 2, ..Self::new() }
     }
 
     /// Chips of `size` bytes each, one after the other.
@@ -114,13 +141,27 @@ impl Flash {
         if chip_state == State::Autoselect || chip_state == State::Query {
             // Word address within the chip selects the ID.
             let word = (addr >> 2) & 0xff;
-            let v: u32 = match (chip_state, word) {
-                (State::Autoselect, 0) => 0x04, // manufacturer: Fujitsu
-                // The device, as a unit's two chips say (the emulator
-                // had 0x2253).
-                (State::Autoselect, 1) => 0x2222_227e,
-                (State::Query, 0x10..=0x3f) if self.chip != 0 => QUERY[word as usize - 0x10] as u32,
-                _ => 0,
+            let v: u32 = if self.width == 2 {
+                // Each chip answers in its half of the word.  Data
+                // sheet values, as with QUERY_PL127J.
+                let half = match (chip_state, word) {
+                    (State::Autoselect, 0) => 0x0001, // manufacturer: Spansion
+                    (State::Autoselect, 1) => 0x227e,
+                    (State::Autoselect, 0x0e) => 0x2220,
+                    (State::Autoselect, 0x0f) => 0x2200,
+                    (State::Query, 0x10..=0x3f) => QUERY_PL127J[word as usize - 0x10] as u32,
+                    _ => 0,
+                };
+                half << 16 | half
+            } else {
+                match (chip_state, word) {
+                    (State::Autoselect, 0) => 0x04, // manufacturer: Fujitsu
+                    // The device, as a unit's two chips say (the emulator
+                    // had 0x2253).
+                    (State::Autoselect, 1) => 0x2222_227e,
+                    (State::Query, 0x10..=0x3f) if self.chip != 0 => QUERY[word as usize - 0x10] as u32,
+                    _ => 0,
+                }
             };
             return match size {
                 4 => v,
@@ -190,10 +231,7 @@ impl Flash {
             State::EraseUnlock2 => {
                 match cmd {
                     0x30 => {
-                        let (start, len) = match self.uniform {
-                            0 => sector(addr - base, self.chip),
-                            size => ((addr - base) / size * size, size),
-                        };
+                        let (start, len) = sector_of(addr - base, self.chip, self.width);
                         let start = (base + start) as usize;
                         let end = (start + len as usize).min(mem.len());
                         mem[start..end].iter_mut().for_each(|b| *b = 0xff);
@@ -288,20 +326,63 @@ mod tests {
         f.write(&mut mem, CHIP + 0x555 * 4, 4, 0x10);
         assert!(mem[CHIP as usize..].iter().all(|b| *b == 0xff));
         assert!(mem[..CHIP as usize].iter().all(|b| *b == 0x11));
-        // Uniform sectors, as on the 193.
-        let mut f = Flash::uniform(0x2_0000);
-        let mut mem = vec![0x22u8; 0x8_0000];
-        unlock(&mut f, &mut mem, 0, 0x80);
-        f.write(&mut mem, 0x555 * 4, 4, 0xaa);
-        f.write(&mut mem, 0x2aa * 4, 4, 0x55);
-        f.write(&mut mem, 0x2_1000, 4, 0x30);
-        assert!(mem[0x2_0000..0x4_0000].iter().all(|b| *b == 0xff));
-        assert!(mem[..0x2_0000].iter().all(|b| *b == 0x22) && mem[0x4_0000..].iter().all(|b| *b == 0x22));
         let mut f = Flash::chips(CHIP);
         let mut mem = vec![0x11u8; 2 * CHIP as usize];
         // Programming clears bits, in the chip addressed.
         unlock(&mut f, &mut mem, 0, 0xa0);
         f.write(&mut mem, 0x100, 4, 0x0101_0101);
         assert_eq!(&mem[0x100..0x104], &[0x01; 4]);
+    }
+
+    /// A sector erase, its unlock cycles given in the bank addressed.
+    fn erase(f: &mut Flash, mem: &mut [u8], addr: u32) {
+        let b = addr & !0x01ff_ffff;
+        f.write(mem, b + 0x555 * 4, 4, 0x00aa_00aa);
+        f.write(mem, b + 0x2aa * 4, 4, 0x0055_0055);
+        f.write(mem, b + 0x555 * 4, 4, 0x0080_0080);
+        f.write(mem, b + 0x555 * 4, 4, 0x00aa_00aa);
+        f.write(mem, b + 0x2aa * 4, 4, 0x0055_0055);
+        f.write(mem, addr, 4, 0x0030_0030);
+    }
+
+    /// The 193: two banks of 32 MiB, each a pair of 16-bit chips, with
+    /// sectors of 16 KiB at both ends of a bank and 128 KiB between, as
+    /// its stock loader erases them.
+    #[test]
+    fn paired_banks() {
+        const BANK: u32 = 0x0200_0000;
+        let mut mem = vec![0x11u8; 2 * BANK as usize];
+        let mut f = Flash::paired(BANK);
+        let erased = |mem: &[u8]| {
+            let first = mem.iter().position(|b| *b == 0xff).unwrap();
+            let len = mem[first..].iter().take_while(|b| **b == 0xff).count();
+            (first as u32, len as u32)
+        };
+        for (at, expect) in [
+            (0x0040_1000, (0x0040_0000, 0x2_0000)),
+            (0x01fe_4100, (0x01fe_4000, 0x4000)),
+            (0x0200_0000, (0x0200_0000, 0x4000)),
+            (0x0201_c000, (0x0201_c000, 0x4000)),
+            (0x0202_0000, (0x0202_0000, 0x2_0000)),
+            (0x03ff_401f, (0x03ff_4000, 0x4000)),
+        ] {
+            mem.iter_mut().for_each(|b| *b = 0x11);
+            erase(&mut f, &mut mem, at);
+            assert_eq!(erased(&mem), expect, "erase at {:08x}", at);
+        }
+        // The second bank tells what it is; the first is still memory.
+        mem.iter_mut().for_each(|b| *b = 0x11);
+        f.write(&mut mem, BANK + 0x555 * 4, 4, 0x00aa_00aa);
+        f.write(&mut mem, BANK + 0x2aa * 4, 4, 0x0055_0055);
+        f.write(&mut mem, BANK + 0x555 * 4, 4, 0x0090_0090);
+        assert_eq!(f.read(&mem, BANK, 4), 0x0001_0001);
+        assert_eq!(f.read(&mem, BANK + 4, 4), 0x227e_227e);
+        assert_eq!(f.read(&mem, BANK + 6, 2), 0x227e);
+        assert_eq!(f.read(&mem, 0, 4), 0x1111_1111);
+        f.write(&mut mem, BANK, 4, 0x00f0_00f0);
+        f.write(&mut mem, BANK + 0x55 * 4, 4, 0x0098_0098);
+        assert_eq!(f.read(&mem, BANK + 0x10 * 4, 4), 0x0051_0051);
+        f.write(&mut mem, BANK, 4, 0x00f0_00f0);
+        assert!(!f.special_read());
     }
 }

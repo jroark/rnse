@@ -835,6 +835,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
             eprintln!("watchdog: {} edges on the strobe, longest pause {} ms (ended at {} ms, PC {:08x}), last edge {} ms before the end", w.edges, w.longest / ms, w.longest_end / ms, w.longest_pc, (m.cpu.cycles - w.last) / ms);
         }
     }
+    if m.board.nvram_top != 0 {
+        eprintln!("battery-backed memory: used up to offset {:#x}", m.board.nvram_top);
+    }
     if o.strict {
         // The longest the stock software of either unit leaves the
         // strobe alone is some 220 ms (the 192's OS while it starts).
@@ -856,9 +859,6 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
         if let Some(t) = timing.filter(|t| *t != stock) {
             eprintln!("strict: CAN frames were sent with the bit timing registers at {:04x}/{:04x}; the stock software", t.0, t.1);
             eprintln!("        has {:04x}/{:04x} (100 kbit/s).  The emulated bus does not care; a real one does.", stock.0, stock.1);
-        }
-        if m.board.nvram_top != 0 {
-            eprintln!("strict: battery-backed memory used up to offset {:#x}", m.board.nvram_top);
         }
         let unmodelled = m.unmodelled();
         if unmodelled.is_empty() {
