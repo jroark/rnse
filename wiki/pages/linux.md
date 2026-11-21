@@ -126,14 +126,28 @@ of timing. See [how it is tested](/reverse-engineering/#how-it-is-tested).
 
 ## What is not done
 
-Linux on the 192 has its console, its controls, its serial ports and its way out.
-It has no drivers yet for:
+On the bench unit, Linux on the 192 has shown its console, its controls, its serial
+ports and its way out.
 
-- CAN;
-- sound, which needs the radio processor and the card processors;
-- the SD cards themselves (the kernel arrives on one, but cannot read it);
-- the companion chip's interrupts.
+Drivers for the rest have been written since and work in the emulator, but **none
+has run on the unit yet**:
 
-The same work continues toward a Linux that can be installed in flash and started by
-the unit by itself, with drivers for the rest of the hardware and a user interface
-of its own.
+- the CD/DVD drive, through libata;
+- the SD cards, read only, through the card processors;
+- sound, through a card processor's converter, with WAV and MP3 playback;
+- the radio processor's line, and CAN as a SocketCAN device;
+- the flash, read only, and the battery-backed memory;
+- a plain user interface on the screen, run with the faceplate's keys and knobs.
+
+The emulator has also installed Linux in flash, started by a real 192 boot ROM and
+taken out again by the kit's guard; that has not been tried on a unit either. Still
+missing altogether: GPS, writing to cards, and a compressed kernel.
+
+## On the 193
+
+A port to the 193 is under way. In the emulator it boots to a BusyBox shell on the
+whole 800 × 480 screen in about a second. The kernel finds the R8A77730, keeps the
+watchdog served and takes over the kit's 16-bit picture as its framebuffer. CD EJECT and
+typing with the knob work as on the 192; RETURN held says that there is no loader to
+go back to, and Linux carries on. It has no drivers for the SD
+cards, the drive, CAN or sound yet, and it has not run on the bench 193.

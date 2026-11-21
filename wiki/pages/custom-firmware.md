@@ -5,8 +5,8 @@ summary: Writing software of one's own for the RNS-E, running it from a disc, an
 The emulator exists to make one thing possible: **writing new software for the RNS-E**
 and knowing it will behave on a real unit before it gets there. The project includes
 a small kit for that, the SDK. Programs written with it have run on a real North
-American 192 from a CD, from an SD card and from flash. Nothing has been tried on
-a real 193 yet.
+American 192 from a CD, from an SD card and from flash, and on a real North American
+193 from a CD and from an SD card. Nothing has been installed in a 193's flash.
 
 ## Where a program runs
 
@@ -63,19 +63,24 @@ A C library, built with an ordinary SH-4 GCC (on macOS, one in a container):
 |---|---|
 | start-up | `board_init()`: brings the board up as the stock loader does, register for register, and starts a 10 ms tick |
 | time | `millis`, `delay_ms` |
-| screen | 8 bits per pixel through a palette: `screen_fill`, `screen_pixel`, `screen_text` |
+| screen | 8 bits per pixel through a palette: `screen_fill`, `screen_pixel`, `screen_text` (on the 193 drawn into a 16-bit plane, the palette kept in RAM) |
 | faceplate | `panel_init`, `panel_poll`, `panel_key`, `panel_knob` |
 | CD drive | `cd_init`, `cd_wait_ready`, `cd_read`, `cd_find` |
 | CAN | `can_init`, `can_send`, `can_receive` |
-| SD and sound (192) | the card processors' MP3 decoder, the radio processor's amplifier and source switch |
+| SD cards | `sd_init`, `sd_read`, `sd_load`: through the card processors on the 192, the chip's own SD host on the 193 |
+| sound (192) | the card processors' MP3 decoder, the radio processor's amplifier and source switch |
 | the way back | `stock_update`, `loader_return` |
 
 Nobody has a schematic of either unit, so the hardware layers do exactly what the
 stock loader does: every register they write is one the stock loader writes, with
 the same value, in the same order. Writes whose purpose is unknown are kept anyway
 and marked as such, because a real unit may need them even if the emulator doesn't.
-(The one exception, the faceplate, follows the stock operating system instead,
-since no loader uses it.)
+(Two exceptions: the faceplate follows the stock operating system instead, since no
+loader uses it; and on the 193 the screen is drawn in a 16-bit plane, as the
+operating system draws, because the loader's 256-colour plane showed only grey on a
+real unit.) Copying values is not always enough: a value the 193's start-up had taken
+from an emulator log turned out to be computed by the stock loader from another
+register, and written as a constant it stopped the unit's RAM.
 
 Programs run in the emulator first, in [`--strict` mode](/the-emulator/#how-it-is-tested),
 and can be debugged at source level with GDB.
@@ -89,6 +94,11 @@ better way: one **loader disc** that starts the file `RNSE.BIN` from a FAT card 
 either slot. The current loader is persistent. The disc stays in, a test starts when
 its card goes in, and when the test ends the loader shows its status and waits for
 the next card. Trying a new program means copying a file to a card.
+
+The 193 has one too: a loader disc that starts `RNSE.BIN` from a card. It is not
+persistent. A program that ends restarts the unit, and the stock software then
+starts the disc's loader again. Holding RETURN says there is no loader to return to.
+CD EJECT works throughout.
 
 ![The SDK's MP3 player on the unit](/media/mp3-player.jpg "The SDK's MP3 player, playing test tones from an SD card on the bench unit through its own drivers for the card processor and the radio's amplifier.")
 
@@ -176,6 +186,6 @@ protection only.
 The emulator's tests show that the examples build and behave as written on both
 emulated units. They also show that the stock software of both units, in both
 markets, accepts such a disc and starts the program. On real hardware the
-evidence is **one North American 192**. Other units, European ones and every 193,
-may differ. The 192's first custom program went dark on a unit even though it ran
+evidence is **one North American 192** and, since November 2026, **one North American
+193**. Other units, and European ones in particular, may differ. The 192's first custom program went dark on a unit even though it ran
 perfectly in the emulator; that is reason enough to stay modest.

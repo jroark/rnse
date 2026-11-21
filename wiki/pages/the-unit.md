@@ -34,11 +34,11 @@ discs, and nothing else that matters to software.
 | | 8P0 035 **192** | 8P0 035 **193** |
 |---|---|---|
 | Built | mid 2000s (the photographed board carries 2006–2007 date codes) | from 2010 |
-| Processor | Hitachi/Renesas SH-4 (SH7750R kind) at about 235 MHz, in a package marked with Aisin AW's own part number | a Renesas SH7770-family "SH-Navi" system-on-chip |
+| Processor | Hitachi/Renesas SH-4 (SH7750R kind) at about 235 MHz, in a package marked with Aisin AW's own part number | a Renesas R8A77730 "SH-Navi" system-on-chip with an SH-4A core |
 | Graphics | separate Fujitsu MB86293 "Coral" chip, 400 × 240 panel | on-chip 2D engine and display unit with blended planes, 800 × 480 |
 | SD cards and MP3 | two NEC µPD77115A signal processors on a card board | on-chip SD host interface; the main processor decodes MP3 |
 | CAN | an HCAN2 controller | on chip |
-| Memory | 64 MiB RAM, 32 MiB NOR flash, 256 KiB battery-backed SRAM | 128 MiB RAM, 64 MiB NOR flash |
+| Memory | 64 MiB RAM, 32 MiB NOR flash, 256 KiB battery-backed SRAM | 128 MiB RAM, 64 MiB NOR flash, 256 KiB battery-backed SRAM |
 | Firmware variants | V220 (Europe), V222 (North America) | V574 (Europe), V575 (North America), VB48 |
 
 The part number is on the label on the unit's case. On a working unit the
@@ -56,8 +56,8 @@ Grundig with two tuner modules, and an Alpine DVD mechanism with its own control
 ![The DVD mechanism, marked DV35M110](/media/192-drive.jpg "The drive: an Alpine DVD mechanism (DV35M110 on its label) that pulls the disc in by motor.")
 
 The [192's hardware](/hardware-192/) page goes through every board, chip by chip.
-For the 193 there are no photographs yet; what is known about it comes from its
-firmware ([the 193's hardware](/hardware-193/)).
+The 193's boards have been photographed too, and a 193 has run programs of our own on
+a bench ([the 193's hardware](/hardware-193/)).
 
 ## What else is in the unit
 

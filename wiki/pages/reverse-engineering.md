@@ -181,8 +181,9 @@ destinations and the car's details.
 
 The project keeps one distinction above all: what has been **measured on a unit**
 and what is **inferred from the software**. The documentation says which is which,
-line by line. A unit's answer outranks any inference, however tidy. The 193, never
-seen on a bench, is all inference so far, and every page on it says so.
+line by line. A unit's answer outranks any inference, however tidy. The 193 was all inference
+until a bench unit arrived on 20 November; [its page](/hardware-193/#on-the-bench)
+says what that unit has confirmed and what is still inferred.
 
 ## Timeline
 
@@ -194,3 +195,5 @@ seen on a bench, is all inference so far, and every page on it says so.
 | 15 Nov | a program installed in flash and removed again; a base firmware with radio and MP3 player; a modern interface for the 192; a persistent SD test loader |
 | 16–17 Nov | Doom, Quake, Windows 3.11, a Mac Plus and an NES emulator, each from an SD card; a DVD player; a benchmark of the SD slots; an SD bridge on a Raspberry Pi Pico, through which a phone projects Android Auto |
 | 18 Nov | the SD slots read at 2 MB/s on the unit; Android Auto on the 192's own display, Google Maps at 10 to 13 pictures a second, driven by the unit's knob and keys, with the phone's sound |
+| 20 Nov | a 193 on the bench: its boards photographed, the first programs on it, its processor identified as an SH-4A; an SD loader for the 193, the screen, the faceplate and both SD slots working |
+| 21 Nov | Android Auto on the 193's display, full screen at 30 pictures a second |

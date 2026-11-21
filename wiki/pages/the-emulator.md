@@ -55,7 +55,7 @@ From the bottom up:
   photographed faceplate, and the WebAssembly build behind this site.
 
 Time is counted in CPU cycles, one instruction per cycle. That is an estimate; the
-real unit was found to be a sixth faster in a tight loop and much slower whenever it
+real 192 was found to be a sixth faster in a tight loop and much slower whenever it
 goes past the cache. A boot to the user interface takes a few billion instructions.
 That is about 6 s of emulated time on the 192 and 15 s on the 193.
 
