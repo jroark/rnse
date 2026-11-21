@@ -23,7 +23,7 @@ North American version.  What runs today on the older one (part number
 | Front end | `rnse ui` shows the unit's faceplate in a browser with the live screen.  Keys, soft keys and both knobs work (mouse, touch or keyboard); below are the firmware's debug log and switches for ignition and the disc. |
 
 And on the 2010 unit (8P0 035 193, variants `V574`, `V575` and `VB48`),
-which is built around an SH7770-family system-on-chip:
+which is built around a Renesas R8A77730 system-on-chip (SH-Navi family):
 
 | | |
 |---|---|

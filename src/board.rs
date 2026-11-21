@@ -49,8 +49,10 @@ pub enum Model {
     /// 8P0 035 192: SH-4 (SH7750R class), Coral graphics chip, companion
     /// logic.  Firmware variant `V220`.
     Rnse192,
-    /// 8P0 035 193 (2010 on): an SH-4A system-on-chip of Renesas'
-    /// SH7770 "SH-Navi" family.  Firmware variants `V574` and `VB48`.
+    /// 8P0/8J0 035 193 (2010 on): an SH-4A system-on-chip, a Renesas
+    /// R8A77730 by the marking on a unit's board (the docs long took it
+    /// for an SH7770 of the same "SH-Navi" family).  Firmware variants
+    /// `V574`, `V575` and `VB48`.
     Rnse193,
 }
 
@@ -193,13 +195,16 @@ impl Board {
             ram_base: model.ram_base(),
             coral_base: if model == Model::Rnse192 { CORAL_BASE } else { 0xf000_0000 },
             flash: vec![0xff; model.flash_size()],
-            flash_ctl: if model == Model::Rnse192 { Flash::chips(0x0100_0000) } else { Flash::uniform(0x2_0000) },
+            flash_ctl: if model == Model::Rnse192 { Flash::chips(0x0100_0000) } else { Flash::paired(0x0200_0000) },
             flash_special: false,
             ram: vec![0; model.ram_size()],
             nvram: vec![0; NVRAM_SIZE],
-            // The 192's is one SRAM of 256 KiB (NEC uPD442000A on the
-            // board), and its software uses offsets up to 0x3f630.
-            nvram_mask: if model == Model::Rnse192 { 0x3_ffff } else { NVRAM_SIZE - 1 },
+            // One SRAM of 256 KiB on both units, by the markings on
+            // their boards: NEC uPD442000A on the 192, whose software
+            // uses offsets up to 0x3f630; Renesas R1LV0208BSA on the
+            // 193, up to 0x3aec0 (V575 1020 and 1050).  It repeats
+            // above that.
+            nvram_mask: 0x3_ffff,
             nvram_top: 0,
             unmapped: HashMap::new(),
             coral: Coral::new(),
@@ -620,6 +625,7 @@ impl Board {
 
     fn io_read_193(&mut self, addr: u32, size: u32) -> u32 {
         if let Some(o) = self.nvram_offset(addr) {
+            self.nvram_top = self.nvram_top.max(o);
             let mut v = 0;
             for i in 0..size as usize {
                 v = (v << 8) | self.nvram[(o + i) & self.nvram_mask] as u32;
@@ -644,6 +650,12 @@ impl Board {
             return;
         }
         if let Some(o) = self.nvram_offset(addr) {
+            self.nvram_top = self.nvram_top.max(o);
+            if let Some((from, to)) = self.nvram_watch {
+                if o as u32 + size > from && o as u32 <= to {
+                    eprintln!("[nvram] {:05x}.{} <= {:x}  pc={:08x} at cycle {}", o, size, v, self.pc, self.now);
+                }
+            }
             for i in 0..size as usize {
                 self.nvram[(o + i) & self.nvram_mask] = (v >> ((size as usize - 1 - i) * 8)) as u8;
             }

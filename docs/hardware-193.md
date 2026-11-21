@@ -1,21 +1,101 @@
 # RNS-E hardware notes: the 193 unit (variants V574, V575 and VB48)
 
-The 2010 unit (8P0 035 193) is a different computer from the 192
-described in [hardware.md](hardware.md).  Almost everything is inside
-one system-on-chip of Renesas' SH7770 "SH-Navi" family, for which no
-manual is public.  What follows was worked out from the firmware, with
-two outside aids: the Linux kernel's SH7770 support (serial port
-addresses) and the Linux driver for the display unit of the later R-Car
-chips, which inherited the block almost unchanged.
+The 2010 unit (8P0 035 193, and 8J0 035 193 in the TT) is a different
+computer from the 192 described in [hardware.md](hardware.md).  Almost
+everything is inside one system-on-chip, a Renesas R8A77730 by the
+marking on a unit's board (see "The boards"): by Renesas' numbering
+presumably an SH7773, a member of the same "SH-Navi" family as the
+SH7770 these notes long took it for, and like it without a public
+manual.  What follows was worked out from the firmware, with two
+outside aids: the Linux kernel's SH7770 support (serial port addresses)
+and the Linux driver for the display unit of the later R-Car chips,
+which inherited the block almost unchanged.
 
 Variant `V574` (software index 0220) and `VB48` (0700) use the same
 memory map and the same radio processor software; their loaders differ
 by a few bytes.  Which cars `VB48` is for is not known.  `V575` is the
-North American software (index 0320) for the same hardware.
+North American software for the same hardware: index 0200 (software
+1020), 0230 (1050, the one on the 2012 map DVD 8P0 919 884 BP, which
+carries it) and 0320 (10AA).
 
 ![The 193's update loader in the emulator](loader-193.png)
 
 ![The 193's main software (V574) in the emulator: radio set-up](os-193.png)
+
+## The boards
+
+From photographs of an opened unit on a bench: an Audi TT's 8J0 035 193
+F, hardware H07, software index 0230, "RNSE-PU", built in June 2013 in
+Belgium (Aisin AW 86113-60A070).  The parts carry date codes from late
+2012 to early 2013.
+
+![The main board, the processor's side](../wiki/media/193-main.jpg)
+
+**Main board** (Aisin AW 99370-00492; the other side is marked TPD-9A
+V0), the processor's side:
+
+| part | marking | what it is |
+|------|---------|------------|
+| IC900 | Renesas `R8A77730DBGW`, `1227` | the system-on-chip, a ball-grid package under a heat-spreader pad |
+| IC901, IC902 | Elpida `E5116AJSE-6E-E` | two DDR2 SDRAMs of 512 Mbit, 16 bits wide: the 128 MiB of RAM at 0x08000000, on a 32-bit bus |
+| IC100 | `64445DA01BGV`, `99325 00115`, `AISIN AW` | a large ball-grid chip of Aisin's own, with a crystal of its own (X4) beside it: not identified.  The unexplained writes at 0xfe008000 and 0xfe800100 (memory map) are candidates for it; nothing links them yet |
+| IC9 | AKM `AK5406XQ` | not identified from its marking; beside the serializer, and the AMP connector has inputs for red, green, blue and sync, so presumably the converter of that picture input |
+| IC11 | Maxim `MAX9247` | a serializer for LVDS: the picture goes to the panel in the display this way |
+| X1 | `D332K` | the crystal beside the SoC.  If it is 33.3 MHz, twelve times it is the 400 MHz taken for the CPU and one and a half times it the 50 MHz peripheral clock ("Clocks and time"); not measured |
+| | Hirose `HRS163-3416A` | the two SD card slots, in one shielded holder, wired to the SoC: there are no card processors as on the 192 |
+| CN11 | | the GPS aerial's coaxial cable; no GPS module as on the 192, so the receiver's front end is on the board and the rest in the SoC's GPS block |
+
+![The SoC (centre), RAM (IC901 top, IC902 left) and IC100 (bottom)](../wiki/media/193-soc.jpg)
+
+![IC100, Aisin's own chip](../wiki/media/193-ic100.jpg)
+
+![The AK5406 (centre) and the MAX9247 serializer (left)](../wiki/media/193-video.jpg)
+
+The other side:
+
+| part | marking | what it is |
+|------|---------|------------|
+| IC1, IC2, IC4, IC5 | Spansion `S99PL127J003` | four NOR flash chips of 128 Mbit, 16 bits wide: the 64 MiB at address 0.  Two of them (IC2, IC4) carry paper labels (`580B`, `581B`) and an older lot number, as parts programmed before assembly do |
+| | Renesas `R1LV0208BSA-7SI` | static RAM of 256 K x 8 bits: the 256 KiB of battery-backed memory at 0x18000000 |
+
+![The flash chips and the battery-backed RAM (right)](../wiki/media/193-flash.jpg)
+
+How the four flash chips are wired is settled by the stock loader (`rnse
+loader ... --trace-flash`): it writes every command as a 32-bit word
+with the command in both halves (0x00aa00aa to 0x1554, 0x00550055 to
+0xaa8), so two chips sit side by side on the 32-bit bus, one half of
+every word in each; and it erases in steps of 128 KiB, two of the
+chips' 64 KiB sectors, except from 0x01fe0000 to 0x0201c000, where it
+steps by 16 KiB: two of their eight 8 KiB sectors at the top of a chip
+and at the bottom of the next.  So the flash is two banks of 32 MiB,
+each a pair of chips with small sectors at both ends.  The emulator
+models it so (`src/dev/flash.rs`).  What the chips answer to the
+autoselect and query commands is taken from Spansion's data sheet
+(manufacturer 1, device 0x227e, 0x2220, 0x2200) until a unit has said
+it.  The unit's parameter block and serial number (0x03ff401f) are in
+the second bank's small sectors at the top.
+
+The battery-backed memory is one part of 256 KiB; the stock software
+(V575 1020 and 1050) uses it up to offset 0x3aec0.  The emulator makes
+it repeat above 256 KiB, as it does on the 192; whether the unit's
+address decoding does the same is not known.
+
+**Radio board** (Grundig, labelled "Aisin RNS-E Power up US", software
+0022, board 19374-384.00): the two tuner modules, an NEC `D70F3079AY`
+(the same V850 microcontroller as the 192's radio processor; its
+software, `A5750022.MOT`, is on the update discs), an NXP `SAA7706H`
+car radio signal processor where the 192 has the `SAA7709H`, and two
+NXP `TDA8579` line drivers.
+
+![The radio board: the SAA7706H (centre) and the V850 (bottom right)](../wiki/media/193-radio.jpg)
+
+![The radio processor, an NEC V850](../wiki/media/193-v850.jpg)
+
+**Faceplate**: a Fujitsu `MB90561A` with Aisin's mark (mask `01050`),
+the same part as on the 192.  **Drive**: an Alpine `DV35M110` with a
+Panasonic controller, as in the 192 photographed.
+
+![The faceplate's controller](../wiki/media/193-faceplate.jpg)
 
 Caches: the OS writes 0x80008181 to CCR (0xff00001c) like the 192's,
 the update loader 0x00000101; either way both caches are on, stores
@@ -26,9 +106,9 @@ The loader, linked at 0x09b60000, runs in P0.
 
 | range                 | device |
 |-----------------------|--------|
-| 0x00000000-0x03ffffff | NOR flash, 64 MiB, same command set as the 192's, in sectors of 128 KiB (the loader erases 0x00400000-0x02ffffff in such steps and nothing below, where the boot ROM is) |
+| 0x00000000-0x03ffffff | NOR flash, 64 MiB: two banks of 32 MiB, each two 16-bit Spansion PL127J side by side (see "The boards"); the same command set as the 192's, sent to both chips of a bank at once; sectors of 128 KiB, 16 KiB in the first and last 128 KiB of a bank (the loader erases 0x00400000-0x02ffffff in such steps and nothing below, where the boot ROM is) |
 | 0x08000000-0x0fffffff | RAM, 128 MiB (the loader's stack starts at 0x8fffdf00) |
-| 0x18000000-           | battery-backed SRAM (the OS has some 1800 references to it) |
+| 0x18000000-0x1803ffff | battery-backed SRAM, 256 KiB (one Renesas R1LV0208BSA; the OS has some 1800 references to it and uses it up to 0x3aec0) |
 | 0xfe008000, 0xfe800100 | not identified (a few writes at start-up; 0xfe800100 takes the key 0xa55a) |
 | 0xff801000-0xff8014ff | DMA channels, 0x80 apart, and their common registers at 0xff801400 (see "DMA channels") |
 | 0xff802000            | interrupt pin control (the layout of the SH7780's INTC: sense, mask and mask-clear registers) |
