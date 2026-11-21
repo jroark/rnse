@@ -226,6 +226,7 @@ impl Machine {
         cpu.io.pclk_div = 4;
         cpu.io.pclk_hz = 58_800_000;
         if model == crate::board::Model::Rnse193 {
+            cpu.sh4a = true;
             cpu.io.navi = Some(Box::default());
             cpu.io.intc.int2 = Some(Default::default());
             cpu.io.pclk_div = 8;
@@ -1602,6 +1603,9 @@ impl Machine {
                 self.next_sound += self.cycles_per_ms();
                 // The drive's own time: spinning up, seeking, reading.
                 let waiting = { let a = self.atapi(); a.advance(1000); a.irq() || a.dma_request() };
+                if let Some(navi) = self.cpu.io.navi.as_mut() {
+                    navi.sdhi.advance(1000);
+                }
                 if waiting {
                     self.board.update_irl();
                     if let Some(navi) = self.cpu.io.navi.as_mut() {

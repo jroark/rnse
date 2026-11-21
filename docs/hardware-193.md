@@ -216,7 +216,12 @@ driver.
   and enabling it with bit 3; the lowest nibble is the front.  (The OS
   puts its blended overlays in the low nibbles and the alpha planes in
   the highest.)
-* Four palettes of 256 entries at +0x1000 * n, 0x00RRGGBB.
+* Four palettes of 256 entries at +0x1000 * n, 0x00RRGGBB.  On the
+  bench 193 an entry keeps six bits of each colour (0x00ffffff reads
+  back as 0x00fcfcfc), and entries nothing has written hold random
+  values with those low bits clear; the emulator stores them so.
+* +0x20 and +0x24 take a key in their top half (the OS writes
+  0x77730001 and 0x77730011): the bench 193 kept only the low half.
 * Status at +0x08 (bit 11 = vertical blanking, bit 14 = frame), cleared
   through +0x0c, enabled as interrupts through +0x10.
 
@@ -225,6 +230,45 @@ buffer offset as on the 192) shown on plane 6 with palette 2.  The OS
 uses plane 6 (16 bpp, transparent colour 0x7c1f) for its main picture
 and planes 1 and 3 as blended overlays (the note in the picture above
 is one), with planes 8 and 7 as their alpha.
+
+### On the bench 193
+
+(2026-11-21, rnse-sdk `examples/sdload193` and `du193`; the registers
+read by a program started from the disc before it touched anything.)
+The stock software (V5751050, locked by its anti-theft code, at its
+PIN screen) leaves the display unit so:
+
+| Register | Value |
+|---|---|
+| DSYSR +0x00 | 0x00100100 (the OS writes 0x00110100, bit 16 set after the start) |
+| DSMR +0x04 | 0x0700f000 |
+| DPPR +0x18 | 0xfed43a98: planes 1, 2, 3, 6, 7, 8 shown |
+| HDSR, HDER, VDSR, VDER | 0xc5, 0x405, 0x20, 0x210 (the loader: 0xb5, 0x3f5, 0x18, 0x208) |
+| +0x94 | 0x00f800f0 |
+| plane 6 | mode 0x04000002 (ARGB 1555), 800 x 496, memory width 832, surface 0x08000040 |
+| planes 1-3 | mode 0x04001002, 16 bpp, surfaces 0x0a273580, 0x0a016940, 0x0a791a00 |
+| planes 7, 8 | mode 0x04004000, 8 bpp, surfaces 0x0a85b200, 0x0a33cd80 |
+| palettes | never written: random values |
+
+Pixels written into those 16 bpp planes as RGB 555 showed exactly
+(0x07e0 green, 0x001f blue).  **An 8 bpp plane through a palette did
+not:** the kit's plane 6, set up as the loader sets up its own (mode
+0x00024100, palette 2 written in full, 0x08110000), came out a flat
+light grey, its white text faintly readable.  DSMR 0x0700f000, DSYSR
+bit 16, +0x94 and +0x24 as the OS has them and the OS's timing, tried
+one after the other, changed nothing.  Why is not known: perhaps the
+palettes need enabling (+0x14 written as 0x000f0000 read back as 0).
+The kit therefore draws the 193's screen at 16 bpp (RGB 555, plane 6
+in mode 0x04000002) with a palette of its own in RAM.  The emulator
+still draws 8 bpp planes as described above, and says once a run that
+one is shown.
+
+**The panel stays dark until POWER is pressed** on the bench 193, also
+when a program of our own runs after the stock software and has set
+the display unit up: whatever switches the panel on (the radio
+processor or the faceplate) is outside the system-on-chip, and the
+emulator does not model it.  The backlight is lit by the faceplate's
+lighting command (0x06).
 
 ## Graphics engine
 
@@ -388,7 +432,18 @@ watchdog: presumably the supply voltage monitor.
 
 The SDK's display driver (`sdk/src/hw193.c`) runs the motor on that
 assumption, and the emulator's model agrees with it by construction;
-it has not been tried on a 193.
+it has not been tried on a 193 (the kit leaves the display key alone
+there).
+
+Port 0xff909000 (+0, +4): bit 1 of +4 is the faceplate controller's
+reset line (low = reset), which the stock software lowers and raises;
+nothing else of the port is its.  The bench 193 read 0xdfffffff and
+0xfffffffb there after the stock software had run, and the emulator
+starts the port so (the reset line low): a program that writes the
+whole register drives the drive's and others' lines low, which on the
+unit set the drive ejecting and loading over and over.  The faceplate's
+keys are those of the 192 (message 0x0c: CD EJECT bit 31, the display
+key bit 13).
 
 ## Watchdog
 
@@ -535,6 +590,17 @@ for one unit") has code added at 0x806a9400 that is called when
 at 0x0e8cff3c; what it then does with them has not been followed.  With
 such a card in the emulator that software records the partition and
 reads no sector of it in the first half minute.
+
+On the bench 193 (2026-11-20, rnse-sdk `examples/slot193`,
+`sdcheck193`, `speed193`, with the SD bridge): select 0 is the slot the
+emulator calls the first (the unit's slot 2), select 1 the other.  A
+change of the select takes between 10 and 20 ms: commands 10 ms after
+one still reached the slot selected before (the emulator takes 15 ms).
+Bit 14 of +0x1e is set while the command line is busy, which is what
+the stock driver waits on.  Multi-block reads (CMD18, block count at
++0x0a with bit 8 of +0x08 for the automatic CMD12) came at 2.9 MB/s at
+the stock software's clock (divider 0 in +0x24), 1.5 MB/s at divider 1;
+single blocks (CMD17) at about 1 MB/s; no bad sector.
 
 `rnse card out.img folder [--disc disc.iso]` writes a card image from a
 folder (FAT16, long names), with a disc's volume in a type-0x96

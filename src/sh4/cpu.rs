@@ -106,6 +106,13 @@ pub struct Cpu {
     /// Instructions executed (also the emulated time base).
     pub cycles: u64,
     pub sleeping: bool,
+    /// An SH-4A core (the 193's R8A77730): its added instructions
+    /// (PREFI, ICBI, SYNCO, MOVLI.L/MOVCO.L, MOVUA.L) are taken; on the
+    /// 192's SH7750R they are illegal, as there.
+    pub sh4a: bool,
+    /// MOVLI.L's reservation (the SH-4A's LDST flag), dropped by MOVCO.L
+    /// and by any exception or interrupt.
+    pub ldst: bool,
     /// Something the run loop has to look at happened: sleep, a fault,
     /// a hypercall, or anything that bears on interrupts (see
     /// [`Cpu::run`]).  Lets it test one flag per instruction.
@@ -192,6 +199,8 @@ impl Cpu {
             io: OnChip::new(),
             cycles: 0,
             sleeping: false,
+            sh4a: false,
+            ldst: false,
             attention: true,
             in_delay: false,
             rte_slot: false,
@@ -563,6 +572,7 @@ impl Cpu {
     // ---- exceptions and interrupts -------------------------------------
 
     pub(super) fn raise(&mut self, e: Exc) {
+        self.ldst = false;
         if self.trace_exceptions {
             eprintln!(
                 "[exc] {:?} addr={:08x} pc={:08x} sr={:08x} pr={:08x}",
@@ -615,6 +625,7 @@ impl Cpu {
     }
 
     fn accept_interrupt(&mut self) {
+        self.ldst = false;
         let (_, code) = self.io.intc.best();
         self.io.intevt = code;
         self.irq_counts[((code >> 5) & 127) as usize] += 1;

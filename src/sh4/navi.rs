@@ -200,7 +200,16 @@ impl Navi {
         let mut atapi = Atapi::new();
         atapi.packet_irq = true;
         // A/D inputs: the display closed (4) and 25 degrees (5).
-        Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), audio: AudioDma::default(), watchdog_edges: 0, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), debug_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() }
+        let mut navi = Navi { regs: HashMap::new(), du: vec![0; (DU_END - DU) as usize], du_frames: 0, console: Vec::new(), atapi, can: Hcan::rcan_et(), sdhi: Sdhi::default(), audio: AudioDma::default(), watchdog_edges: 0, adc: Adc::with_inputs([0, 0, 0, 0, 1023, 450, 0, 0]), radio_uart: Uart::default(), panel_scif: Scif::default(), debug_scif: Scif::default(), display_pos: 1023, ge: Q2::default(), log: IoLog::new(false, 4), unmodelled: Default::default() };
+        // The faceplate's port: the bench 193 read 0xdfffffff and
+        // 0xfffffffb there once its software had run, which changes
+        // only bit 1 of +4 (the faceplate's reset line, raised).  Its
+        // other lines are taken to be so from the start, the reset line
+        // low.  (Plain memory reading 0 here hid a kit start-up that
+        // drove them all low and set the drive ejecting on the unit.)
+        navi.raw_write(PORT_FP, 4, 0xdfff_ffff);
+        navi.raw_write(PORT_FP + 4, 4, 0xffff_fff9);
+        navi
     }
 
     /// Whether this module, rather than the SH-4 model, owns `addr`.
@@ -431,6 +440,15 @@ impl Navi {
                         let s = self.du32(DSSR) & !v;
                         self.set_du32(DSSR, s);
                     }
+                    // The key the software writes in the top half (0x7773)
+                    // is not kept: the bench 193 read back 0x00000001
+                    // and 0x00000011 for 0x77730001 and 0x77730011.
+                    0x020 | 0x024 => self.set_du32(off, v & 0xffff),
+                    // A palette entry keeps six bits of each colour: the
+                    // bench 193 read 0x00fcfcfc back for 0x00ffffff, and
+                    // the entries the stock software never writes held
+                    // random top bytes with those low bits all clear.
+                    0x1000..=0x4fff => self.set_du32(off, v & 0xfffc_fcfc),
                     _ => self.set_du32(off, v),
                 }
                 self.du_irq(intc);
@@ -768,6 +786,9 @@ impl Navi {
             // 2 = ARGB1555 (the A bit is not interpreted here).
             let format = p.mode & 3;
             let palette = 0x1000 * (1 + (p.mode >> 8 & 3));
+            if format == 0 {
+                warn_8bpp(n, p.mode);
+            }
             // Superimposing mode (bits 14..12): bit 2 switches the
             // transparent colour off, 1 in the low bits blends the plane
             // with what is behind it.
@@ -899,5 +920,21 @@ mod tests {
         }
         assert_eq!(navi.watchdog_edges, 4);
         assert_eq!(navi.read(WATCHDOG_PORT, 4, 0, 0, intc), 0);
+    }
+}
+
+/// An 8 bpp plane shown through a palette: drawn here as the emulator
+/// understands the display unit, but on the bench 193 such a plane
+/// (the kit's plane 6, mode 0x00024100 with palette 2 written in full,
+/// as the stock loader sets up its own) came out a flat light grey,
+/// while the stock software's 16 bpp planes showed exactly what was
+/// written into them (2026-11-21, docs/hardware-193.md, "Display
+/// unit").  Said once per run, so that a program relying on it knows.
+fn warn_8bpp(plane: u32, mode: u32) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static SAID: AtomicBool = AtomicBool::new(false);
+    if !SAID.swap(true, Ordering::Relaxed) {
+        eprintln!("[du] plane {} shown at 8 bpp through a palette (mode {:08x}): on a real 193 such a plane \
+showed flat light grey; draw 16 bpp (RGB555) to be sure (docs/hardware-193.md, \"Display unit\")", plane, mode);
     }
 }
