@@ -158,6 +158,24 @@ impl Cpu {
                         // MOVCA.L R0,@Rn
                         self.movca(bus, self.r[n], self.r[0])?;
                     }
+                    // SH-4A only (the 193): MOVLI.L @Rm,R0 takes a
+                    // reservation that MOVCO.L R0,@Rn uses up (T set and
+                    // the store made only while it holds); any exception
+                    // or interrupt drops it.  One core, so nothing else
+                    // can.  PREFI @Rn and ICBI @Rn: the instruction cache
+                    // is not modelled, so nothing to do.
+                    6 if self.sh4a => {
+                        self.r[0] = self.read32(bus, self.r[n])?;
+                        self.ldst = true;
+                    }
+                    7 if self.sh4a => {
+                        let held = std::mem::take(&mut self.ldst);
+                        if held {
+                            self.write32(bus, self.r[n], self.r[0])?;
+                        }
+                        self.set_t(held);
+                    }
+                    0xd | 0xe if self.sh4a => {}
                     _ => return Err(self.illegal()),
                 },
                 0x4 => self.write8(bus, self.r[n].wrapping_add(self.r[0]), self.r[m] as u8)?,
@@ -230,6 +248,7 @@ impl Cpu {
                         self.sleeping = true;
                         self.attention = true;
                     }
+                    0xa if self.sh4a && n == 0 => {} // SYNCO (SH-4A): one core, nothing to order
                     2 => {
                         // RTE
                         self.need_priv()?;
@@ -542,6 +561,19 @@ impl Cpu {
                 0x18 => self.r[n] <<= 8,
                 0x28 => self.r[n] <<= 16,
                 0x09 => self.r[n] >>= 2,
+                // MOVUA.L @Rm,R0 and @Rm+,R0 (SH-4A only): a longword
+                // from any address, a byte at a time.
+                0xa9 | 0xe9 if self.sh4a => {
+                    let a = self.r[n];
+                    let mut v = 0u32;
+                    for i in 0..4 {
+                        v = v << 8 | self.read8(bus, a.wrapping_add(i))? as u32;
+                    }
+                    self.r[0] = v;
+                    if op & 0xff == 0xe9 && n != 0 {
+                        self.r[n] = a.wrapping_add(4);
+                    }
+                }
                 0x19 => self.r[n] >>= 8,
                 0x29 => self.r[n] >>= 16,
                 0x0a => self.mach = self.r[n],

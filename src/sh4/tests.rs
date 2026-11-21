@@ -402,3 +402,69 @@ fn navi_can_timer_uses_its_own_registers_and_interrupt() {
     cpu.io.write(&mut ram, 0xff80_4038, 4, 4, 2 * due, 0);
     assert_eq!(cpu.io.intc.best(), (0, 0));
 }
+
+// ---- SH-4A instructions (the 193's core) ----------------------------
+
+#[test]
+fn sh4a_movli_movco_make_an_atomic_increment() {
+    // movli.l @r1,r0 ; add #1,r0 ; movco.l r0,@r1
+    let (c, mut ram) = run(&[0x0163, 0x7001, 0x0173], |c, ram| {
+        c.sh4a = true;
+        c.r[1] = 0x8000_2000;
+        ram.write32(0x2000, 5);
+    });
+    assert_eq!(ram.read32(0x2000), 6);
+    assert!(c.t());
+    assert!(!c.ldst);
+}
+
+#[test]
+fn sh4a_movco_without_a_reservation_stores_nothing() {
+    // movco.l r0,@r1 with no movli.l before it
+    let (c, mut ram) = run(&[0x0173], |c, ram| {
+        c.sh4a = true;
+        c.r[0] = 9;
+        c.r[1] = 0x8000_2000;
+        ram.write32(0x2000, 5);
+    });
+    assert_eq!(ram.read32(0x2000), 5);
+    assert!(!c.t());
+}
+
+#[test]
+fn sh4a_movua_reads_any_address() {
+    // movua.l @r1,r0 ; movua.l @r2+,r0
+    let (c, _) = run(&[0x41a9, 0x42e9], |c, ram| {
+        c.sh4a = true;
+        for (i, b) in [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66].iter().enumerate() {
+            ram.write8(0x2001 + i as u32, *b);
+        }
+        c.r[1] = 0x8000_2001;
+        c.r[2] = 0x8000_2002;
+    });
+    assert_eq!(c.r[0], 0x2233_4455);
+    assert_eq!(c.r[1], 0x8000_2001);
+    assert_eq!(c.r[2], 0x8000_2006);
+}
+
+#[test]
+fn sh4a_synco_prefi_icbi_are_taken() {
+    // synco ; prefi @r1 ; icbi @r1
+    let (c, _) = run(&[0x00ab, 0x01d3, 0x01e3], |c, _| {
+        c.sh4a = true;
+        c.r[1] = 0x8000_1000;
+    });
+    assert!(c.fault.is_none());
+}
+
+#[test]
+fn sh4a_instructions_are_illegal_on_an_sh4() {
+    // synco on the 192's core: a general illegal instruction exception.
+    let mut ram = Ram(vec![0; 0x10000]);
+    ram.write16(0x1000, 0x00ab);
+    let mut cpu = Cpu::new();
+    cpu.set_sr(SR_MD);
+    cpu.pc = 0x8000_1000;
+    cpu.step(&mut ram);
+    assert_ne!(cpu.pc, 0x8000_1002, "synco ran on an SH-4");
+}

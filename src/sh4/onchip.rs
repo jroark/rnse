@@ -831,6 +831,11 @@ impl OnChip {
             // What a 192 answers (its report, docs/custom-firmware.md,
             // "On a real unit"); the emulator used to say 0x04050005,
             // 0x35100000 and 0x100, an SH7750R's by the book.
+            // The 193's R8A77730 as the bench 193 read it (rnse-sdk's
+            // examples/first193, 2026-11-20): an SH-4A.
+            0xff00_0030 if self.navi.is_some() => 0x1030_0700, // PVR
+            0xff00_0040 if self.navi.is_some() => 0x7144_0211, // CVR
+            0xff00_0044 if self.navi.is_some() => 0x0000_0412, // PRR
             0xff00_0030 => 0x0405_0086, // PVR
             0xff00_0040 => 0x2048_0000, // CVR
             0xff00_0044 => 0x0000_0200, // PRR

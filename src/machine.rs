@@ -226,6 +226,7 @@ impl Machine {
         cpu.io.pclk_div = 4;
         cpu.io.pclk_hz = 58_800_000;
         if model == crate::board::Model::Rnse193 {
+            cpu.sh4a = true;
             cpu.io.navi = Some(Box::default());
             cpu.io.intc.int2 = Some(Default::default());
             cpu.io.pclk_div = 8;
