@@ -193,6 +193,8 @@ North American 8J0 035 193), **a phone's Android Auto ran full screen** on the
 unit's own display: Google Maps in 3D beside the media card and the app bar, at the
 phone's own **30 pictures a second**, every picture shown.
 
+![Android Auto full screen on the 193's display](/media/android-auto-193.jpg "Android Auto on the bench 193, 21 November: a Pixel's Google Maps in 3D beside the media card and the app bar, full screen at 800 × 480, through the bridge in slot 2, decoded by the 193's own processor. The map is blurred.")
+
 - **Its own processor decodes, about three times as fast as a 192's.** A picture
   takes some 17 ms to decode, 15 ms to draw and 3 ms to read, so there is room to
   spare at 30 a second.
