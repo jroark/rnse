@@ -98,12 +98,24 @@ pub struct Sdhi {
     pub bytes_read: u64,
     /// Print each command and what it is answered with (`--trace-sd`).
     pub trace: bool,
+    /// Emulated time, in microseconds (`advance`).
+    micros: u64,
+    /// The slot selected before the last change of the select register,
+    /// and when it changed: the switch takes a while (`SWITCH_MICROS`).
+    switching: Option<(usize, u64)>,
 }
+
+/// How long a change of the slot select (+0x02) takes: on the bench 193
+/// the first commands 10 ms after one still reached the slot selected
+/// before, 20 ms after it the new one (rnse-sdk examples/slot193,
+/// 2026-11-20).
+const SWITCH_MICROS: u64 = 15_000;
 
 impl Default for Sdhi {
     fn default() -> Self {
         let mut host = Self { cards: [None, None], regs: [0; 128], fifo: VecDeque::new(),
-            app: false, selected: false, commands: Vec::new(), bytes_read: 0, trace: false };
+            app: false, selected: false, commands: Vec::new(), bytes_read: 0, trace: false, micros: 0,
+            switching: None };
         host.reset();
         host
     }
@@ -124,7 +136,17 @@ impl Sdhi {
     pub fn present(&self, slot: usize) -> bool { self.cards[slot].is_some() }
     /// Is there data waiting in the read FIFO?
     pub fn data_ready(&self) -> bool { !self.fifo.is_empty() }
-    fn slot(&self) -> usize { (self.regs[1] & 1) as usize }
+    fn slot(&self) -> usize {
+        match self.switching {
+            Some((before, at)) if self.micros.saturating_sub(at) < SWITCH_MICROS => before,
+            _ => (self.regs[1] & 1) as usize,
+        }
+    }
+
+    /// Emulated time passes (the machine calls this every millisecond).
+    pub fn advance(&mut self, micros: u64) {
+        self.micros += micros;
+    }
 
     pub fn irq(&self) -> bool {
         self.regs[0x1c / 2] & !self.regs[0x20 / 2] & 0x1d != 0
@@ -160,6 +182,10 @@ impl Sdhi {
         let index = (offset as usize & 0xff) / 2;
         match offset {
             0 => { self.regs[0] = value; self.command(value); }
+            2 if (value ^ self.regs[1]) & 1 != 0 => {
+                self.switching = Some((self.slot(), self.micros));
+                self.regs[1] = value;
+            }
             0x1c | 0x1e => self.regs[index] &= value, // write zero to clear
             0xe0 if value & 1 == 0 => self.reset(),
             _ => self.regs[index] = value,
@@ -249,5 +275,37 @@ impl Sdhi {
                 if app { "A" } else { "" }, cmd, arg, self.regs[0x0e / 2], self.regs[0x0c / 2],
                 if self.fifo.is_empty() { String::new() } else { format!(", {} bytes", self.fifo.len()) });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// CMD8 with the check pattern: its timeout flag (INFO2 bit 6) and
+    /// the response's low half.
+    fn cmd8(host: &mut Sdhi) -> (bool, u16) {
+        host.write(0x04, 0x01aa);
+        host.write(0x06, 0);
+        host.write(0x00, 8);
+        (host.read(0x1e) & 0x40 != 0, host.read(0x0c))
+    }
+
+    /// A change of the slot select takes effect some 15 ms later (the
+    /// bench 193: 10 ms was too soon, 20 ms enough).
+    #[test]
+    fn a_slot_switch_takes_time() {
+        let mut host = Sdhi::default();
+        host.cards[1] = Some(Card::from_bytes(vec![0; 512 * 1024]).unwrap());
+        host.write(0x02, 1);
+        // At once and 10 ms on: still the empty slot 0.
+        assert!(cmd8(&mut host).0);
+        host.advance(10_000);
+        assert!(cmd8(&mut host).0);
+        // 20 ms on: the card in slot 1 answers.
+        host.advance(10_000);
+        let (timeout, low) = cmd8(&mut host);
+        assert!(!timeout);
+        assert_eq!(low & 0xfff, 0x1aa);
     }
 }

@@ -1602,6 +1602,9 @@ impl Machine {
                 self.next_sound += self.cycles_per_ms();
                 // The drive's own time: spinning up, seeking, reading.
                 let waiting = { let a = self.atapi(); a.advance(1000); a.irq() || a.dma_request() };
+                if let Some(navi) = self.cpu.io.navi.as_mut() {
+                    navi.sdhi.advance(1000);
+                }
                 if waiting {
                     self.board.update_irl();
                     if let Some(navi) = self.cpu.io.navi.as_mut() {
