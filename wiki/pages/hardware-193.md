@@ -1,20 +1,20 @@
 title: The 193's hardware
 order: 30
-summary: The 2010 RNS-E, a system-on-chip with no public manual, worked out from its firmware and now photographed.
+summary: The 2010 RNS-E, a system-on-chip with no public manual, worked out from its firmware, photographed, and since November 2026 checked on a bench unit.
 ---
 The 193 (part number 8P0 035 193, 8J0 035 193 in the TT) looks like a 192 from the
 front and shares its update discs, but inside it is a different computer. Almost
-everything sits in one system-on-chip, a Renesas **R8A77730**: by Renesas' numbering
-an SH7773 of the **"SH-Navi"** family made for car navigation (this page long called
-it an SH7770, its older sibling), and like the rest of that family it has **no public
-manual**.
+everything sits in one system-on-chip, a Renesas **R8A77730**, of the **"SH-Navi"**
+family made for car navigation (this page long called it an SH7770, an older
+member). Its core is an **SH-4A**, the SH-4's successor, and like the rest of that
+family the chip has **no public manual**.
 
 > The register-level work on this page was done on the 193's own firmware running in
 > the emulator, with two outside aids: the Linux kernel's SH7770 support (for serial
 > port addresses) and the Linux driver for the display unit of Renesas' later R-Car
-> chips, which inherited the block almost unchanged. Since November 2026 a real 193 is
-> on a bench, and its boards have been photographed (below); nothing of ours has run on
-> it yet.
+> chips, which inherited the block almost unchanged. Since 20 November 2026 a real 193
+> is on a bench: its boards have been photographed (below), programs of our own have
+> run on it, and what they measured is [below](#on-the-bench).
 
 ![The 193's main software in the emulator](/shots/os-193.png "The 193's main software (V574) in the emulator: the radio set-up screen at 800 × 480.")
 
@@ -69,6 +69,39 @@ one second for every 44,100 samples it sends out. The faceplate port's divisor g
 bus's 100 kbit/s. The CPU is taken to run at 400 MHz, the family's rated speed; that
 is an estimate.
 
+## On the bench
+
+The bench unit is a North American 193 from an Audi TT, built in 2013, running V575
+software at index 0230. Programs of our own reach it the way they reach a 192: the
+unit's own software starts them from a CD-R in place of the update loader. A CD-RW is
+not read by its drive. From there a small loader on the disc starts programs from an
+SD card, so later tests needed no new disc. What they found:
+
+- **The processor** identifies itself as an SH-4A: processor version 0x10300700 (the
+  same as Renesas' SH7785), product register 0x00000412, cache version 0x71440211.
+- **A copied constant nearly killed every test.** The kit's start-up wrote a value
+  it had taken from the emulator's log to a register at 0xfe800220, apparently the
+  memory controller's. The stock loader computes that value from another register,
+  which the emulator read as 0. On the unit, RAM failed about 100 ms after the write.
+  Now the kit computes the value the way the loader does.
+- **The screen.** Planes of 16 bits a pixel show exactly what is written into them.
+  A 256-colour plane through a palette, set up as the stock loader sets up its own,
+  showed only a flat light grey. Why is not known, so the kit now draws the 193's
+  screen in 16-bit colour. A palette entry keeps six bits of each colour.
+- **The panel stays dark until POWER is pressed**, even while our own program runs
+  and has set the display up. Whatever switches it on (the radio processor or the
+  faceplate) is outside the chip.
+- **The faceplate** sends the same key codes as the 192's. CD EJECT ejects the
+  disc; the display key arrives too, but the display's motor has not been driven yet.
+- **The SD host** reads both slots, in long multi-block reads at 2.9 MB/s. Changing
+  slots takes 10 to 20 ms before commands reach the new one. The selects are the
+  other way round from the slots' numbers: select 0 is the unit's slot 2.
+- **CAN** works through the controller as the stock software leaves it set up. The
+  kit's own CAN start left it silent; why is not known yet.
+
+With that, a phone's [Android Auto](/android-auto/#on-the-193) ran full screen on
+the unit at 30 pictures a second.
+
 ## Graphics
 
 The 192 draws through a separate Coral chip. The 193 instead has a 2D engine that
@@ -98,11 +131,13 @@ given speed and rate of turn, and the map follows.
 
 ## What is still open
 
-- Apart from the parts on the boards, none of this has been checked on a real 193 yet.
-  A program for the bench unit that reads its registers, flash and boot ROM out over
-  CAN, as was done on the 192, is ready.
+- Most of the address table above is still inferred. The processor, the display
+  unit, the faceplate's serial port, the drive, the SD host and CAN have been used on
+  the bench unit; the rest has not.
+- Sound through the serial sound interface has not been tried on the unit.
+- What switches the panel on, and the display's motor lines, are not known.
 - Several register blocks are written at start-up and never understood. The emulator
   lets them behave like memory, so that what is written can be read back.
-- The 193's boot ROM is entirely inferred; nobody has read one yet.
+- The 193's boot ROM is entirely inferred; it has not been read from the bench unit yet.
 
 See also [The 192's hardware](/hardware-192/) and [The emulator](/the-emulator/).
