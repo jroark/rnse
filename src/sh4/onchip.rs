@@ -326,6 +326,18 @@ impl Intc {
     }
 }
 
+/// How long a timer of the 193 goes on asking for its interrupt after
+/// its underflow flag was cleared, in CPU cycles, when the control
+/// register is not read back.  On a bench unit the kit's tick handler,
+/// which cleared the flag first thing and returned some dozens of
+/// instructions later without reading it, was entered a second time
+/// for every underflow (its clock ran twice as fast as the world's);
+/// with the register read back after the clear it was entered once
+/// (rnse-sdk's mon193, 2026-11-21).  The stock software's handlers are
+/// not entered twice here with this value.  The real time is not known:
+/// this is long enough to catch a handler like the kit's old one.
+pub const TMU_LINGER: u64 = 400;
+
 #[derive(Default, Clone, Copy)]
 pub struct TmuCh {
     pub tcor: u32,
@@ -406,6 +418,12 @@ pub struct OnChip {
     pub rcr2: u8,
     rtc_last: u64,
 
+    /// The 193 only: until when timer channels 0-2 go on asking for
+    /// their interrupt after software has cleared the underflow flag,
+    /// unless it reads the control register meanwhile ([`TMU_LINGER`]).
+    pub tmu_linger: [u64; 3],
+    /// The time of the access or event being handled.
+    now: u64,
     pub next_event: u64,
     /// Timer 2's input capture register.
     pub tcpr2: u32,
@@ -472,6 +490,8 @@ impl OnChip {
             rtc: [0; 16],
             rcr2: 0,
             rtc_last: 0,
+            tmu_linger: [0; 3],
+            now: 0,
             next_event: u64::MAX,
             tcpr2: 0,
             log: IoLog::new(false, 4),
@@ -531,7 +551,7 @@ impl OnChip {
     fn tmu_irq(&mut self) {
         const IRQS: [Irq; 4] = [Irq::Tuni0, Irq::Tuni1, Irq::Tuni2, Irq::Tuni3];
         for ch in 0..4 {
-            let on = self.tmu[ch].tcr & 0x120 == 0x120;
+            let on = self.tmu[ch].tcr & 0x120 == 0x120 || (ch < 3 && self.tmu_linger[ch] > self.now);
             self.intc.set(IRQS[ch], on);
         }
         self.intc.set(Irq::Ticpi2, self.tmu[2].tcr & 0x2c0 == 0x2c0);
@@ -543,6 +563,11 @@ impl OnChip {
             let t = &self.tmu[ch];
             if t.running {
                 let at = t.last + (t.tcnt as u64 + 1) * self.tmu_cpt(ch);
+                next = next.min(at);
+            }
+        }
+        for at in self.tmu_linger {
+            if at > now {
                 next = next.min(at);
             }
         }
@@ -566,6 +591,7 @@ impl OnChip {
         for ch in 0..4 {
             self.tmu_sync(ch, now);
         }
+        self.now = now;
         self.tmu_irq();
         for ch in 0..8 {
             if self.dma[ch].busy && now >= self.dma[ch].done_at {
@@ -948,6 +974,11 @@ impl OnChip {
                 let off = addr - TMU_BASE - 8;
                 let ch = (off / 12) as usize;
                 self.tmu_sync(ch, now);
+                self.now = now;
+                if off % 12 == 8 {
+                    // Read back: the request is gone with the flag.
+                    self.tmu_linger[ch] = 0;
+                }
                 self.tmu_irq();
                 match off % 12 {
                     0 => self.tmu[ch].tcor,
@@ -1169,9 +1200,13 @@ impl OnChip {
                         // UNF (bit 8) and the capture flag (bit 9) can
                         // only be cleared by writing 0.
                         let flags = self.tmu[ch].tcr & (v as u16) & 0x300;
+                        if self.intc.int2.is_some() && self.tmu[ch].tcr & 0x120 == 0x120 && flags & 0x100 == 0 {
+                            self.tmu_linger[ch] = now + TMU_LINGER;
+                        }
                         self.tmu[ch].tcr = (v as u16 & 0x0ff) | flags;
                     }
                 }
+                self.now = now;
                 self.tmu_irq();
                 self.reschedule(now);
             }

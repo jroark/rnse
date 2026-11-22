@@ -424,6 +424,18 @@ See [boot-rom.md](boot-rom.md).
   control +8, transmit +0xc, status +0x10, receive +0x14, FIFO control
   +0x18).  The protocol is the 192's (`01 command length data
   checksum`), and the OS asks the same things in the same order.
+  The OS sends it 8a every 30 s and 81 [06] every 60 s, for as long as
+  it runs.  Without them the radio processor starts the unit again, and
+  what it wants is the first (a bench unit under rnse-sdk's `mon193`,
+  2026-11-21): sent nothing, the unit started again after 806 s; sent
+  81 [06] once a minute (each acknowledged, 20 [00]), it started again
+  900 s after the first, at the moment the sixteenth went out; sent
+  both as the OS sends them (8a answered with an empty 8a), it was
+  still up after 25 minutes.  The front stayed lit through all three.
+  The emulator restarts a 193 that sends no 8a for 815 s
+  (`--radio-keepalive`).  While a program runs that asks it nothing,
+  the radio processor sends its status block (0x88, 58 bytes) by itself
+  about once a second.
 * 0xff926000, to the faceplate controller: an ordinary SCIF (control
   +0x08, transmit +0x0c, status +0x10, receive +0x14, FIFO control
   +0x18, receive count +0x20).  Same frames as on the 192; the OS sends
@@ -497,6 +509,23 @@ data +0xc, status +0x10, receive data +0x14, FIFO control +0x18).  The
 loader and the OS's low-level output write characters to it after
 setting control bit 5 (transmitter enable); the emulator prints what is
 sent as the console, and nothing while the transmitter is off.
+
+## Timer interrupts
+
+A timer goes on asking for its interrupt for a moment after its
+underflow flag has been cleared.  On a bench unit the kit's tick
+handler, which cleared the flag (a read and a write of the control
+register) first thing and returned some dozens of instructions later,
+was entered a second time for every underflow: the kit's clock ran
+exactly twice as fast as the world's, with the timer itself counting
+the 12.46 MHz it should (249.3 million counts in 20.00 s, on two
+channels: a quarter of a peripheral clock of 49.85 MHz).  With the
+control register read back after the clear the handler is entered once
+(rnse-sdk's `mon193`, 2026-11-21).  The emulator keeps the request for
+400 CPU cycles after the clear unless the register is read
+(`TMU_LINGER` in `src/sh4/onchip.rs`), which makes a handler like the
+old one count double there as well; how long the real request lasts is
+not known.
 
 ## Loader
 
