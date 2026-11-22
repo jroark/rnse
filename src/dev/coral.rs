@@ -81,6 +81,8 @@ pub const LAYERS: [LayerRegs; 6] = [
 ];
 
 pub struct Coral {
+    /// Writes beyond the registers so far (the first few are reported).
+    pub stray: u32,
     pub vram: Vec<u8>,
     /// Register file, bus byte order.
     pub regs: Vec<u8>,
@@ -120,7 +122,7 @@ impl Default for Coral {
 
 impl Coral {
     pub fn new() -> Self {
-        let mut c = Coral { vram: vec![0; VRAM_SIZE], regs: vec![0; REG_SIZE], log: IoLog::new(false, 4), frame: 0, fifo_words: 0, lists: 0, trace: false, only_layer: None, cmd_counts: vec![0; 256], unknown: Vec::new() };
+        let mut c = Coral { stray: 0, vram: vec![0; VRAM_SIZE], regs: vec![0; REG_SIZE], log: IoLog::new(false, 4), frame: 0, fifo_words: 0, lists: 0, trace: false, only_layer: None, cmd_counts: vec![0; 256], unknown: Vec::new() };
         c.reset();
         c
     }
@@ -169,6 +171,15 @@ impl Coral {
         self.log.log("coral", true, addr, size, v, pc);
         let off = addr - REG_BASE;
         let word = off & !3;
+        if word as usize + 4 > self.regs.len() {
+            // Beyond the chip's registers (a program's stray pointer):
+            // nothing there, and nothing to stop the emulator for.
+            if self.stray < 4 {
+                eprintln!("[coral] write of {:x} beyond the registers, at offset {:x}, pc={:08x}", v, off, pc);
+            }
+            self.stray += 1;
+            return;
+        }
         let old = self.r32(word);
         // Merge the bytes written into the containing 32-bit word.
         let mut new = old;
