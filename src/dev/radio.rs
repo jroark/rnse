@@ -142,6 +142,11 @@ pub struct Radio {
     pub frequency: Option<u16>,
     /// Commands seen, for statistics: (command, first data byte or 0xff).
     pub seen: std::collections::BTreeMap<(u8, u8), u32>,
+    /// A frame to volunteer to the unit unasked after a number of
+    /// exchanges, for investigating what the real radio processor sends
+    /// on a power-button press (which goes to it, not the faceplate).
+    pub inject: Option<(usize, Frame)>,
+    poll_count: usize,
 }
 
 impl Default for Radio {
@@ -152,7 +157,14 @@ impl Default for Radio {
 
 impl Radio {
     pub fn new() -> Self {
-        Radio { parser: Parser::new(0x01), version: *b"A0000000", trace: false, source: 0, volume: 0, frequency: None, seen: Default::default() }
+        Radio { parser: Parser::new(0x01), version: *b"A0000000", trace: false, source: 0, volume: 0, frequency: None, seen: Default::default(), inject: None, poll_count: 0 }
+    }
+
+    /// Volunteer `frame` to the unit unasked, once, after `after` more
+    /// completed exchanges (so the unit's receiver is on and idle).
+    pub fn queue_unsolicited(&mut self, after: usize, frame: Frame) {
+        self.inject = Some((after, frame));
+        self.poll_count = 0;
     }
 
     /// Bytes from the main unit; returns the bytes the radio sends back.
@@ -166,6 +178,17 @@ impl Radio {
                         eprintln!("[radio] unit: {}   radio: {}", f, reply);
                     }
                     out.extend_from_slice(&reply.encode(0x00));
+                }
+                // After enough exchanges, volunteer the queued frame once.
+                if let Some((after, frame)) = self.inject.clone() {
+                    self.poll_count += 1;
+                    if self.poll_count >= after {
+                        if self.trace {
+                            eprintln!("[radio] volunteering unsolicited {}", frame);
+                        }
+                        out.extend_from_slice(&frame.encode(0x00));
+                        self.inject = None;
+                    }
                 }
             }
         }
@@ -332,4 +355,26 @@ mod tests {
         assert_eq!(&f.data[..8], b"A2210141");
         assert_eq!(f.data.len(), 16);
     }
+    /// A frame queued to be volunteered goes out once, after the
+    /// exchanges asked for, behind the answer of the last of them.
+    #[test]
+    fn a_queued_frame_is_volunteered_once() {
+        let mut r = Radio::new();
+        let mut say = |r: &mut Radio| -> Vec<Frame> {
+            let mut p = Parser::new(0x00);
+            let mut got = Vec::new();
+            for b in r.from_unit(&Frame::new(0x8a, &[]).encode(0x01)) {
+                got.extend(p.push(b));
+            }
+            got
+        };
+        r.queue_unsolicited(2, Frame::new(0x87, &[0x20, 0x10]));
+        let first = say(&mut r);
+        assert!(first.iter().all(|f| f.cmd != 0x87), "{:?}", first);
+        let second = say(&mut r);
+        assert_eq!(second.last().map(|f| (f.cmd, f.data.clone())), Some((0x87, vec![0x20, 0x10])), "{:?}", second);
+        let third = say(&mut r);
+        assert!(third.iter().all(|f| f.cmd != 0x87), "{:?}", third);
+    }
+
 }
