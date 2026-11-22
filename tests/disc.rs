@@ -560,6 +560,47 @@ fn transport_channels_open() {
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]
+/// `--pin-lock` (`Machine::lock_pin`): the 193 shows its anti-theft PIN
+/// entry screen, as it does after a loss of power, instead of booting
+/// to the radio.  The forced state and the values come from a real
+/// locked unit; see `docs/hardware-193.md`, "Anti-theft".
+#[test]
+fn pin_lock_shows_the_pin_entry_screen() {
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    let v = match variants.iter().find(|v| v.module("OSM").is_some_and(|m| Machine::known_pin_lock(&m.version).is_some())) {
+        Some(v) => v,
+        None => return, // no build this disc carries draws the screen yet
+    };
+    let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+    let boot = |lock: bool| -> (Machine, Vec<u8>) {
+        let mut m = Machine::for_model(rnse::board::Model::Rnse193);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        m.set_ignition(true);
+        m.start_os(v).unwrap();
+        if lock {
+            assert!(m.lock_pin(v), "{}: lock_pin refused a known build", v.name);
+        }
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(30_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        let pixels = m.render().2;
+        (m, pixels)
+    };
+    let (unlocked, open_screen) = boot(false);
+    let (locked, pin_screen) = boot(true);
+    // The anti-theft state the application reads: 3 authorized without
+    // the lock, 2 (PIN required) with it.
+    assert_eq!(unlocked.peek8(0x8e9f_3d61), Some(3), "{}: unlocked state", v.name);
+    assert_eq!(locked.peek8(0x8e9f_3d61), Some(2), "{}: the lock was not forced", v.name);
+    // And the screen is a different one, with content drawn on it.
+    assert_ne!(open_screen, pin_screen, "{}: --pin-lock drew the same screen", v.name);
+    let lit = pin_screen.chunks(3).filter(|p| p.iter().any(|&c| c > 0x40)).count();
+    assert!(lit > 3_000, "{}: the PIN screen is blank ({} lit)", v.name, lit);
+}
+
+#[test]
 fn os_reaches_idle() {
     let Some(image) = disc() else { return };
     let variants = fw::load_variants(&image).unwrap();

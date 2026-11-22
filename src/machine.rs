@@ -153,6 +153,15 @@ pub struct Machine {
     pub drive: Option<Drive>,
     /// How many of the library's results have been replaced by the fix.
     pub gps_fixes: u64,
+    /// When set, the unit shows its anti-theft PIN entry screen, the
+    /// lock it demands after a loss of power.  The real decision comes
+    /// from a decode the emulator does not reproduce (see
+    /// `docs/hardware-193.md`, "Anti-theft"); this forces its outcome
+    /// instead: at the return of the boot anti-theft routine it writes
+    /// the "PIN required" state to the OS's scratch variables, the
+    /// values read from a real locked unit.  The tuple is that return
+    /// address and the (address, word) pairs to write, by OS build.
+    pub pin_lock: Option<(u32, [(u32, u32); 3])>,
     /// Frames sent to the unit periodically, standing in for the rest
     /// of the car: (frame, period in cycles, next due).
     can_cyclic: Vec<(Frame, u64, u64)>,
@@ -239,7 +248,7 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, radio_keepalive_limit_ms: 420_000, radio_keepalive_at: 0, radio_keepalives: 0, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
+        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, radio_keepalive_limit_ms: 420_000, radio_keepalive_at: 0, radio_keepalives: 0, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, pin_lock: None, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
         if model == crate::board::Model::Rnse193 {
             // A bench 193 that got nothing from its software started
             // again 806 s after a program of the kit had taken over
@@ -477,6 +486,36 @@ impl Machine {
             "V57510AA" => Some(0x8067_b886),
             _ => None,
         }
+    }
+
+    /// Where the boot anti-theft routine returns, and the OS scratch
+    /// variables and values that mean "PIN required", by OS build: what
+    /// [`lock_pin`](Self::lock_pin) forces to show the PIN entry screen.
+    /// The values are those read from a real locked unit (unit on its
+    /// PIN screen, `0x8e9f3d61` = state 2, not 3).  Known only for the
+    /// build the emulator draws the screen for so far.
+    pub fn known_pin_lock(os_version: &str) -> Option<(u32, [(u32, u32); 3])> {
+        match os_version {
+            "V57510AA" => Some((
+                0x8061_3e28,
+                [(0x8e9f_3d60, 0x0002_0000), (0x8e9f_3d74, 0x0080_0008), (0x8e9f_3d78, 0x01ff_0000)],
+            )),
+            _ => None,
+        }
+    }
+
+    /// Make the unit demand its anti-theft PIN (see
+    /// [`pin_lock`](Self#structfield.pin_lock)).  Returns false when the
+    /// OS build is not one the screen is known for.
+    pub fn lock_pin(&mut self, v: &Variant) -> bool {
+        let Some(hook) = v.module("OSM").and_then(|m| Self::known_pin_lock(&m.version)) else {
+            return false;
+        };
+        self.pin_lock = Some(hook);
+        if !self.cpu.breakpoints.contains(&hook.0) {
+            self.cpu.breakpoints.push(hook.0);
+        }
+        true
     }
 
     /// The debug `printf` of the navigation application (module `APM`),
@@ -1810,6 +1849,17 @@ impl Machine {
                     self.console.extend_from_slice(&bytes);
                 }
                 // Step over the hooked instruction.
+                let saved = std::mem::take(&mut self.cpu.breakpoints);
+                self.cpu.run(&mut self.board, 1);
+                self.cpu.breakpoints = saved;
+            } else if stop == Stop::Breakpoint && self.pin_lock.is_some_and(|(at, _)| at == self.cpu.pc) {
+                // The boot anti-theft routine has decided; write the
+                // "PIN required" state over its result so the unit asks
+                // for its PIN.
+                let (_, writes) = self.pin_lock.unwrap();
+                for (addr, word) in writes {
+                    self.poke32(addr, word);
+                }
                 let saved = std::mem::take(&mut self.cpu.breakpoints);
                 self.cpu.run(&mut self.board, 1);
                 self.cpu.breakpoints = saved;
