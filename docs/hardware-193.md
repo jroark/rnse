@@ -934,6 +934,48 @@ instrument cluster's task logs `car_model = 4` instead of `ffffffff`.
 `--car-type N` codes an emulated unit (`Machine::set_car_type`) by
 writing that block before the start.
 
+## Anti-theft (the PIN lock)
+
+After a loss of power the unit demands a four-digit PIN before it will
+work, on a screen with a dial of the digits 0-9 (the knob turns to one,
+the button enters it), "Remaining attempts: 2".  The module that does
+it is `THF`; its persistent state is a block in the battery-backed SRAM
+at `0xb8002c14` (magic `0x12345678` at +0, the car's VIN as ASCII from
++8, an inverted mark `0xedcba987` at +0x24).
+
+The OS does not keep the lock state across boots in a single flag.
+Every boot it **rebuilds** the block and runs a decode
+(`AES_dec(ciphertext from the flash parameter block at 0x03ff403a,
+key from the drive's INQUIRY product field at 0x8e9de900)`; the
+routine is at `0x8058cc7e`, called from the boot decision at
+`0x80613db0`, in V57510AA), and from the result it sets a state byte in
+OS scratch RAM at **`0x8e9f3d61`**: **3 = authorized, 2 = PIN
+required**.  The application reads that state to choose the screen.
+(The routine at `0x8061367c`, which reads the 16-bit word at the SRAM
+block's +4, is a *separate* check and is not the boot gate: on a real
+locked unit that word is `0`.)
+
+The emulator does not reproduce the decode faithfully: with a real
+unit's parameter block and the real drive identity
+(`ALPINE  DV33M01B/`, already set) it still computes a different result
+(the block's word at +0x20 comes out `4edd4f5c` where a real unit has
+`37e18ea8`) and resolves to *authorized*, so it boots to the radio.
+This is the same gap the PIN-recovery work hit.
+
+`--pin-lock` (`Machine::lock_pin`) forces the outcome instead of
+reproducing the decode: at the return of the boot decision it writes
+the "PIN required" state to the scratch variables, the values read from
+a real unit on its PIN screen (`0x8e9f3d61 = 2`, `0x8e9f3d74 = …08`,
+`0x8e9f3d79 = ff`).  The unit then draws its PIN entry screen.  It
+**shows and keeps** the lock; it does not model the right PIN, so no
+entry is accepted (the compare is at `0x80613bd2`).  Known only for
+V57510AA so far; `known_pin_lock` holds the addresses per build, and
+other builds (the screen is unverified on them) return nothing.  The
+ground-truth values were read from a real locked unit over CAN with a
+resident running beside the stock software (rnse-sdk `side193`).  One
+cosmetic gap remains: a label at the bottom of the screen renders as
+`??????????? 18DB`.
+
 ## Status
 
 What is known of each part, where from, and what drives it (2026-11-21).
