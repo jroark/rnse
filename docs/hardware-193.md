@@ -445,7 +445,18 @@ See [boot-rom.md](boot-rom.md).
   The emulator restarts a 193 that sends no 8a for 815 s
   (`--radio-keepalive`).  While a program runs that asks it nothing,
   the radio processor sends its status block (0x88, 58 bytes) by itself
-  about once a second.
+  about once a second (again and again, by the look of it, because
+  nobody acknowledges it).
+  The tuner and the amplifier take the 192's frames on a unit (rnse-sdk
+  `tools/bench193/tuner.script`, 2026-11-21): `82 [03 02 hi lo]` tunes
+  (acknowledged with 20 [00]; the radio processor then sends two frames
+  0x87 of its own, `20 10 09 06 hi lo` and 0.3 s later `20 10 09 04 hi
+  lo`), `19 [01 v]` sets the volume, and the status block has the
+  frequency at 4 and 5 (in steps of 50 kHz: 06 f2 for 88.9 MHz), the
+  source at 33 and the volume at 34, as the 192's.  Its byte 3 was 0x14
+  as the stock software left the tuner and 0x04 after a frequency set
+  this way; what the bit says is not known.  The emulator's stand-in
+  does not send the 0x87 frames.
 * 0xff926000, to the faceplate controller: an ordinary SCIF (control
   +0x08, transmit +0x0c, status +0x10, receive +0x14, FIFO control
   +0x18, receive count +0x20).  Same frames as on the 192; the OS sends
@@ -931,8 +942,8 @@ software running in the emulator.  The kit is rnse-sdk.
 | timers | unit: rate 12.462 MHz, the request that lingers after a cleared flag | yes | tick, `micros` | works (the clock was twice too fast until 2026-11-21) |
 | interrupt controller | stock; unit: mask read-back, pins' block | 13 sources; ten more the OS uses have no model ("Not done") | timer and CAN | works for those two |
 | watchdog (port strobe) | stock; unit: a hung program is reset, the unit back in 95 s | yes (period assumed 1.5 s) | tick, or the program's loop | works |
-| CAN controller | stock; unit: every register, the mailbox table, the control bit that moves identifiers | yes | `can_init`, `can_attach`, `canload` | works after stock; from reset tried once by hand (`can_try`), `can_init` itself not yet |
-| radio processor | stock; unit: status block, keep-alive (8a) | stand-in | keep-alive, source, volume, tuner commands as the 192's | keep-alive works; sound source works; tuner and POWER untried |
+| CAN controller | stock; unit: every register, the mailbox table, the control bit that moves identifiers | yes | `can_init`, `can_attach`, `canload` | works after stock; from reset the monitor's own copy of the set-up works (`can_try`: with the top control bit kept it talks and listens, without it the link is lost), `can_init` itself not yet run in a program |
+| radio processor | stock; unit: status block, keep-alive (8a), tuning and volume | stand-in (no 0x87 after tuning) | keep-alive, source, volume, tuner commands as the 192's | keep-alive, sound source, tuning and volume work (the last two by their frames, read back in the status block; nobody listened); POWER untried |
 | faceplate controller | stock; unit: keys, knobs, reset line | stand-in | `panel.c` | works; goes dark for good if its start is left unanswered (limit not measured) |
 | display unit | stock; unit: planes and timing as the kit sets them | yes | 16-bit plane 6 | works; a partial second copy of the bottom text line seen on a unit, unexplained |
 | 2D graphics engine | stock | yes (the OS's commands) | none | untried |
