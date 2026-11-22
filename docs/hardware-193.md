@@ -982,6 +982,19 @@ reading the chip itself:
   controller at 0xfc600000-0xfc7fffff).  None of the three begins as
   an EHCI or OHCI block does, and what they are is not known; the
   four bits of +0x30 and the one of +0x44 changed no page base.
+  The block at 0xfc800000, looked at closer (`fc8.script`,
+  `fc8w.script`): it answers 32-bit accesses only (16- and 8-bit reads
+  give zero) and is one page.  Its words are registers, not memory:
+  written all ones and then zero, +0x00 stays 0xfcfc21e4 and +0x104
+  stays 0x10; +0x04 keeps bit 0, +0x100 bit 31, +0x10c bits 0, 1 and
+  4; nothing else below +0x140 keeps anything.  From +0x500 to +0x730
+  some sixty words hold values as found (0x03850048, 0x00000181,
+  0x008400b0 ...) and keep parts of what is written (+0x500 all 32
+  bits, +0x504 0x01ff01ff, +0x520 0x9fff, +0x700 the low 16; +0x524,
+  +0x600 and +0x730 nothing).  An identity word, an enable bit, a
+  start or busy bit, an interrupt mask and a table of parameters:
+  the shape of a processing block (picture or signal), not of a USB
+  host or function controller.  The unit ran on through all of it.
 * Pages that answer on the unit and that no stock module refers to:
   0xffe92000-0xffe97000 (fixed patterns of four words), 0xfffa0000
   (3, 0x221, 0xc8e0), 0xff952000, 0xff92d000 and 0xff990000 (which the
