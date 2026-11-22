@@ -333,6 +333,14 @@ shows DRQ and the signal register (+0xb0) bit 0 shows the drive's DMA
 request, control bit 0 starts the transfer.  Bytes land in memory in
 the order the drive delivers them.
 
+Read by programmed I/O from a program on a bench unit (rnse-sdk's
+`cd_read` under `mon193`, a CD-R, 2026-11-21): sectors 0x10, 0x11-0x14,
+0x100, 0x2000 and 0x5000 came back as the disc's image has them.  Four
+sectors in a row took 14.7 ms (3.7 ms a sector, some 560 KiB/s); a
+read somewhere else on the disc 170 to 290 ms, and the first read after
+the drive had been idle longer than the 1.5 s the watchdog allows a
+program that serves it from its main loop.
+
 What kind of disc is in the drive the OS finds out with READ
 SUB-CHANNEL: a CD answers, a DVD refuses with "illegal mode for this
 track" (sense 5/64), and that refusal is the OS's test for a DVD (its
@@ -948,7 +956,7 @@ software running in the emulator.  The kit is rnse-sdk.
 | display unit | stock; unit: planes and timing as the kit sets them | yes | 16-bit plane 6 | works; a partial second copy of the bottom text line seen on a unit, unexplained |
 | 2D graphics engine | stock | yes (the OS's commands) | none | untried |
 | display motor, position | stock; unit | yes | `display.c` | works |
-| ATAPI drive | stock; unit: eject, INQUIRY | yes (no DMA) | `cd.c`, programmed I/O | eject works; reading a disc from a program untried on a unit |
+| ATAPI drive | stock; unit: eject, INQUIRY, reads | yes (no DMA) | `cd.c`, programmed I/O | eject and reading a disc work; DMA and CD audio untried |
 | SD host, two slots | stock; unit: both slots, CMD18 at 2.9 MB/s | yes | `sdhi_*`, one data line, polled | works; 4-bit mode, DMA, writes, card detect untried |
 | sound interface, audio clock | stock; unit: plays | yes | `pcm.c` | works |
 | DMA channels | stock | sound and SD | sound | works for sound |
