@@ -39,6 +39,10 @@ pub struct Mmu {
     pub qacr0: u32,
     pub qacr1: u32,
     pub ccr: u32,
+    /// The bits of CCR the processor has: the SH7750R's by default.
+    /// The 193's (an SH-4A) has no double-size or index modes: a bench
+    /// unit reads 0x101 where 0x80008181 was written.
+    pub ccr_mask: u32,
     pub utlb: [TlbEntry; 64],
     pub itlb: [TlbEntry; 4],
     /// One-entry-per-slot cache of recent translations, flushed on any
@@ -65,6 +69,7 @@ impl Mmu {
             qacr0: 0,
             qacr1: 0,
             ccr: 0,
+            ccr_mask: 0x8000_89af,
             utlb: [TlbEntry::default(); 64],
             itlb: [TlbEntry::default(); 4],
             soft: [(1, 0, 0); 64],
@@ -217,7 +222,7 @@ impl Mmu {
                 }
                 self.flush_soft();
             }
-            0xff00_001c => self.ccr = v & 0x8000_89af & !0x808, // ICI/OCI read as 0
+            0xff00_001c => self.ccr = v & self.ccr_mask & !0x808, // ICI/OCI read as 0
             0xff00_0034 => self.ptea = v & 0xf,
             0xff00_0038 => self.qacr0 = v & 0x1c,
             0xff00_003c => self.qacr1 = v & 0x1c,

@@ -116,7 +116,11 @@ impl Hcan {
     /// A controller with the RCAN-ET mailbox layout (see the module
     /// documentation).
     pub fn rcan_et() -> Self {
-        Hcan { id_shift: 2, ctl: 0x10, mask: 4, ..Self::new() }
+        let mut h = Hcan { id_shift: 2, ctl: 0x10, mask: 4, ..Self::new() };
+        // The top bit of the control register is set on a unit (0x8000
+        // under its stock software); see `shift`.
+        h.w16(MCR, 0x8001);
+        h
     }
 
     /// Hardware reset state: reset mode, everything masked.
@@ -137,7 +141,7 @@ impl Hcan {
         let (bcr0, bcr1) = self.stock_timing();
         self.w16(0x06, bcr0);
         self.w16(0x04, bcr1);
-        self.w16(MCR, 0);
+        self.w16(MCR, if self.ctl == 0x10 { 0x8000 } else { 0 });
         self.w16(GSR, 0x0004);
         self.w16(IRR, 0);
         self.w16(IMR, 0xfebd);
@@ -208,7 +212,18 @@ impl Hcan {
     }
 
     fn mb_id(&self, n: usize) -> u16 {
-        (self.r16(MB + n * 0x20) >> self.id_shift) & 0x7ff
+        (self.r16(MB + n * 0x20) >> self.shift()) & 0x7ff
+    }
+
+    /// Where a mailbox's first word has the identifier.  The 193's
+    /// controller has it two bits up while the top bit of its control
+    /// register is set, as its stock software has it, and four bits up
+    /// when software clears that bit: a bench unit whose controller the
+    /// kit had set up from reset with 0 there sent what was written for
+    /// 0x7f8 (0x1fe0) as 0x1fe, and took no frame for what it was
+    /// (rnse-sdk's mon193, 2026-11-21).
+    fn shift(&self) -> u32 {
+        if self.ctl == 0x10 && self.r16(MCR) & 0x8000 == 0 { 4 } else { self.id_shift }
     }
 
     fn mb_mode(&self, n: usize) -> u8 {
@@ -381,7 +396,7 @@ impl Hcan {
                 continue;
             }
             let base = MB + n * 0x20;
-            let mask = (self.r16(base + self.mask) >> self.id_shift) & 0x7ff;
+            let mask = (self.r16(base + self.mask) >> self.shift()) & 0x7ff;
             if (self.mb_id(n) ^ f.id) & !mask & 0x7ff != 0 {
                 continue;
             }
@@ -391,12 +406,15 @@ impl Hcan {
                 self.w32(UMSR1, self.r32(UMSR1) | bit);
                 if self.regs[base + self.ctl] & 0x20 == 0 {
                     // NMC clear: keep the old message, drop the new one.
+                    if self.trace {
+                        eprintln!("[can] rx {} lost: mailbox {} still holds an unread one", f, n);
+                    }
                     self.update_irr();
                     return true;
                 }
             }
             let ctl0 = self.r16(base) & 0x0003;
-            self.w16(base, (f.id << self.id_shift) | ctl0);
+            self.w16(base, (f.id << self.shift()) | ctl0);
             self.regs[base + self.ctl + 1] = (self.regs[base + self.ctl + 1] & 0xf0) | f.len;
             self.regs[base + 8..base + 16].copy_from_slice(&f.data);
             self.w32(RXPR1, self.r32(RXPR1) | bit);
@@ -405,6 +423,9 @@ impl Hcan {
                 eprintln!("[can] rx {} -> mailbox {}", f, n);
             }
             return true;
+        }
+        if self.trace {
+            eprintln!("[can] rx {}: no mailbox takes it", f);
         }
         self.rx_dropped += 1;
         false
@@ -429,7 +450,7 @@ impl Hcan {
             if self.regs[base..base + 0x14].iter().all(|b| *b == 0) {
                 continue;
             }
-            let mask = (self.r16(base + self.mask) >> self.id_shift) & 0x7ff;
+            let mask = (self.r16(base + self.mask) >> self.shift()) & 0x7ff;
             let data: Vec<String> = self.regs[base + 8..base + 16].iter().map(|b| format!("{:02x}", b)).collect();
             out += &format!(
                 "  mailbox {:2}: id {:03x} type {} mask {:03x} dlc {} data {} irq {}\n",

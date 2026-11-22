@@ -228,14 +228,24 @@ impl Machine {
         if model == crate::board::Model::Rnse193 {
             cpu.sh4a = true;
             cpu.io.navi = Some(Box::default());
+            cpu.mmu.ccr_mask = 0x0000_090f;
             cpu.io.intc.int2 = Some(Default::default());
             cpu.io.pclk_div = 8;
-            cpu.io.pclk_hz = 50_000_000;
+            // As a bench unit's timers count: 12.462 MHz, a quarter of
+            // this (rnse-sdk's mon193, 2026-11-21; 50 MHz was taken
+            // before, from the stock software's constants).
+            cpu.io.pclk_hz = 49_848_000;
         }
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
         let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, radio_keepalive_limit_ms: 420_000, radio_keepalive_at: 0, radio_keepalives: 0, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
+        if model == crate::board::Model::Rnse193 {
+            // A bench 193 that got nothing from its software started
+            // again 806 s after a program of the kit had taken over
+            // (some ten seconds after the stock software's last 8a).
+            m.radio_keepalive_limit_ms = 815_000;
+        }
         if model == crate::board::Model::Rnse192 {
             // The 192's drive as one was measured (docs/boot-rom.md, "A
             // disc that goes in while the unit runs"): 2.7 s to load a
@@ -831,7 +841,11 @@ impl Machine {
             }
             if self.radio_present && format_ok {
                 let reply = self.radio.from_unit(&bytes);
-                let keepalives = self.radio.seen.get(&(0x81, 0x06)).copied().unwrap_or(0);
+                // The 192's keep-alive is 81 [06]; the 193's is 8a (a
+                // bench unit sent 81 [06] alone every minute started
+                // again all the same, one sent both did not).
+                let key = if self.board.model == crate::board::Model::Rnse192 { (0x81, 0x06) } else { (0x8a, 0xff) };
+                let keepalives = self.radio.seen.get(&key).copied().unwrap_or(0);
                 if keepalives != self.radio_keepalives {
                     self.radio_keepalives = keepalives;
                     self.radio_keepalive_at = now;
@@ -1012,13 +1026,23 @@ impl Machine {
         if let Some(navi) = self.cpu.io.navi.as_mut() {
             // On the 193 the boot ROM also programs the CAN receive
             // mailboxes; the OS only unmasks their interrupts and looks
-            // at the identifier of whatever arrives.  The one fixed point
-            // is mailbox 24, which the OS (like the loader) treats as the
-            // network management range 0x400-0x43f.  The real assignment
-            // of the others is not known; a single catch-all mailbox
-            // serves the OS just as well.
-            navi.can.configure_mailbox(24, 0x400, 0x03f, 3);
-            navi.can.configure_mailbox(31, 0x000, 0x7ff, 3);
+            // at the identifier of whatever arrives.  The table is a
+            // bench unit's (V575 0310, read through rnse-sdk's mon193
+            // once its SD loader had the unit, 2026-11-21; see
+            // docs/hardware-193.md, "Who sets up the mailboxes"):
+            // ranges in 18-23 and 25, single identifiers in 26-31, and
+            // mailbox 0 for whatever none of them takes.  Mailbox 24
+            // was the loader's by then; it stays what the OS and the
+            // loader treat it as, network management, 0x400-0x43f.
+            for (n, id, mask) in [
+                (0usize, 0x000u16, 0x7ffu16),
+                (18, 0x600, 0x0ff), (19, 0x600, 0x07f), (20, 0x600, 0x03f),
+                (21, 0x500, 0x0ff), (22, 0x300, 0x0ff), (23, 0x200, 0x0ff),
+                (24, 0x400, 0x03f), (25, 0x4d0, 0x00f),
+                (26, 0x63c, 0), (27, 0x6da, 0), (28, 0x6dc, 0), (29, 0x6c1, 0), (30, 0x6c5, 0), (31, 0x6d1, 0),
+            ] {
+                navi.can.configure_mailbox(n, id, mask, 3);
+            }
         } else {
             // What follows is what a 192's ROM was seen to leave when it
             // calls the OS (docs/boot-rom.md, "The real one").
@@ -1362,10 +1386,13 @@ impl Machine {
                 // The CAN timer handler clears its underflow flag,
                 // but the OS never programs its reload or starts it.
                 // On the 192 its ROM has it at 5 ms (73499 counts, like
-                // its other two timers).  For the 193, whose ROM has
-                // not been seen: 2.5 ms, the period the loaders give
-                // this timer themselves.
-                let eighths = if is_192 { 10 } else { 5 };
+                // its other two timers).  The 193's has it at 5 ms too:
+                // a bench unit reads 0xf3e5 (62437 counts) as its
+                // reload, still running, after the kit's loader took
+                // over without touching it (rnse-sdk's mon193,
+                // 2026-11-21).  (2.5 ms, the loaders' own period for
+                // this timer, was assumed before.)
+                let eighths = 10;
                 let reload = (self.cycles_per_ms() / self.cpu.io.pclk_div * eighths / 8 - 1) as u32;
                 let now = self.cpu.cycles;
                 let pc = self.cpu.pc;
@@ -1724,10 +1751,11 @@ impl Machine {
                     self.cpu.fault = Some("reset requested".into());
                     return Stop::Fault;
                 }
-                if self.board.model == crate::board::Model::Rnse192 && self.radio_present && self.radio_keepalive_limit_ms > 0
+                if self.radio_present && self.radio_keepalive_limit_ms > 0
                     && now - self.radio_keepalive_at > self.radio_keepalive_limit_ms * self.cycles_per_ms()
                 {
-                    eprintln!("[radio] no keep-alive (81 [06]) for {} s: the radio processor restarts the unit", (now - self.radio_keepalive_at) / self.cycles_per_ms() / 1000);
+                    let frame = if self.board.model == crate::board::Model::Rnse192 { "81 [06]" } else { "8a" };
+                    eprintln!("[radio] no keep-alive ({}) for {} s: the radio processor restarts the unit", frame, (now - self.radio_keepalive_at) / self.cycles_per_ms() / 1000);
                     self.radio_keepalive_at = now;
                     if self.real_rom {
                         self.cpu.reset();
