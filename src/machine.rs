@@ -228,6 +228,7 @@ impl Machine {
         if model == crate::board::Model::Rnse193 {
             cpu.sh4a = true;
             cpu.io.navi = Some(Box::default());
+            cpu.mmu.ccr_mask = 0x0000_090f;
             cpu.io.intc.int2 = Some(Default::default());
             cpu.io.pclk_div = 8;
             cpu.io.pclk_hz = 50_000_000;
@@ -1372,10 +1373,13 @@ impl Machine {
                 // The CAN timer handler clears its underflow flag,
                 // but the OS never programs its reload or starts it.
                 // On the 192 its ROM has it at 5 ms (73499 counts, like
-                // its other two timers).  For the 193, whose ROM has
-                // not been seen: 2.5 ms, the period the loaders give
-                // this timer themselves.
-                let eighths = if is_192 { 10 } else { 5 };
+                // its other two timers).  The 193's has it at 5 ms too:
+                // a bench unit reads 0xf3e5 (62437 counts) as its
+                // reload, still running, after the kit's loader took
+                // over without touching it (rnse-sdk's mon193,
+                // 2026-11-21).  (2.5 ms, the loaders' own period for
+                // this timer, was assumed before.)
+                let eighths = 10;
                 let reload = (self.cycles_per_ms() / self.cpu.io.pclk_div * eighths / 8 - 1) as u32;
                 let now = self.cpu.cycles;
                 let pc = self.cpu.pc;

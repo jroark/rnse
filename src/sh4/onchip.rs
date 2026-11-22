@@ -811,7 +811,9 @@ impl OnChip {
                 let v = match addr & 0x1ff {
                     o @ 0x00..=0x2f => int2.pri[(o >> 2) as usize],
                     0x38 => int2.mask as u32,
-                    0x3c => !int2.mask as u32,
+                    // The mask-clear register reads 0 (a bench unit,
+                    // 2026-11-21).
+                    0x3c => 0,
                     o @ (0x30 | 0x34 | 0x100 | 0x104) => int2.status(o),
                     0x108 => (int2.mask >> 32) as u32,
                     0x10c => !(int2.mask >> 32) as u32,

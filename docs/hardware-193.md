@@ -183,7 +183,9 @@ The CAN timer is a separate channel at `0xffd81008` (reload),
 `0xffd81004`. V57510AA's interrupt table installs wrapper `804cc58c`
 at exception `480`; it calls `806305a0`, which clears this timer's
 underflow and wakes the CAN task every second interrupt. The boot ROM
-stand-in starts it at 2.5 ms (see [boot-rom.md](boot-rom.md)).
+stand-in starts it at 5 ms, as a bench unit has it (reload 0xf3e5,
+62437 counts, read under the kit's monitor 2026-11-21; see
+[boot-rom.md](boot-rom.md)).
 
 ## Display unit
 
@@ -546,7 +548,8 @@ so:
 * the CAN controller's bit timing makes the infotainment bus's 100
   kbit/s from 50.4 MHz.
 
-The loader's tick (62437) is 5 ms, the CAN timer's period 2.5 ms.
+The loader's tick (62437) is 5 ms, and so is the CAN timer's period as
+the boot ROM leaves it (the loaders give it 2.5 ms themselves).
 (Until the sound output was modelled the emulator took the tick for
 2 ms and the clock for 25 MHz, with the serial peripherals running from
 twice the timers' clock; the unit then ran at half its speed measured
