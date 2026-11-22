@@ -1,7 +1,10 @@
 //! The 193's native SD host interface (16-bit, TMIO-style registers).
 //!
-//! Cards are read-only sector images. The host command/response and PIO
-//! paths are modelled; the decoder and audio output are separate devices.
+//! Cards are sector images, read-only unless made writable
+//! ([`Card::set_writable`]: then CMD24 and CMD25 write them, by the
+//! program through the data port, a block at a time when bit 9 of +0x1e
+//! says the buffer takes one). The host command/response and PIO paths
+//! are modelled; the decoder and audio output are separate devices.
 //! Sectors are read by DMA: the driver sets bit 1 of the register at
 //! +0xd8 and has a DMA channel fetch the words from the data port at
 //! +0x30 (`Navi::dma_run`); the short blocks of the card's own registers
@@ -22,6 +25,7 @@ enum Storage { File(File), Bytes(Vec<u8>) }
 pub struct Card {
     storage: Storage,
     sectors: u64,
+    writable: bool,
 }
 
 impl Card {
@@ -29,12 +33,12 @@ impl Card {
         let file = File::open(path)?;
         let bytes = file.metadata()?.len();
         Self::check_size(bytes)?;
-        Ok(Self { storage: Storage::File(file), sectors: bytes / 512 })
+        Ok(Self { storage: Storage::File(file), sectors: bytes / 512, writable: false })
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> io::Result<Self> {
         Self::check_size(bytes.len() as u64)?;
-        Ok(Self { sectors: bytes.len() as u64 / 512, storage: Storage::Bytes(bytes) })
+        Ok(Self { sectors: bytes.len() as u64 / 512, storage: Storage::Bytes(bytes), writable: false })
     }
 
     fn check_size(bytes: u64) -> io::Result<()> {
@@ -52,6 +56,28 @@ impl Card {
     pub fn high_capacity(&self) -> bool { self.sectors > 0x3f_6000 }
 
     pub fn sectors(&self) -> u64 { self.sectors }
+
+    /// Let the guest write this card (an image held in memory only: a
+    /// card opened from a file stays read-only). Its write-protect
+    /// switch then reads as off.
+    pub fn set_writable(&mut self, writable: bool) { self.writable = writable && matches!(self.storage, Storage::Bytes(_)); }
+    pub fn writable(&self) -> bool { self.writable }
+
+    /// The image, for a card held in memory.
+    pub fn image(&self) -> Option<&[u8]> {
+        match &self.storage { Storage::Bytes(image) => Some(image), Storage::File(_) => None }
+    }
+
+    fn write(&mut self, sector: u32, data: &[u8]) -> io::Result<()> {
+        let offset = u64::from(sector) * 512;
+        match &mut self.storage {
+            Storage::Bytes(image) if self.writable && offset + data.len() as u64 <= image.len() as u64 => {
+                image[offset as usize..offset as usize + data.len()].copy_from_slice(data);
+                Ok(())
+            }
+            _ => Err(io::Error::new(io::ErrorKind::PermissionDenied, "card not writable there")),
+        }
+    }
 
     /// The card-specific data register (CSD) with the card's size in it.
     pub(crate) fn csd(&self) -> [u8; 16] {
@@ -96,6 +122,12 @@ pub struct Sdhi {
     selected: bool,
     pub commands: Vec<(u8, u32)>,
     pub bytes_read: u64,
+    pub bytes_written: u64,
+    /// A write under way: the next sector, the blocks still to come and
+    /// the block being filled through the data port.
+    write_sector: u32,
+    write_blocks: u32,
+    write_block: Vec<u8>,
     /// Print each command and what it is answered with (`--trace-sd`).
     pub trace: bool,
     /// Emulated time, in microseconds (`advance`).
@@ -115,7 +147,7 @@ impl Default for Sdhi {
     fn default() -> Self {
         let mut host = Self { cards: [None, None], regs: [0; 128], fifo: VecDeque::new(),
             app: false, selected: false, commands: Vec::new(), bytes_read: 0, trace: false, micros: 0,
-            switching: None };
+            switching: None, bytes_written: 0, write_sector: 0, write_blocks: 0, write_block: Vec::new() };
         host.reset();
         host
     }
@@ -131,6 +163,8 @@ impl Sdhi {
         self.fifo.clear();
         self.app = false;
         self.selected = false;
+        self.write_blocks = 0;
+        self.write_block.clear();
     }
 
     pub fn present(&self, slot: usize) -> bool { self.cards[slot].is_some() }
@@ -156,8 +190,10 @@ impl Sdhi {
     pub fn read(&mut self, offset: u32) -> u16 {
         match offset {
             0x1c => {
-                // Card present, write protected (images are read-only).
+                // Card present; bit 7 set when it may be written.
+                let writable = self.cards[self.slot()].as_ref().is_some_and(Card::writable);
                 (self.regs[0x1c / 2] & !0xa0) | if self.present(self.slot()) { 0 } else { 0x20 }
+                    | if writable { 0x80 } else { 0 }
             }
             0x1e => self.regs[0x1e / 2] | 0x2000, // command bus idle
             0x30 => {
@@ -182,6 +218,7 @@ impl Sdhi {
         let index = (offset as usize & 0xff) / 2;
         match offset {
             0 => { self.regs[0] = value; self.command(value); }
+            0x30 if self.write_blocks > 0 => self.write_word(value),
             2 if (value ^ self.regs[1]) & 1 != 0 => {
                 self.switching = Some((self.slot(), self.micros));
                 self.regs[1] = value;
@@ -189,6 +226,30 @@ impl Sdhi {
             0x1c | 0x1e => self.regs[index] &= value, // write zero to clear
             0xe0 if value & 1 == 0 => self.reset(),
             _ => self.regs[index] = value,
+        }
+    }
+
+    /// A word of a block being written; a whole block goes to the card,
+    /// and the buffer then takes the next or the transfer ends.
+    fn write_word(&mut self, value: u16) {
+        self.write_block.extend_from_slice(&value.to_be_bytes());
+        self.bytes_written += 2;
+        if self.write_block.len() < 512 { return; }
+        let block = std::mem::take(&mut self.write_block);
+        let slot = self.slot();
+        let sector = self.write_sector;
+        let ok = self.cards[slot].as_mut().is_some_and(|card| card.write(sector, &block).is_ok());
+        if !ok {
+            self.write_blocks = 0;
+            self.regs[0x1e / 2] |= 0x10; // end bit error: the card said no
+            return;
+        }
+        self.write_sector += 1;
+        self.write_blocks -= 1;
+        if self.write_blocks > 0 {
+            self.regs[0x1e / 2] |= 0x200;
+        } else {
+            self.regs[0x1c / 2] |= 4;
         }
     }
 
@@ -218,6 +279,8 @@ impl Sdhi {
         self.commands.push((cmd, arg));
         let app = std::mem::take(&mut self.app);
         self.fifo.clear();
+        self.write_blocks = 0;
+        self.write_block.clear();
         self.regs[0x1c / 2] &= !5;
         self.regs[0x1e / 2] &= !0x837f;
         if !self.present(self.slot()) {
@@ -266,7 +329,21 @@ impl Sdhi {
                 }
             }
             // Images must never be modified by guest writes.
-            (_, 24 | 25) => self.response((1 << 26) | status),
+            // Writes, to a card made writable only.
+            (false, 24 | 25) if self.cards[self.slot()].as_ref().unwrap().writable() => {
+                let card = self.cards[self.slot()].as_ref().unwrap();
+                let sector = if card.high_capacity() { arg } else { arg / 512 };
+                let blocks = if cmd == 25 { u32::from(self.regs[5].max(1)) } else { 1 };
+                if u64::from(sector) + u64::from(blocks) > card.sectors() {
+                    self.response((1 << 31) | status);
+                    self.regs[0x1e / 2] |= 0x10;
+                } else {
+                    self.write_sector = sector;
+                    self.write_blocks = blocks;
+                    self.regs[0x1e / 2] |= 0x200;
+                }
+            }
+            (_, 24 | 25) => self.response((1 << 26) | status), // write protected
             _ => self.response((1 << 22) | status), // illegal command
         }
         self.regs[0x1c / 2] |= 1;
@@ -307,5 +384,40 @@ mod tests {
         let (timeout, low) = cmd8(&mut host);
         assert!(!timeout);
         assert_eq!(low & 0xfff, 0x1aa);
+    }
+
+    /// CMD25 writes a writable card through the data port, a block each
+    /// time bit 9 of +0x1e allows one, and ends with the access-end bit;
+    /// a read-only card refuses, and says so with its switch.
+    #[test]
+    fn a_writable_card_takes_cmd25() {
+        let mut host = Sdhi::default();
+        let mut card = Card::from_bytes(vec![0; 512 * 1024]).unwrap();
+        host.cards[0] = Some(Card::from_bytes(vec![0; 512 * 1024]).unwrap());
+        assert_eq!(host.read(0x1c) & 0x80, 0);
+        host.write(0x00, 25);
+        assert_eq!(host.read(0x1e) & 0x200, 0);
+        card.set_writable(true);
+        host.cards[0] = Some(card);
+        assert_eq!(host.read(0x1c) & 0x80, 0x80);
+        host.write(0x0a, 2);
+        host.write(0x04, 3 * 512); // a standard-capacity card: bytes
+        host.write(0x06, 0);
+        host.write(0x00, 25);
+        for block in 0..2u16 {
+            assert_ne!(host.read(0x1e) & 0x200, 0, "block {}", block);
+            host.write(0x1e, !0x200);
+            assert_eq!(host.read(0x1c) & 4, 0);
+            for i in 0..256u16 {
+                host.write(0x30, block << 12 | i);
+            }
+        }
+        assert_ne!(host.read(0x1c) & 4, 0);
+        assert_eq!(host.read(0x1e) & 0x200, 0);
+        let image = host.cards[0].as_ref().unwrap().image().unwrap();
+        assert_eq!(&image[3 * 512..3 * 512 + 4], &[0, 0, 0, 1]);
+        assert_eq!(&image[4 * 512 + 510..4 * 512 + 512], &[0x10, 0xff]);
+        assert!(image[..3 * 512].iter().chain(&image[5 * 512..]).all(|&b| b == 0));
+        assert_eq!(host.bytes_written, 1024);
     }
 }
