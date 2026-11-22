@@ -231,7 +231,10 @@ impl Machine {
             cpu.mmu.ccr_mask = 0x0000_090f;
             cpu.io.intc.int2 = Some(Default::default());
             cpu.io.pclk_div = 8;
-            cpu.io.pclk_hz = 50_000_000;
+            // As a bench unit's timers count: 12.462 MHz, a quarter of
+            // this (rnse-sdk's mon193, 2026-11-21; 50 MHz was taken
+            // before, from the stock software's constants).
+            cpu.io.pclk_hz = 49_848_000;
         }
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;

@@ -41,7 +41,7 @@ V0), the processor's side:
 | IC100 | `64445DA01BGV`, `99325 00115`, `AISIN AW` | a large ball-grid chip of Aisin's own, with a crystal of its own (X4) beside it: not identified.  The unexplained writes at 0xfe008000 and 0xfe800100 (memory map) are candidates for it; nothing links them yet |
 | IC9 | AKM `AK5406XQ` | not identified from its marking; beside the serializer, and the AMP connector has inputs for red, green, blue and sync, so presumably the converter of that picture input |
 | IC11 | Maxim `MAX9247` | a serializer for LVDS: the picture goes to the panel in the display this way |
-| X1 | `D332K` | the crystal beside the SoC.  If it is 33.3 MHz, twelve times it is the 400 MHz taken for the CPU and one and a half times it the 50 MHz peripheral clock ("Clocks and time"); not measured |
+| X1 | `D332K` | the crystal beside the SoC.  The peripheral clock measures 49.85 MHz ("Clocks and time"), one and a half times 33.23 MHz: twelve times that is 398.8 MHz for the CPU.  The crystal itself has not been measured |
 | | Hirose `HRS163-3416A` | the two SD card slots, in one shielded holder, wired to the SoC: there are no card processors as on the 192 |
 | CN11 | | the GPS aerial's coaxial cable; no GPS module as on the 192, so the receiver's front end is on the board and the rest in the SoC's GPS block |
 
@@ -576,6 +576,15 @@ so:
   from 25;
 * the CAN controller's bit timing makes the infotainment bus's 100
   kbit/s from 50.4 MHz.
+
+Measured on a bench unit, the timers count 12.462 MHz (249.3 million
+counts in 20.00 s on two channels of rnse-sdk's `mon193`, and a clock
+kept at the stock software's 12488 counts a millisecond was 3.8 s
+behind after 31 minutes; 2026-11-21): a peripheral clock of 49.85 MHz,
+and the stock software's millisecond 0.2 % long.  That is one and a
+half times 33.23 MHz, which the crystal X1 (`D332K`) may well be; the
+CPU's 400 MHz would then be 398.8.  The emulator's peripheral clock is
+49.848 MHz.
 
 The loader's tick (62437) is 5 ms, and so is the CAN timer's period as
 the boot ROM leaves it (the loaders give it 2.5 ms themselves).
