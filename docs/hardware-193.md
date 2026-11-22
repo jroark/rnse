@@ -367,6 +367,16 @@ Bit timing as the loader sets it, after putting the controller in reset
 is two clock periods times the prescaler) that is 100 kbit/s from 50.4
 MHz, the peripheral clock (see "Clocks and time").
 
+The control register (+0) reads 0x8000 under the stock software, and
+its top bit decides where a mailbox's first word has the identifier:
+two bits up with it set, four bits up with it cleared.  A bench unit
+whose controller the kit set up from reset with 1 and then 0 in that
+register sent what was written for 0x7f8 as 0x1fe and took none of the
+frames sent to it for what they were; set up the same way with 0x8001
+and 0x8000 it talked and listened as under the stock set-up (rnse-sdk's
+`mon193`, `can_try`, 2026-11-21).  That was the "silent bus" of the
+kit's `can_init` on a unit.  The emulator's controller does the same.
+
 ### Who sets up the mailboxes
 
 The OS programs its transmit mailboxes but no receive mailbox: it only
