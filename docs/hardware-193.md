@@ -958,9 +958,27 @@ reading the chip itself:
   the many registers of a USB host controller except those named
   below.  Whether the R8A77730 has the block, where its
   registers are, and whether its pins reach anything on the board is
-  not known; `tools/bench193/blocks.script` of rnse-sdk reads the base
-  of every 4 KiB page of the register space on a unit to find out
-  (not yet run on one).
+  not known.  A bench unit was asked (2026-11-22, rnse-sdk's
+  `tools/bench193/blocks.script` and `blocks2.script` under `mon193`:
+  one read at the base of each 4 KiB page from 0xfe000000 up, 8700
+  reads): no read anywhere takes an exception, a page with nothing in
+  it reads zero, and 0xffe70000, 0xffe70400, 0xffe70800 (where the
+  SH7786 has its EHCI, OHCI and USB control registers) and 0xfff70000
+  read zero throughout; no page begins with an EHCI block's length and
+  version.  That does not settle it: the clock block at 0xffc80000
+  (repeated every 0x80; frequency registers at +0x14 to +0x2c) reads
+  0x0000000f at +0x30, 1 at +0x34 and 1 at +0x44, where the R-Car H1
+  has its module stop registers, and bit 0 of +0x34 stops the USB
+  host's clock there.  A stopped block may well read zero; clearing
+  the bits and reading again has not been tried.
+* Pages that answer on the unit and that no stock module refers to:
+  0xffe92000-0xffe97000 (fixed patterns of four words), 0xfffa0000
+  (3, 0x221, 0xc8e0), 0xff952000, 0xff92d000 and 0xff990000 (which the
+  OS writes once at +0xb8), 0xff2c0000-0xff2ff000, and in the lower
+  half of the area 0xfc110000, 0xfc400000, 0xfc600000 and
+  0xfcd80000-0xfcdf0000.  None is identified.  Most pages from
+  0xff904000 to 0xff9ff000 that hold nothing known read 0x01010101,
+  and 0xffa00000-0xffbfffff repeats 0xff900000-0xff9fffff.
 * **The SD slots** are the interface that is there: both wired to the
   SoC's host interface ("SD cards"), one data line in use by the kit of
   four, SDIO never tried.
