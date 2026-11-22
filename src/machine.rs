@@ -1012,13 +1012,23 @@ impl Machine {
         if let Some(navi) = self.cpu.io.navi.as_mut() {
             // On the 193 the boot ROM also programs the CAN receive
             // mailboxes; the OS only unmasks their interrupts and looks
-            // at the identifier of whatever arrives.  The one fixed point
-            // is mailbox 24, which the OS (like the loader) treats as the
-            // network management range 0x400-0x43f.  The real assignment
-            // of the others is not known; a single catch-all mailbox
-            // serves the OS just as well.
-            navi.can.configure_mailbox(24, 0x400, 0x03f, 3);
-            navi.can.configure_mailbox(31, 0x000, 0x7ff, 3);
+            // at the identifier of whatever arrives.  The table is a
+            // bench unit's (V575 0310, read through rnse-sdk's mon193
+            // once its SD loader had the unit, 2026-11-21; see
+            // docs/hardware-193.md, "Who sets up the mailboxes"):
+            // ranges in 18-23 and 25, single identifiers in 26-31, and
+            // mailbox 0 for whatever none of them takes.  Mailbox 24
+            // was the loader's by then; it stays what the OS and the
+            // loader treat it as, network management, 0x400-0x43f.
+            for (n, id, mask) in [
+                (0usize, 0x000u16, 0x7ffu16),
+                (18, 0x600, 0x0ff), (19, 0x600, 0x07f), (20, 0x600, 0x03f),
+                (21, 0x500, 0x0ff), (22, 0x300, 0x0ff), (23, 0x200, 0x0ff),
+                (24, 0x400, 0x03f), (25, 0x4d0, 0x00f),
+                (26, 0x63c, 0), (27, 0x6da, 0), (28, 0x6dc, 0), (29, 0x6c1, 0), (30, 0x6c5, 0), (31, 0x6d1, 0),
+            ] {
+                navi.can.configure_mailbox(n, id, mask, 3);
+            }
         } else {
             // What follows is what a 192's ROM was seen to leave when it
             // calls the OS (docs/boot-rom.md, "The real one").

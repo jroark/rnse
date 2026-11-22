@@ -391,6 +391,9 @@ impl Hcan {
                 self.w32(UMSR1, self.r32(UMSR1) | bit);
                 if self.regs[base + self.ctl] & 0x20 == 0 {
                     // NMC clear: keep the old message, drop the new one.
+                    if self.trace {
+                        eprintln!("[can] rx {} lost: mailbox {} still holds an unread one", f, n);
+                    }
                     self.update_irr();
                     return true;
                 }
@@ -405,6 +408,9 @@ impl Hcan {
                 eprintln!("[can] rx {} -> mailbox {}", f, n);
             }
             return true;
+        }
+        if self.trace {
+            eprintln!("[can] rx {}: no mailbox takes it", f);
         }
         self.rx_dropped += 1;
         false

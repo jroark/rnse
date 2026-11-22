@@ -363,6 +363,13 @@ impl Navi {
                 intc.set_int2(INT2_ATAPI, self.atapi_request());
                 v
             }
+            // A register of the memory controller, as a bench unit has
+            // it (rnse-sdk's mon193, 2026-11-21).  The stock loader and
+            // the kit's board_init compute what they write to +0x220
+            // from its bits 10-18 (0x49 here: 0x1047 written); read as
+            // 0 it made a constant of that write, 0xfffffffe, which
+            // stopped a unit's RAM.
+            0xfe80_0280 if size == 4 => 0x0249_24e5,
             ATAPI_STATUS => self.atapi_status(),
             // Signal levels: bit 0 is the drive's DMA request.
             ATAPI_SIGNALS => self.atapi.dma_request() as u32,

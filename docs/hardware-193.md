@@ -110,6 +110,7 @@ The loader, linked at 0x09b60000, runs in P0.
 | 0x08000000-0x0fffffff | RAM, 128 MiB (the loader's stack starts at 0x8fffdf00) |
 | 0x18000000-0x1803ffff | battery-backed SRAM, 256 KiB (one Renesas R1LV0208BSA; the OS has some 1800 references to it and uses it up to 0x3aec0) |
 | 0xfe008000, 0xfe800100 | not identified (a few writes at start-up; 0xfe800100 takes the key 0xa55a) |
+| 0xfe800220, 0xfe800280 | the memory controller's: the loader writes to +0x220 what it computes from bits 10-18 of +0x280 (less 2, with bit 12 set).  +0x280 reads 0x024924e5 on a bench unit (so 0x1047 is written), +0x220 reads 0 (2026-11-21); the emulator gives +0x280 that value |
 | 0xff801000-0xff8014ff | DMA channels, 0x80 apart, and their common registers at 0xff801400 (see "DMA channels") |
 | 0xff802000            | interrupt pin control (the layout of the SH7780's INTC: sense, mask and mask-clear registers) |
 | 0xff804000            | interrupt controller |
@@ -370,8 +371,32 @@ The OS programs its transmit mailboxes but no receive mailbox: it only
 unmasks mailbox interrupts and then looks at the identifier of whatever
 arrives, so the boot ROM must have set the receive side up.  The one
 fixed point in the OS's receive path is mailbox 24, treated (as in the
-loader) as the network management range 0x400-0x43f.  The emulator's
-boot ROM stand-in programs that one and a single catch-all mailbox.
+loader) as the network management range 0x400-0x43f.
+
+The receive mailboxes as a bench unit has them (V575 0310, read through
+rnse-sdk's `mon193` after its SD loader had taken the unit over,
+2026-11-21; control word 0x0300 at +0x10, the mask at +4 with a set bit
+meaning "any"):
+
+| mailbox | identifiers | |
+|---------|-------------|-|
+| 0 | any | what no other mailbox takes |
+| 18, 19, 20 | 0x600-0x6ff, 0x600-0x67f, 0x600-0x63f | three of falling width, so that a burst in the lower ranges has more than one place |
+| 21 | 0x500-0x5ff | |
+| 22 | 0x300-0x3ff | |
+| 23 | 0x200-0x2ff | the ignition lock's 0x271 among them |
+| 24 | | the kit's by then (every identifier); see above |
+| 25 | 0x4d0-0x4df | |
+| 26-31 | 0x63c, 0x6da, 0x6dc, 0x6c1, 0x6c5, 0x6d1 | one each |
+
+The base of a range is taken from the mask and the last identifier
+received; mailboxes 2-17 are the OS's for sending (two copies of the
+cluster's lines on 0x363 and 0x365, 0x661 and 0x604 among them;
+mailbox 1 was the kit's).  The controller looks for a mailbox from 31 down: a
+frame for the kit's mailbox 24 never reaches mailbox 0.  The emulator's
+boot ROM stand-in programs this table (it had a single mailbox for
+every identifier at 31 before, which kept every frame from a program's
+mailbox 24 once nobody read it).
 
 The OS's table of expected messages (36 slots of 40 bytes at 0x8eac58a8
 in V5741040) lists 0x200, 0x271, 0x2c3, 0x351, 0x353, 0x359, 0x497,
