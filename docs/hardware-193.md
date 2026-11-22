@@ -969,8 +969,19 @@ reading the chip itself:
   (repeated every 0x80; frequency registers at +0x14 to +0x2c) reads
   0x0000000f at +0x30, 1 at +0x34 and 1 at +0x44, where the R-Car H1
   has its module stop registers, and bit 0 of +0x34 stops the USB
-  host's clock there.  A stopped block may well read zero; clearing
-  the bits and reading again has not been tried.
+  host's clock there.  They are stop bits here too, and they do not
+  hide a USB host at those addresses (`unstop.script` to
+  `unstop3.script`, the same day): all five bits can be cleared and
+  set with the unit running on; with them clear the candidates still
+  read zero, and of 8700 page bases one changes: 0xfc800000, which
+  reads 0xfcfc21e4 while bit 0 of +0x34 is clear and zero while it is
+  set.  Of that block's first kilobyte only +0x104 (0x10) is not zero
+  besides.  Two blocks that answer whatever the bits say begin alike:
+  0xfc400000 and 0xfc600000 (both 0xfcfc58f2, then 0x16, then
+  0xfdff0000 and 0xfc7f0000, twice each; the R-Car H1 has its SATA
+  controller at 0xfc600000-0xfc7fffff).  None of the three begins as
+  an EHCI or OHCI block does, and what they are is not known; the
+  four bits of +0x30 and the one of +0x44 changed no page base.
 * Pages that answer on the unit and that no stock module refers to:
   0xffe92000-0xffe97000 (fixed patterns of four words), 0xfffa0000
   (3, 0x221, 0xc8e0), 0xff952000, 0xff92d000 and 0xff990000 (which the
