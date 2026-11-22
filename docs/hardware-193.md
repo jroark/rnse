@@ -915,6 +915,40 @@ instrument cluster's task logs `car_model = 4` instead of `ffffffff`.
 `--car-type N` codes an emulated unit (`Machine::set_car_type`) by
 writing that block before the start.
 
+## Status
+
+What is known of each part, where from, and what drives it (2026-11-21).
+"Unit": read or tried on a bench unit (V575, with rnse-sdk's `mon193`
+and its earlier bench programs); "stock": inferred from the stock
+software running in the emulator.  The kit is rnse-sdk.
+
+| part | known from | emulator | kit driver | on a unit |
+|------|------------|----------|------------|-----------|
+| processor, caches | unit (PVR, CVR, PRR, CCR) | yes | start-up code | works |
+| RAM and its controller (0xfe800xxx) | unit: one register and the loader's computed write | the one register | `board_init` | works; the rest of the block unknown |
+| flash, 2 x 32 MiB | boards, stock; identity and CFI read on a unit | yes (data sheet identity) | read; erase and program untried on a unit by choice | read only |
+| battery-backed memory | boards; dumped from a unit | yes | none needed | read only |
+| timers | unit: rate 12.462 MHz, the request that lingers after a cleared flag | yes | tick, `micros` | works (the clock was twice too fast until 2026-11-21) |
+| interrupt controller | stock; unit: mask read-back, pins' block | 13 sources; ten more the OS uses have no model ("Not done") | timer and CAN | works for those two |
+| watchdog (port strobe) | stock; unit: a hung program is reset, the unit back in 95 s | yes (period assumed 1.5 s) | tick, or the program's loop | works |
+| CAN controller | stock; unit: every register, the mailbox table, the control bit that moves identifiers | yes | `can_init`, `can_attach`, `canload` | works after stock; from reset tried once by hand (`can_try`), `can_init` itself not yet |
+| radio processor | stock; unit: status block, keep-alive (8a) | stand-in | keep-alive, source, volume, tuner commands as the 192's | keep-alive works; sound source works; tuner and POWER untried |
+| faceplate controller | stock; unit: keys, knobs, reset line | stand-in | `panel.c` | works; goes dark for good if its start is left unanswered (limit not measured) |
+| display unit | stock; unit: planes and timing as the kit sets them | yes | 16-bit plane 6 | works; a partial second copy of the bottom text line seen on a unit, unexplained |
+| 2D graphics engine | stock | yes (the OS's commands) | none | untried |
+| display motor, position | stock; unit | yes | `display.c` | works |
+| ATAPI drive | stock; unit: eject, INQUIRY | yes (no DMA) | `cd.c`, programmed I/O | eject works; reading a disc from a program untried on a unit |
+| SD host, two slots | stock; unit: both slots, CMD18 at 2.9 MB/s | yes | `sdhi_*`, one data line, polled | works; 4-bit mode, DMA, writes, card detect untried |
+| sound interface, audio clock | stock; unit: plays | yes | `pcm.c` | works |
+| DMA channels | stock | sound and SD | sound | works for sound |
+| A/D converter | stock; unit | yes | `adc_read` | works |
+| ports | unit: every register read once | inputs as the unit's, few lines named | the lines named | most lines unknown |
+| GPS block, its clock (0xff907000) | stock | fix patched in, clock not modelled | none | untried |
+| gyroscope, speed pulses | stock | yes (the OS's view) | none | untried |
+| I2C masters, serial ports 0xff923000 and 0xff927000 | stock touches them | no | none | unknown |
+| IC100 (Aisin), AK5406, MAX9247 | boards | no | none | unknown |
+| boot ROM | dumped from a unit (128 KiB) | stand-in; the dump not yet run in its place | none | - |
+
 ## Not done
 
 * Antialiasing of the map's lines (drawing mode bit 2), the A bit of
