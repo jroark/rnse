@@ -934,6 +934,56 @@ instrument cluster's task logs `car_model = 4` instead of `ffffffff`.
 `--car-type N` codes an emulated unit (`Machine::set_car_type`) by
 writing that block before the start.
 
+## Battery-backed SRAM
+
+The 256 KiB static RAM at physical `0x18000000` (P2 `0xb8000000`; one
+Renesas R1LV0208BSA) holds the unit's persistent state between power
+cycles.  The OS has some 1800 references to it and uses it up to about
+`0x3aec0`; most of that is settings (radio stations, display and sound
+preferences) that have not been broken down.  The fields identified so
+far, by offset from the base:
+
+| Offset | Content | From |
+|---|---|---|
+| `0x0000` | A header.  The boot ROM clears `0x00..0x18` (and `0x1a..0x1c`) on every reset, so only the rest survives a restart; a real dump reads `00 ff 00 00` then zeroes, with `0x00040000` at `0x1c`. | `src/machine.rs` (the `0x18`/`0x1a` clear), a unit dump |
+| `0x1400`, `0x1402` | Counter/status half-words. | PIN handoff |
+| `0x1408..0x1507` | A block the CPU does not read before the user interface is up. | PIN handoff |
+| `0x2c14..0x2c4c` | The **anti-theft (THF)** block — see "Anti-theft" below. | this work, PIN handoff |
+| `0x2c4c..0x2c8c` | The **coding** block — see "Coding". | `Machine::set_car_type`, this work |
+| up to `~0x3aec0` | OS settings (not individually mapped). | — |
+
+The **serial number and the factory parameter block are not here** —
+they are in the flash at `0x03ff401f`/`0x03ff403a` (see "Main
+software").  A common confusion, because the anti-theft reads both the
+flash parameter block and this SRAM.
+
+Both known structured blocks carry the same frame: a mark `0x12345678`
+at the start and that mark inverted, `0xedcba987`, at the end, with the
+OS clearing the block if the pair does not check out.
+
+**THF block, `0x2c14` (56 bytes)** — the fields within it (read from a
+locked unit over CAN and from the recovery notes; some are provisional):
+
+| +off | Address | Content |
+|---|---|---|
+| `0x00` | `0x2c14` | mark `0x12345678` |
+| `0x04` | `0x2c18` | lock word (the lock-check at `0x8061367c` reads the 16-bit half here) |
+| `0x08` | `0x2c1c` | the car's VIN, 16 ASCII bytes |
+| `0x18` | `0x2c2c` | state byte |
+| `0x1a`-`0x1c` | `0x2c2e`-`0x2c30` | wrong-PIN attempt counter |
+| `0x20` | `0x2c34` | a word derived from the boot decode (differs per unit) |
+| `0x24` | `0x2c38` | inverted mark `0xedcba987` |
+| `0x28`.. | `0x2c3c`.. | decode working values |
+
+**Coding block, `0x2c4c` (64 bytes)** — what a workshop codes (see
+"Coding"): mark `0x12345678` at `+0`, a version at `+4`, a checksum of
+`+0x0c..+0x1c` at `+8`, the car type (1-7) at `+0x16`, and the inverted
+mark `0xedcba987` at `+0x3c`.
+
+The emulator seeds this RAM with zeros (then the boot ROM stand-in's
+clear); `--nvram FILE` starts it from a unit's dump instead, and a
+dump is kept out of the repository (firmware).
+
 ## Anti-theft (the PIN lock)
 
 After a loss of power the unit demands a four-digit PIN before it will
