@@ -934,6 +934,54 @@ instrument cluster's task logs `car_model = 4` instead of `ffffffff`.
 `--car-type N` codes an emulated unit (`Machine::set_car_type`) by
 writing that block before the start.
 
+## Interfaces the stock software leaves unused
+
+Asked 2026-11-22: is there a USB, PCI, Wi-Fi or Bluetooth interface on
+the 193 that custom software could turn on?  What the stock software
+says (V575 10AA and 1050, the boot ROM dumped from a unit), short of
+reading the chip itself:
+
+* **Wi-Fi, Bluetooth, PCI: no.**  No radio part is on the boards, no
+  chip of this family has PCI, and no module refers to registers of
+  either.  The "Bluetooth" texts in the application are the screens for
+  the car's telephone module, which is on the CAN bus
+  ([telephone.md](telephone.md)).
+* **USB: no driver in the stock software; the block itself is unproven.**
+  The texts "USB storage device" are names of sources of the Audi Music
+  Interface, again on CAN.  The documented relatives of the R8A77730
+  have a USB 2.0 host (Renesas's announcements of the SH7770, SH7775
+  and SH77721), and Linux's table for the SH7770, whose serial ports
+  (0xff923000 up, a page each) and timers are where the 193's are, gives
+  its USB interrupt as INTEVT 0x840.  The 193's OS installs no handler
+  there (its table at 0x8e8d0400 is empty at 0x840), and of the blocks
+  that the OS, the loader and the boot ROM load addresses of, none has
+  the many registers of a USB host controller except those named
+  below.  Whether the R8A77730 has the block, where its
+  registers are, and whether its pins reach anything on the board is
+  not known; `tools/bench193/blocks.script` of rnse-sdk reads the base
+  of every 4 KiB page of the register space on a unit to find out
+  (not yet run on one).
+* **The SD slots** are the interface that is there: both wired to the
+  SoC's host interface ("SD cards"), one data line in use by the kit of
+  four, SDIO never tried.
+
+What the stock software does use and nothing here models, by block
+(`rnse boot DISC --variant V575 --ignition --cycles 30000000000
+--unmodelled` lists the addresses; the handlers are those of the OS's
+interrupt table, followed to the registers they load):
+
+| block | INTEVT | what it looks like |
+|-------|--------|--------------------|
+| 0xffc50000-0xffc53000 (offsets 0, 4, 8, 0xc, 0x44, 0x50, 0x80) | 0x760 (the second) | four alike; the R-Car H1, which has the 193's ports (0xffc40000 a page each), timers and display unit at the same addresses, has its video inputs in this layout.  With 0x7a0, "video in" in Linux's SH7770 table, which has a handler too: the picture input behind the AK5406 |
+| 0xff985000, 0xff986000 | 0xcc0; 0x940, 0xe20 | beside the sound interface (0xff984000) and set up with it: further sound channels or a sample-rate converter |
+| 0xff927000 | 0xde0 | a serial port with FIFO that the OS runs with its interrupt; what is on its pins is not known |
+| 0xff923000 | none installed | a serial port the OS has code for (eleven registers, among them +0x30 and +0x34 as the debug port's) and does not touch in a start to the menu |
+| 0xff908000 with 0x10000000 | 0xc00 | ten registers written at the start; the handler also reads memory at 0x10000000, where the OS reads 768 words (0x10002c34 up) once at its start.  An external device in that chip select: IC100 is the candidate |
+| 0xff938000 | 0xce0 | the GPS block ("GPS") |
+| 0xff940000 (+0x10, +0x14) | 0xfa0 | a port's pin interrupt |
+| 0xfff8a000 | none | inside the display unit's range (0x40000 from 0xfff80000 on the R-Car H1) and in the display's code: thirty registers at +0x100 to +0x150 and +0x200 to +0x250, laid out like two planes; not touched in a start to the menu |
+| 0xff902000, 0xff903000, 0xff900000, 0xffc00200 | | interrupt masks' second block, and clock or pin set-up written once |
+
 ## Status
 
 What is known of each part, where from, and what drives it (2026-11-21).
@@ -990,4 +1038,6 @@ software running in the emulator.  The kit is rnse-sdk.
   the remaining serial ports, DMA for the drive.
 * Interrupt sources the OS registers handlers for and that have no
   model: 0x760, 0x7a0, 0x940, 0x960, 0xc00, 0xcc0, 0xce0, 0xde0,
-  0xe20, 0xfa0.
+  0xe20, 0xfa0.  Most are placed in "Interfaces the stock software
+  leaves unused"; 0x960 is not (its handler loads no register address
+  directly).
