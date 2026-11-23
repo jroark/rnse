@@ -961,19 +961,21 @@ Both known structured blocks carry the same frame: a mark `0x12345678`
 at the start and that mark inverted, `0xedcba987`, at the end, with the
 OS clearing the block if the pair does not check out.
 
-**THF block, `0x2c14` (56 bytes)** — the fields within it (read from a
-locked unit over CAN and from the recovery notes; some are provisional):
+**THF block, `0x2c14` (40 bytes)** — mirrored at boot from block #6 of
+the `0x033e0000` / `0x03400000` flash store (see "Anti-theft" below):
 
 | +off | Address | Content |
 |---|---|---|
 | `0x00` | `0x2c14` | mark `0x12345678` |
-| `0x04` | `0x2c18` | lock word (the lock-check at `0x8061367c` reads the 16-bit half here) |
-| `0x08` | `0x2c1c` | the car's VIN, 16 ASCII bytes |
-| `0x18` | `0x2c2c` | state byte |
-| `0x1a`-`0x1c` | `0x2c2e`-`0x2c30` | wrong-PIN attempt counter |
-| `0x20` | `0x2c34` | a word derived from the boot decode (differs per unit) |
+| `0x04` | `0x2c18` | 16-bit lockout flag (`1` during 1-hour lockout; checked at `0x8061367c`) |
+| `0x06` | `0x2c1a` | `wrongpin_cnt` (`0` = 2 attempts remaining, `1` = 1 remaining, `2` = lockout) |
+| `0x07` | `0x2c1b` | the car's VIN, 16 ASCII bytes (`DUMMY38P00000815` on an uncoded bench unit) |
+| `0x18` | `0x2c2c` | factory grace counter (`50` on blank flash; decremented per boot until `0`) |
+| `0x1a` | `0x2c2e` | 16-bit Kombi (instrument cluster) auth word |
+| `0x1c` | `0x2c30` | 16-bit Kombi paired flag |
+| `0x1e` | `0x2c32` | persisted THF state (`1` = lockout, `2` = PIN required, `3` = authorized) |
+| `0x20` | `0x2c34` | Kombi CAN `0x361` challenge PRNG accumulator (`0x8061400e`) |
 | `0x24` | `0x2c38` | inverted mark `0xedcba987` |
-| `0x28`.. | `0x2c3c`.. | decode working values |
 
 **Coding block, `0x2c4c` (64 bytes)** — what a workshop codes (see
 "Coding"): mark `0x12345678` at `+0`, a version at `+4`, a checksum of
@@ -1107,16 +1109,29 @@ The PIN itself is AES-128 encrypted in the flash parameter block at
 
 where `key` is the 16-byte product-identification field (bytes 16–31)
 returned by the DVD drive's SCSI `INQUIRY` (`12 00 00 00 60 00`),
-copied to DRAM `0x8e9de900` by `0x8058db8a` (`"DV33M01B/       "` on
-the Alpine drive).  At boot (`0x80613db0`) and on every PIN submission
-(`0x80613b32`), `0x8058cc7e` decrypts `0x03ff403a` with `0x80681196`
-(standard AES-128), verifies that `plaintext[2..16]` matches the unit
-serial at `0x03ff401f` and `PIN < 10000`, and compares the four ASCII
-digits at `0x80613bd2`.  A match sets `0x8e9f3d61 = 3` and unlocks the
-unit; two mismatches enter the 1-hour lockout (`0x8e9f3d61 = 1`,
-`THF_FLASH+4 = 1`).  (`0x8058ce0e` is the factory counterpart that
-encrypts a 66-byte input record into the 78-byte block at `0x03ff4000`
-using `0x80680dbc`.)
+copied to DRAM `0x8e9de900` by `0x8058db8a`.  On a real 193 drive,
+bytes 8–15 of that product field carry a **per-drive 4-digit code**
+(`"DV33M01B XXXX   "`, e.g. `"DV33M01B 3154   "` — matching the
+firmware's `" EEEE   "` blank/error sentinel check at `0x8058c8f2`),
+whereas a 192 drive reports `"DV33M01B/       "` with trailing spaces.
+Because the PIN ciphertext in flash is bound to that per-drive string,
+swapping in a different DVD drive breaks the AES-128 serial check:
+`0x8058cc7e` returns `0xffffffff`, the boot check sets `0x8e9f3d78 = 0`
+(which appends a 4-hex-digit diagnostic suffix after the serial on the
+PIN screen, e.g. `AUZBZ7ND801051 5F1D`), and the unit rejects **every**
+PIN — including its real factory PIN — until its paired drive is
+restored.  Confirmed on real hardware (`AUZBZ7ND801051`): restoring its
+original `"DV33M01B 3154   "` drive decrypted `0x03ff403a` to
+`[0x079c]["AUZBZ7ND801051"]` (`PIN = 1948`) and unlocked the unit.
+
+At boot (`0x80613db0`) and on every PIN submission (`0x80613b32`),
+`0x8058cc7e` decrypts `0x03ff403a` with `0x80681196` (standard AES-128),
+verifies that `plaintext[2..16]` matches the unit serial at `0x03ff401f`
+and `PIN < 10000`, and compares the four ASCII digits at `0x80613bd2`.
+A match sets `0x8e9f3d61 = 3` and unlocks the unit; two mismatches enter
+the 1-hour lockout (`0x8e9f3d61 = 1`, `THF_FLASH+4 = 1`).  (`0x8058ce0e`
+is the factory counterpart that encrypts a 66-byte input record into the
+78-byte block at `0x03ff4000` using `0x80680dbc`.)
 
 In the emulator, `Machine::for_model(Model::Rnse193)` sets the 193's
 SoC-side drive (`navi.atapi`) identity to `ALPINE  DV33M01B/       2912`.

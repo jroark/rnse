@@ -357,24 +357,26 @@ impl Machine {
     }
 
     /// Give the unit its serial number (fourteen characters, "AUZ..." on
-    /// an Audi unit).  The 193 keeps it in the parameter block of its
-    /// flash, at 0x3ff401f; that block is written at the factory and is
-    /// never on an update disc, so an emulated unit has none unless it
-    /// is given one.  Navigation discs can be tied to one unit's serial
-    /// number, see docs/hardware-193.md.
+    /// an Audi unit).  Both models keep it in their factory parameter
+    /// block in flash (`0x00ff_e01f` on the 192, `0x03ff_401f` on the
+    /// 193); that block is written at the factory and is never on an
+    /// update disc, so an emulated unit has none unless it is given one.
+    /// Navigation discs can be tied to one unit's serial number, see
+    /// `docs/hardware-193.md`.
     ///
-    /// Call this before [`set_pin`](Self::set_pin): the serial is baked
-    /// into the AES-128 PIN ciphertext at `0x03ff_403a`, so changing the
-    /// serial afterwards invalidates an already-provisioned PIN until
-    /// `set_pin` is called again.
+    /// On the 193, call this before [`set_pin`](Self::set_pin): the
+    /// serial is baked into the AES-128 PIN ciphertext at `0x03ff_403a`,
+    /// so changing the serial afterwards invalidates an already-
+    /// provisioned PIN until `set_pin` is called again.
     pub fn set_serial(&mut self, serial: &str) -> Result<(), String> {
-        if self.board.model != crate::board::Model::Rnse193 {
-            return Err("where the 192 keeps its serial number is not known".into());
-        }
         if serial.len() != 14 || !serial.bytes().all(|b| b.is_ascii_alphanumeric()) {
             return Err("a serial number is 14 letters and digits".into());
         }
-        self.board.load(0x03ff_401f, serial.as_bytes());
+        let addr = match self.board.model {
+            crate::board::Model::Rnse192 => 0x00ff_e01f,
+            crate::board::Model::Rnse193 => 0x03ff_401f,
+        };
+        self.board.load(addr, serial.as_bytes());
         Ok(())
     }
 
@@ -488,15 +490,20 @@ impl Machine {
         }
     }
 
-    /// Whether the 193's flash parameter block at `0x03ff_403a` already
-    /// carries a provisioned (non-blank) PIN ciphertext, e.g. loaded from
-    /// a saved flash image.
+    /// Whether the unit's flash parameter block already carries a
+    /// provisioned PIN (`0x00ff_e031` plaintext ASCII digits on the 192,
+    /// `0x03ff_403a` non-blank AES-128 ciphertext on the 193), e.g.
+    /// loaded from a saved flash image.
     pub fn has_pin(&self) -> bool {
-        if self.board.model != crate::board::Model::Rnse193 {
-            return false;
+        match self.board.model {
+            crate::board::Model::Rnse192 => {
+                self.board.flash[0x00ff_e031..0x00ff_e035].iter().all(|b| b.is_ascii_digit())
+            }
+            crate::board::Model::Rnse193 => {
+                let ct = &self.board.flash[0x03ff_403a..0x03ff_403a + 16];
+                !ct.iter().all(|&b| b == 0xff) && !ct.iter().all(|&b| b == 0x00)
+            }
         }
-        let ct = &self.board.flash[0x03ff_403a..0x03ff_403a + 16];
-        !ct.iter().all(|&b| b == 0xff) && !ct.iter().all(|&b| b == 0x00)
     }
 
     /// Whether the 193's flash block store (`0x033e_0000`, block #6) and
@@ -506,22 +513,29 @@ impl Machine {
         matches!(os_version, "V5751050" | "V57510AA")
     }
 
-    /// Provision the 193's four-digit anti-theft PIN (`0..=9999`) in the
-    /// flash parameter block at `0x03ff_403a`.  The firmware stores
-    /// `AES128_encrypt([pin_u16_be][serial_14], key)` there, where `key`
-    /// is the 16-byte SCSI INQUIRY product field of the unit's DVD drive
-    /// (see `docs/hardware-193.md`, "Anti-theft").  If no serial number
-    /// has been set at `0x03ff_401f` yet, a default one (`AUZBZ700000001`)
-    /// is written so the firmware's serial-match check succeeds.
+    /// Provision the unit's four-digit anti-theft PIN (`0..=9999`) in
+    /// its flash parameter block:
     ///
-    /// Call [`set_serial`](Self::set_serial) before this method: changing
-    /// the serial afterwards invalidates the ciphertext written here.
+    /// - **192**: writes four plaintext ASCII digits at `0x00ff_e031`
+    ///   (see `docs/hardware.md`, "Anti-theft").
+    /// - **193**: writes `AES128_encrypt([pin_u16_be][serial_14], key)`
+    ///   at `0x03ff_403a`, where `key` is the 16-byte SCSI INQUIRY
+    ///   product field of the unit's DVD drive (see
+    ///   `docs/hardware-193.md`, "Anti-theft").  If no serial number has
+    ///   been set at `0x03ff_401f` yet, a default one (`AUZBZ700000001`)
+    ///   is written so the firmware's serial-match check succeeds.
+    ///
+    /// On the 193, call [`set_serial`](Self::set_serial) before this
+    /// method: changing the serial afterwards invalidates the ciphertext
+    /// written here.
     pub fn set_pin(&mut self, pin: u16) -> Result<(), String> {
-        if self.board.model != crate::board::Model::Rnse193 {
-            return Err("where the 192 keeps its PIN is not known".into());
-        }
         if pin > 9999 {
             return Err("a PIN is four decimal digits (0000-9999)".into());
+        }
+        if self.board.model == crate::board::Model::Rnse192 {
+            let digits = format!("{:04}", pin);
+            self.board.load(0x00ff_e031, digits.as_bytes());
+            return Ok(());
         }
         let mut serial = [0u8; 14];
         serial.copy_from_slice(&self.board.flash[0x03ff_401f..0x03ff_401f + 14]);
@@ -2318,6 +2332,17 @@ mod tests {
             0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a, 0x0b, 0x32,
         ];
         assert_eq!(aes128_encrypt(pt, key), expected);
+    }
+
+    #[test]
+    fn pin_and_serial_192() {
+        let mut m = Machine::for_model(crate::board::Model::Rnse192);
+        assert!(!m.has_pin());
+        m.set_serial("AUZBZ7K3321249").unwrap();
+        assert_eq!(&m.board.flash[0x00ff_e01f..0x00ff_e01f + 14], b"AUZBZ7K3321249");
+        m.set_pin(1880).unwrap();
+        assert!(m.has_pin());
+        assert_eq!(&m.board.flash[0x00ff_e031..0x00ff_e035], b"1880");
     }
 
     fn build_bank(entries: &[(u16, &[u8])], seq: u32) -> Vec<u8> {
