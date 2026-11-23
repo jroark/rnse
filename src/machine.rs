@@ -228,14 +228,28 @@ impl Machine {
         if model == crate::board::Model::Rnse193 {
             cpu.sh4a = true;
             cpu.io.navi = Some(Box::default());
+            cpu.mmu.ccr_mask = 0x0000_090f;
             cpu.io.intc.int2 = Some(Default::default());
             cpu.io.pclk_div = 8;
-            cpu.io.pclk_hz = 50_000_000;
+            // As a bench unit's timers count: 12.462 MHz, a quarter of
+            // this (rnse-sdk's mon193, 2026-11-21; 50 MHz was taken
+            // before, from the stock software's constants).
+            cpu.io.pclk_hz = 49_848_000;
         }
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
         let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, radio_keepalive_limit_ms: 420_000, radio_keepalive_at: 0, radio_keepalives: 0, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
+        if model == crate::board::Model::Rnse193 {
+            // A bench 193 that got nothing from its software started
+            // again 806 s after a program of the kit had taken over
+            // (some ten seconds after the stock software's last 8a).
+            m.radio_keepalive_limit_ms = 815_000;
+            // The 193's DVD drive as a bench unit's INQUIRY reported it.
+            // Its 16-byte product field ("DV33M01B/       ") is also the
+            // AES-128 key the OS uses to decode the anti-theft PIN.
+            m.atapi().identity = Some(b"ALPINE  DV33M01B/       2912");
+        }
         if model == crate::board::Model::Rnse192 {
             // The 192's drive as one was measured (docs/boot-rom.md, "A
             // disc that goes in while the unit runs"): 2.7 s to load a
@@ -348,6 +362,11 @@ impl Machine {
     /// never on an update disc, so an emulated unit has none unless it
     /// is given one.  Navigation discs can be tied to one unit's serial
     /// number, see docs/hardware-193.md.
+    ///
+    /// Call this before [`set_pin`](Self::set_pin): the serial is baked
+    /// into the AES-128 PIN ciphertext at `0x03ff_403a`, so changing the
+    /// serial afterwards invalidates an already-provisioned PIN until
+    /// `set_pin` is called again.
     pub fn set_serial(&mut self, serial: &str) -> Result<(), String> {
         if self.board.model != crate::board::Model::Rnse193 {
             return Err("where the 192 keeps its serial number is not known".into());
@@ -467,6 +486,207 @@ impl Machine {
             "V57510AA" => Some(0x8067_b886),
             _ => None,
         }
+    }
+
+    /// Whether the 193's flash parameter block at `0x03ff_403a` already
+    /// carries a provisioned (non-blank) PIN ciphertext, e.g. loaded from
+    /// a saved flash image.
+    pub fn has_pin(&self) -> bool {
+        if self.board.model != crate::board::Model::Rnse193 {
+            return false;
+        }
+        let ct = &self.board.flash[0x03ff_403a..0x03ff_403a + 16];
+        !ct.iter().all(|&b| b == 0xff) && !ct.iter().all(|&b| b == 0x00)
+    }
+
+    /// Whether the 193's flash block store (`0x033e_0000`, block #6) and
+    /// parameter block (`0x03ff_403a`) anti-theft layout has been verified
+    /// for this `OSM` version.
+    pub fn pin_lock_verified(os_version: &str) -> bool {
+        matches!(os_version, "V5751050" | "V57510AA")
+    }
+
+    /// Provision the 193's four-digit anti-theft PIN (`0..=9999`) in the
+    /// flash parameter block at `0x03ff_403a`.  The firmware stores
+    /// `AES128_encrypt([pin_u16_be][serial_14], key)` there, where `key`
+    /// is the 16-byte SCSI INQUIRY product field of the unit's DVD drive
+    /// (see `docs/hardware-193.md`, "Anti-theft").  If no serial number
+    /// has been set at `0x03ff_401f` yet, a default one (`AUZBZ700000001`)
+    /// is written so the firmware's serial-match check succeeds.
+    ///
+    /// Call [`set_serial`](Self::set_serial) before this method: changing
+    /// the serial afterwards invalidates the ciphertext written here.
+    pub fn set_pin(&mut self, pin: u16) -> Result<(), String> {
+        if self.board.model != crate::board::Model::Rnse193 {
+            return Err("where the 192 keeps its PIN is not known".into());
+        }
+        if pin > 9999 {
+            return Err("a PIN is four decimal digits (0000-9999)".into());
+        }
+        let mut serial = [0u8; 14];
+        serial.copy_from_slice(&self.board.flash[0x03ff_401f..0x03ff_401f + 14]);
+        if !serial.iter().all(|b| b.is_ascii_alphanumeric()) {
+            serial.copy_from_slice(b"AUZBZ700000001");
+            self.board.load(0x03ff_401f, &serial);
+        }
+        let key: [u8; 16] = match self.atapi().identity {
+            Some(id) => id[8..24].try_into().unwrap(),
+            None => *b"EMULATED DVD-ROM",
+        };
+        let mut plaintext = [0u8; 16];
+        plaintext[0..2].copy_from_slice(&pin.to_be_bytes());
+        plaintext[2..16].copy_from_slice(&serial);
+        let ciphertext = aes128_encrypt(plaintext, key);
+        self.board.load(0x03ff_403a, &ciphertext);
+        Ok(())
+    }
+
+    /// Seed or update the 193's persistent anti-theft (`THF_FLASH`,
+    /// block #6) in the ping-pong flash block store (`0x033e_0000` /
+    /// `0x0340_0000`, verified on `V5751050` and `V57510AA`) and its
+    /// working mirror in battery-backed SRAM (`0x2c14..0x2c3c`) in its
+    /// post-power-loss "PIN required" state (`grace = 0`, `state = 2`,
+    /// `wrongpin_cnt = 0`).
+    ///
+    /// If either flash bank already holds a valid store (e.g. loaded via
+    /// `--flash`), the active bank's other blocks are preserved, only
+    /// block #6 is updated or appended, and the updated bank is written
+    /// with a sequence number higher than both banks.
+    pub fn lock_pin(&mut self) -> Result<(), String> {
+        if self.board.model != crate::board::Model::Rnse193 {
+            return Err("where the 192 keeps its anti-theft state is not known".into());
+        }
+        const BANK_SIZE: usize = 0x20000;
+        const BANK0: usize = 0x033e_0000;
+        const BANK1: usize = 0x0340_0000;
+        const DIR_OFF: usize = 0x5d00;
+        const MAGIC_OFF: usize = 0x5fe8;
+        const MAGIC: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        const MAX_BLOCKS: usize = 93;
+
+        let mut block = [0u8; 40];
+        block[0..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        // +0x04..+0x06: lockout active flag (0 = normal)
+        // +0x06: wrongpin_cnt (0 = 2 attempts remaining)
+        block[7..23].copy_from_slice(b"DUMMY38P00000815");
+        // +0x18 (+24): factory grace counter (0 = anti-theft active)
+        block[30] = 2; // +0x1e: persisted state (2 = PIN required)
+        block[36..40].copy_from_slice(&0xedcb_a987u32.to_be_bytes());
+
+        let sum_words = |buf: &[u8]| -> u32 {
+            let mut sum = 0u32;
+            for chunk in buf[..0x1fff8].chunks_exact(4) {
+                sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+            }
+            sum
+        };
+        let valid_bank = |buf: &[u8]| -> Option<u32> {
+            if buf[MAGIC_OFF..MAGIC_OFF + 8] != MAGIC {
+                return None;
+            }
+            let seq = u32::from_be_bytes(buf[0x1fffc..0x20000].try_into().unwrap());
+            if seq == u32::MAX {
+                return None;
+            }
+            let stored = u32::from_be_bytes(buf[0x1fff8..0x1fffc].try_into().unwrap());
+            if sum_words(buf) != stored {
+                return None;
+            }
+            // Validate directory entries (matching 0x8058a1d2).
+            let mut prev_end: Option<usize> = None;
+            for i in 0..MAX_BLOCKS {
+                let e = &buf[DIR_OFF + i * 8..DIR_OFF + (i + 1) * 8];
+                let id = u16::from_be_bytes([e[0], e[1]]) as usize;
+                if id == 0 {
+                    prev_end = None;
+                    continue;
+                }
+                let size = u16::from_be_bytes([e[2], e[3]]) as usize;
+                let page = u16::from_be_bytes([e[4], e[5]]) as usize;
+                if id > MAX_BLOCKS || page > MAX_BLOCKS || size == 0 {
+                    return None;
+                }
+                let pages = (size - 1) / 256 + 1;
+                if page + pages > MAX_BLOCKS {
+                    return None;
+                }
+                if let Some(expected) = prev_end {
+                    if page != expected {
+                        return None;
+                    }
+                }
+                prev_end = Some(page + pages);
+            }
+            Some(seq)
+        };
+
+        let b0 = &self.board.flash[BANK0..BANK0 + BANK_SIZE];
+        let b1 = &self.board.flash[BANK1..BANK1 + BANK_SIZE];
+        let (active, target_addr, new_seq) = match (valid_bank(b0), valid_bank(b1)) {
+            (Some(s0), Some(s1)) if s1 > s0 => (Some(b1), BANK0, s1.checked_add(1).ok_or("flash store sequence overflow")?),
+            (Some(s0), Some(_)) => (Some(b0), BANK1, s0.checked_add(1).ok_or("flash store sequence overflow")?),
+            (Some(s0), None) => (Some(b0), BANK1, s0.checked_add(1).ok_or("flash store sequence overflow")?),
+            (None, Some(s1)) => (Some(b1), BANK0, s1.checked_add(1).ok_or("flash store sequence overflow")?),
+            (None, None) => (None, BANK0, 1),
+        };
+        if new_seq == u32::MAX {
+            return Err("flash store sequence overflow".into());
+        }
+
+        let mut sector = match active {
+            Some(src) => src.to_vec(),
+            None => {
+                let mut s = vec![0u8; BANK_SIZE];
+                s[MAGIC_OFF..MAGIC_OFF + 8].copy_from_slice(&MAGIC);
+                s
+            }
+        };
+
+        let entries = &sector[DIR_OFF..MAGIC_OFF];
+        if let Some(entry) = entries.chunks_exact(8).find(|e| e[..2] == 6u16.to_be_bytes()) {
+            let size = u16::from_be_bytes([entry[2], entry[3]]) as usize;
+            if size < block.len() {
+                return Err("existing THF_FLASH block #6 is smaller than 40 bytes".into());
+            }
+            let page = u16::from_be_bytes([entry[4], entry[5]]) as usize;
+            sector[page * 256..page * 256 + block.len()].copy_from_slice(&block);
+        } else {
+            // Pack occupied records in directory order before appending. Empty
+            // slots can separate runs whose page numbers are not consecutive.
+            let mut slot = 0;
+            let mut next_page = 0;
+            if let Some(src) = active {
+                for entry in src[DIR_OFF..MAGIC_OFF].chunks_exact(8).filter(|e| e[..2] != [0, 0]) {
+                    let size = u16::from_be_bytes([entry[2], entry[3]]) as usize;
+                    let page = u16::from_be_bytes([entry[4], entry[5]]) as usize;
+                    let pages = size.div_ceil(256);
+                    if next_page + pages >= MAX_BLOCKS {
+                        return Err("flash store has no free pages for THF_FLASH".into());
+                    }
+                    sector[next_page * 256..(next_page + pages) * 256]
+                        .copy_from_slice(&src[page * 256..(page + pages) * 256]);
+                    let off = DIR_OFF + slot * 8;
+                    sector[off..off + 8].copy_from_slice(entry);
+                    sector[off + 4..off + 6].copy_from_slice(&(next_page as u16).to_be_bytes());
+                    slot += 1;
+                    next_page += pages;
+                }
+            }
+            let off = DIR_OFF + slot * 8;
+            sector[off..MAGIC_OFF].fill(0);
+            sector[off..off + 2].copy_from_slice(&6u16.to_be_bytes());
+            sector[off + 2..off + 4].copy_from_slice(&40u16.to_be_bytes());
+            sector[off + 4..off + 6].copy_from_slice(&(next_page as u16).to_be_bytes());
+            sector[off + 6..off + 8].copy_from_slice(&0u16.to_be_bytes());
+            sector[next_page * 256..next_page * 256 + block.len()].copy_from_slice(&block);
+        }
+
+        let sum = sum_words(&sector);
+        sector[0x1fff8..0x1fffc].copy_from_slice(&sum.to_be_bytes());
+        sector[0x1fffc..0x20000].copy_from_slice(&new_seq.to_be_bytes());
+        self.board.load(target_addr as u32, &sector);
+        self.board.nvram[0x2c14..0x2c3c].copy_from_slice(&block);
+        Ok(())
     }
 
     /// The debug `printf` of the navigation application (module `APM`),
@@ -831,7 +1051,11 @@ impl Machine {
             }
             if self.radio_present && format_ok {
                 let reply = self.radio.from_unit(&bytes);
-                let keepalives = self.radio.seen.get(&(0x81, 0x06)).copied().unwrap_or(0);
+                // The 192's keep-alive is 81 [06]; the 193's is 8a (a
+                // bench unit sent 81 [06] alone every minute started
+                // again all the same, one sent both did not).
+                let key = if self.board.model == crate::board::Model::Rnse192 { (0x81, 0x06) } else { (0x8a, 0xff) };
+                let keepalives = self.radio.seen.get(&key).copied().unwrap_or(0);
                 if keepalives != self.radio_keepalives {
                     self.radio_keepalives = keepalives;
                     self.radio_keepalive_at = now;
@@ -1012,13 +1236,23 @@ impl Machine {
         if let Some(navi) = self.cpu.io.navi.as_mut() {
             // On the 193 the boot ROM also programs the CAN receive
             // mailboxes; the OS only unmasks their interrupts and looks
-            // at the identifier of whatever arrives.  The one fixed point
-            // is mailbox 24, which the OS (like the loader) treats as the
-            // network management range 0x400-0x43f.  The real assignment
-            // of the others is not known; a single catch-all mailbox
-            // serves the OS just as well.
-            navi.can.configure_mailbox(24, 0x400, 0x03f, 3);
-            navi.can.configure_mailbox(31, 0x000, 0x7ff, 3);
+            // at the identifier of whatever arrives.  The table is a
+            // bench unit's (V575 0310, read through rnse-sdk's mon193
+            // once its SD loader had the unit, 2026-11-21; see
+            // docs/hardware-193.md, "Who sets up the mailboxes"):
+            // ranges in 18-23 and 25, single identifiers in 26-31, and
+            // mailbox 0 for whatever none of them takes.  Mailbox 24
+            // was the loader's by then; it stays what the OS and the
+            // loader treat it as, network management, 0x400-0x43f.
+            for (n, id, mask) in [
+                (0usize, 0x000u16, 0x7ffu16),
+                (18, 0x600, 0x0ff), (19, 0x600, 0x07f), (20, 0x600, 0x03f),
+                (21, 0x500, 0x0ff), (22, 0x300, 0x0ff), (23, 0x200, 0x0ff),
+                (24, 0x400, 0x03f), (25, 0x4d0, 0x00f),
+                (26, 0x63c, 0), (27, 0x6da, 0), (28, 0x6dc, 0), (29, 0x6c1, 0), (30, 0x6c5, 0), (31, 0x6d1, 0),
+            ] {
+                navi.can.configure_mailbox(n, id, mask, 3);
+            }
         } else {
             // What follows is what a 192's ROM was seen to leave when it
             // calls the OS (docs/boot-rom.md, "The real one").
@@ -1362,10 +1596,13 @@ impl Machine {
                 // The CAN timer handler clears its underflow flag,
                 // but the OS never programs its reload or starts it.
                 // On the 192 its ROM has it at 5 ms (73499 counts, like
-                // its other two timers).  For the 193, whose ROM has
-                // not been seen: 2.5 ms, the period the loaders give
-                // this timer themselves.
-                let eighths = if is_192 { 10 } else { 5 };
+                // its other two timers).  The 193's has it at 5 ms too:
+                // a bench unit reads 0xf3e5 (62437 counts) as its
+                // reload, still running, after the kit's loader took
+                // over without touching it (rnse-sdk's mon193,
+                // 2026-11-21).  (2.5 ms, the loaders' own period for
+                // this timer, was assumed before.)
+                let eighths = 10;
                 let reload = (self.cycles_per_ms() / self.cpu.io.pclk_div * eighths / 8 - 1) as u32;
                 let now = self.cpu.cycles;
                 let pc = self.cpu.pc;
@@ -1724,10 +1961,11 @@ impl Machine {
                     self.cpu.fault = Some("reset requested".into());
                     return Stop::Fault;
                 }
-                if self.board.model == crate::board::Model::Rnse192 && self.radio_present && self.radio_keepalive_limit_ms > 0
+                if self.radio_present && self.radio_keepalive_limit_ms > 0
                     && now - self.radio_keepalive_at > self.radio_keepalive_limit_ms * self.cycles_per_ms()
                 {
-                    eprintln!("[radio] no keep-alive (81 [06]) for {} s: the radio processor restarts the unit", (now - self.radio_keepalive_at) / self.cycles_per_ms() / 1000);
+                    let frame = if self.board.model == crate::board::Model::Rnse192 { "81 [06]" } else { "8a" };
+                    eprintln!("[radio] no keep-alive ({}) for {} s: the radio processor restarts the unit", frame, (now - self.radio_keepalive_at) / self.cycles_per_ms() / 1000);
                     self.radio_keepalive_at = now;
                     if self.real_rom {
                         self.cpu.reset();
@@ -1980,9 +2218,189 @@ impl Machine {
     }
 }
 
+/// Standard AES-128 single-block encryption (FIPS-197), used to
+/// provision the 193's flash parameter block at `0x03ff_403a` so the
+/// unit's own firmware decrypts and verifies the anti-theft PIN.
+fn aes128_encrypt(block: [u8; 16], key: [u8; 16]) -> [u8; 16] {
+    #[rustfmt::skip]
+    const SBOX: [u8; 256] = [
+        0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+        0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+        0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+        0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+        0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+        0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+        0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+        0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+        0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+        0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+        0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+        0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+        0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+        0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+        0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+        0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+    ];
+    const RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+    let xtime = |a: u8| -> u8 { (a << 1) ^ if a & 0x80 != 0 { 0x1b } else { 0 } };
+
+    // Key expansion: 11 round keys (44 words).
+    let mut rk = [[0u8; 16]; 11];
+    rk[0] = key;
+    for r in 1..=10 {
+        let prev = rk[r - 1];
+        let mut w = [
+            SBOX[prev[13] as usize] ^ RCON[r - 1],
+            SBOX[prev[14] as usize],
+            SBOX[prev[15] as usize],
+            SBOX[prev[12] as usize],
+        ];
+        for c in 0..4 {
+            for i in 0..4 {
+                w[i] ^= prev[c * 4 + i];
+                rk[r][c * 4 + i] = w[i];
+            }
+        }
+    }
+
+    let mut s = block;
+    for i in 0..16 {
+        s[i] ^= rk[0][i];
+    }
+    for r in 1..=10 {
+        // SubBytes
+        for b in &mut s {
+            *b = SBOX[*b as usize];
+        }
+        // ShiftRows (column-major state)
+        let t = s;
+        for row in 0..4 {
+            for col in 0..4 {
+                s[row + 4 * col] = t[row + 4 * ((col + row) % 4)];
+            }
+        }
+        // MixColumns (rounds 1..=9)
+        if r < 10 {
+            for col in 0..4 {
+                let i = col * 4;
+                let (a0, a1, a2, a3) = (s[i], s[i + 1], s[i + 2], s[i + 3]);
+                let xor = a0 ^ a1 ^ a2 ^ a3;
+                s[i] = a0 ^ xor ^ xtime(a0 ^ a1);
+                s[i + 1] = a1 ^ xor ^ xtime(a1 ^ a2);
+                s[i + 2] = a2 ^ xor ^ xtime(a2 ^ a3);
+                s[i + 3] = a3 ^ xor ^ xtime(a3 ^ a0);
+            }
+        }
+        // AddRoundKey
+        for i in 0..16 {
+            s[i] ^= rk[r][i];
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aes128_fips_197_vector() {
+        let key = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+            0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+        ];
+        let pt = [
+            0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d,
+            0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34,
+        ];
+        let expected = [
+            0x39, 0x25, 0x84, 0x1d, 0x02, 0xdc, 0x09, 0xfb,
+            0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a, 0x0b, 0x32,
+        ];
+        assert_eq!(aes128_encrypt(pt, key), expected);
+    }
+
+    fn build_bank(entries: &[(u16, &[u8])], seq: u32) -> Vec<u8> {
+        let mut s = vec![0u8; 0x20000];
+        let mut page = 0usize;
+        for (i, &(id, data)) in entries.iter().enumerate() {
+            if id == 0 { continue; }
+            let off = 0x5d00 + i * 8;
+            s[off..off + 2].copy_from_slice(&id.to_be_bytes());
+            s[off + 2..off + 4].copy_from_slice(&(data.len() as u16).to_be_bytes());
+            s[off + 4..off + 6].copy_from_slice(&(page as u16).to_be_bytes());
+            s[page * 256..page * 256 + data.len()].copy_from_slice(data);
+            page += (data.len() - 1) / 256 + 1;
+        }
+        s[0x5fe8..0x5ff0].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let mut sum = 0u32;
+        for chunk in s[..0x1fff8].chunks_exact(4) {
+            sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+        }
+        s[0x1fff8..0x1fffc].copy_from_slice(&sum.to_be_bytes());
+        s[0x1fffc..0x20000].copy_from_slice(&seq.to_be_bytes());
+        s
+    }
+
+    #[test]
+    fn lock_pin_preserves_populated_flash_store() {
+        let mut m = Machine::for_model(crate::board::Model::Rnse193);
+        // Bank 0 (older, seq 3) has stale block #10; bank 1 (active, seq 7)
+        // has newer block #10 and an unlocked block #6 (state = 3).
+        let mut unlocked_thf = [0u8; 40];
+        unlocked_thf[0..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        unlocked_thf[30] = 3;
+        unlocked_thf[36..40].copy_from_slice(&0xedcb_a987u32.to_be_bytes());
+        let bank0 = build_bank(&[(10, b"stale-settings-v3")], 3);
+        let bank1 = build_bank(&[(10, b"live-settings-v7!"), (6, &unlocked_thf)], 7);
+        m.board.load(0x033e_0000, &bank0);
+        m.board.load(0x0340_0000, &bank1);
+
+        m.lock_pin().unwrap();
+
+        // Updated bank should be ping-ponged to bank 0 with sequence 8 (> 7),
+        // preserving block #10 from bank 1 and updating block #6 to locked (state = 2).
+        let updated = &m.board.flash[0x033e_0000..0x0340_0000];
+        assert_eq!(u32::from_be_bytes(updated[0x1fffc..0x20000].try_into().unwrap()), 8);
+        let mut sum = 0u32;
+        for chunk in updated[..0x1fff8].chunks_exact(4) {
+            sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+        }
+        assert_eq!(u32::from_be_bytes(updated[0x1fff8..0x1fffc].try_into().unwrap()), sum);
+        // Entry 0: block #10 preserved intact on page 0.
+        assert_eq!(u16::from_be_bytes([updated[0x5d00], updated[0x5d01]]), 10);
+        assert_eq!(&updated[0..17], b"live-settings-v7!");
+        // Entry 1: block #6 updated in-place on page 1 to grace = 0, state = 2.
+        assert_eq!(u16::from_be_bytes([updated[0x5d08], updated[0x5d09]]), 6);
+        assert_eq!(updated[256 + 24], 0);
+        assert_eq!(updated[256 + 30], 2);
+    }
+
+    #[test]
+    fn lock_pin_preserves_records_after_empty_slots() {
+        let mut m = Machine::for_model(crate::board::Model::Rnse193);
+        let data = [0x56; 300];
+        let bank = build_bank(&[(0, &[]), (10, &data)], 1);
+        m.board.load(0x033e_0000, &bank);
+        m.lock_pin().unwrap();
+        let updated = &m.board.flash[0x0340_0000..0x0342_0000];
+        assert_eq!(&updated[..300], &data);
+        assert_eq!(&updated[0x5d00..0x5d06], &[0, 10, 1, 44, 0, 0]);
+        assert_eq!(&updated[0x5d08..0x5d0e], &[0, 6, 0, 40, 0, 2]);
+        assert_eq!(updated[512 + 30], 2);
+    }
+
+    #[test]
+    fn lock_pin_error_preserves_flash_and_sram() {
+        let mut m = Machine::for_model(crate::board::Model::Rnse193);
+        let bank = build_bank(&[(0, &[]), (6, &[0; 8])], 1);
+        m.board.load(0x033e_0000, &bank);
+        let banks = m.board.flash[0x033e_0000..0x0342_0000].to_vec();
+        let mirror = m.board.nvram[0x2c14..0x2c3c].to_vec();
+        assert!(m.lock_pin().is_err());
+        assert_eq!(m.board.flash[0x033e_0000..0x0342_0000], banks);
+        assert_eq!(m.board.nvram[0x2c14..0x2c3c], mirror);
+    }
 
     /// A program for the 192 that puts `edges` edges on the watchdog
     /// strobe and then does nothing.

@@ -41,7 +41,7 @@ V0), the processor's side:
 | IC100 | `64445DA01BGV`, `99325 00115`, `AISIN AW` | a large ball-grid chip of Aisin's own, with a crystal of its own (X4) beside it: not identified.  The unexplained writes at 0xfe008000 and 0xfe800100 (memory map) are candidates for it; nothing links them yet |
 | IC9 | AKM `AK5406XQ` | not identified from its marking; beside the serializer, and the AMP connector has inputs for red, green, blue and sync, so presumably the converter of that picture input |
 | IC11 | Maxim `MAX9247` | a serializer for LVDS: the picture goes to the panel in the display this way |
-| X1 | `D332K` | the crystal beside the SoC.  If it is 33.3 MHz, twelve times it is the 400 MHz taken for the CPU and one and a half times it the 50 MHz peripheral clock ("Clocks and time"); not measured |
+| X1 | `D332K` | the crystal beside the SoC.  The peripheral clock measures 49.85 MHz ("Clocks and time"), one and a half times 33.23 MHz: twelve times that is 398.8 MHz for the CPU.  The crystal itself has not been measured |
 | | Hirose `HRS163-3416A` | the two SD card slots, in one shielded holder, wired to the SoC: there are no card processors as on the 192 |
 | CN11 | | the GPS aerial's coaxial cable; no GPS module as on the 192, so the receiver's front end is on the board and the rest in the SoC's GPS block |
 
@@ -110,6 +110,7 @@ The loader, linked at 0x09b60000, runs in P0.
 | 0x08000000-0x0fffffff | RAM, 128 MiB (the loader's stack starts at 0x8fffdf00) |
 | 0x18000000-0x1803ffff | battery-backed SRAM, 256 KiB (one Renesas R1LV0208BSA; the OS has some 1800 references to it and uses it up to 0x3aec0) |
 | 0xfe008000, 0xfe800100 | not identified (a few writes at start-up; 0xfe800100 takes the key 0xa55a) |
+| 0xfe800220, 0xfe800280 | the memory controller's: the loader writes to +0x220 what it computes from bits 10-18 of +0x280 (less 2, with bit 12 set).  +0x280 reads 0x024924e5 on a bench unit (so 0x1047 is written), +0x220 reads 0 (2026-11-21); the emulator gives +0x280 that value |
 | 0xff801000-0xff8014ff | DMA channels, 0x80 apart, and their common registers at 0xff801400 (see "DMA channels") |
 | 0xff802000            | interrupt pin control (the layout of the SH7780's INTC: sense, mask and mask-clear registers) |
 | 0xff804000            | interrupt controller |
@@ -182,7 +183,9 @@ The CAN timer is a separate channel at `0xffd81008` (reload),
 `0xffd81004`. V57510AA's interrupt table installs wrapper `804cc58c`
 at exception `480`; it calls `806305a0`, which clears this timer's
 underflow and wakes the CAN task every second interrupt. The boot ROM
-stand-in starts it at 2.5 ms (see [boot-rom.md](boot-rom.md)).
+stand-in starts it at 5 ms, as a bench unit has it (reload 0xf3e5,
+62437 counts, read under the kit's monitor 2026-11-21; see
+[boot-rom.md](boot-rom.md)).
 
 ## Display unit
 
@@ -330,6 +333,14 @@ shows DRQ and the signal register (+0xb0) bit 0 shows the drive's DMA
 request, control bit 0 starts the transfer.  Bytes land in memory in
 the order the drive delivers them.
 
+Read by programmed I/O from a program on a bench unit (rnse-sdk's
+`cd_read` under `mon193`, a CD-R, 2026-11-21): sectors 0x10, 0x11-0x14,
+0x100, 0x2000 and 0x5000 came back as the disc's image has them.  Four
+sectors in a row took 14.7 ms (3.7 ms a sector, some 560 KiB/s); a
+read somewhere else on the disc 170 to 290 ms, and the first read after
+the drive had been idle longer than the 1.5 s the watchdog allows a
+program that serves it from its main loop.
+
 What kind of disc is in the drive the OS finds out with READ
 SUB-CHANNEL: a CD answers, a DVD refuses with "illegal mode for this
 track" (sense 5/64), and that refusal is the OS's test for a DVD (its
@@ -364,14 +375,48 @@ Bit timing as the loader sets it, after putting the controller in reset
 is two clock periods times the prescaler) that is 100 kbit/s from 50.4
 MHz, the peripheral clock (see "Clocks and time").
 
+The control register (+0) reads 0x8000 under the stock software, and
+its top bit decides where a mailbox's first word has the identifier:
+two bits up with it set, four bits up with it cleared.  A bench unit
+whose controller the kit set up from reset with 1 and then 0 in that
+register sent what was written for 0x7f8 as 0x1fe and took none of the
+frames sent to it for what they were; set up the same way with 0x8001
+and 0x8000 it talked and listened as under the stock set-up (rnse-sdk's
+`mon193`, `can_try`, 2026-11-21).  That was the "silent bus" of the
+kit's `can_init` on a unit.  The emulator's controller does the same.
+
 ### Who sets up the mailboxes
 
 The OS programs its transmit mailboxes but no receive mailbox: it only
 unmasks mailbox interrupts and then looks at the identifier of whatever
 arrives, so the boot ROM must have set the receive side up.  The one
 fixed point in the OS's receive path is mailbox 24, treated (as in the
-loader) as the network management range 0x400-0x43f.  The emulator's
-boot ROM stand-in programs that one and a single catch-all mailbox.
+loader) as the network management range 0x400-0x43f.
+
+The receive mailboxes as a bench unit has them (V575 0310, read through
+rnse-sdk's `mon193` after its SD loader had taken the unit over,
+2026-11-21; control word 0x0300 at +0x10, the mask at +4 with a set bit
+meaning "any"):
+
+| mailbox | identifiers | |
+|---------|-------------|-|
+| 0 | any | what no other mailbox takes |
+| 18, 19, 20 | 0x600-0x6ff, 0x600-0x67f, 0x600-0x63f | three of falling width, so that a burst in the lower ranges has more than one place |
+| 21 | 0x500-0x5ff | |
+| 22 | 0x300-0x3ff | |
+| 23 | 0x200-0x2ff | the ignition lock's 0x271 among them |
+| 24 | | the kit's by then (every identifier); see above |
+| 25 | 0x4d0-0x4df | |
+| 26-31 | 0x63c, 0x6da, 0x6dc, 0x6c1, 0x6c5, 0x6d1 | one each |
+
+The base of a range is taken from the mask and the last identifier
+received; mailboxes 2-17 are the OS's for sending (two copies of the
+cluster's lines on 0x363 and 0x365, 0x661 and 0x604 among them;
+mailbox 1 was the kit's).  The controller looks for a mailbox from 31 down: a
+frame for the kit's mailbox 24 never reaches mailbox 0.  The emulator's
+boot ROM stand-in programs this table (it had a single mailbox for
+every identifier at 31 before, which kept every frame from a program's
+mailbox 24 once nobody read it).
 
 The OS's table of expected messages (36 slots of 40 bytes at 0x8eac58a8
 in V5741040) lists 0x200, 0x271, 0x2c3, 0x351, 0x353, 0x359, 0x497,
@@ -397,6 +442,29 @@ See [boot-rom.md](boot-rom.md).
   control +8, transmit +0xc, status +0x10, receive +0x14, FIFO control
   +0x18).  The protocol is the 192's (`01 command length data
   checksum`), and the OS asks the same things in the same order.
+  The OS sends it 8a every 30 s and 81 [06] every 60 s, for as long as
+  it runs.  Without them the radio processor starts the unit again, and
+  what it wants is the first (a bench unit under rnse-sdk's `mon193`,
+  2026-11-21): sent nothing, the unit started again after 806 s; sent
+  81 [06] once a minute (each acknowledged, 20 [00]), it started again
+  900 s after the first, at the moment the sixteenth went out; sent
+  both as the OS sends them (8a answered with an empty 8a), it was
+  still up after 25 minutes.  The front stayed lit through all three.
+  The emulator restarts a 193 that sends no 8a for 815 s
+  (`--radio-keepalive`).  While a program runs that asks it nothing,
+  the radio processor sends its status block (0x88, 58 bytes) by itself
+  about once a second (again and again, by the look of it, because
+  nobody acknowledges it).
+  The tuner and the amplifier take the 192's frames on a unit (rnse-sdk
+  `tools/bench193/tuner.script`, 2026-11-21): `82 [03 02 hi lo]` tunes
+  (acknowledged with 20 [00]; the radio processor then sends two frames
+  0x87 of its own, `20 10 09 06 hi lo` and 0.3 s later `20 10 09 04 hi
+  lo`), `19 [01 v]` sets the volume, and the status block has the
+  frequency at 4 and 5 (in steps of 50 kHz: 06 f2 for 88.9 MHz), the
+  source at 33 and the volume at 34, as the 192's.  Its byte 3 was 0x14
+  as the stock software left the tuner and 0x04 after a frequency set
+  this way; what the bit says is not known.  The emulator's stand-in
+  does not send the 0x87 frames.
 * 0xff926000, to the faceplate controller: an ordinary SCIF (control
   +0x08, transmit +0x0c, status +0x10, receive +0x14, FIFO control
   +0x18, receive count +0x20).  Same frames as on the 192; the OS sends
@@ -471,6 +539,23 @@ loader and the OS's low-level output write characters to it after
 setting control bit 5 (transmitter enable); the emulator prints what is
 sent as the console, and nothing while the transmitter is off.
 
+## Timer interrupts
+
+A timer goes on asking for its interrupt for a moment after its
+underflow flag has been cleared.  On a bench unit the kit's tick
+handler, which cleared the flag (a read and a write of the control
+register) first thing and returned some dozens of instructions later,
+was entered a second time for every underflow: the kit's clock ran
+exactly twice as fast as the world's, with the timer itself counting
+the 12.46 MHz it should (249.3 million counts in 20.00 s, on two
+channels: a quarter of a peripheral clock of 49.85 MHz).  With the
+control register read back after the clear the handler is entered once
+(rnse-sdk's `mon193`, 2026-11-21).  The emulator keeps the request for
+400 CPU cycles after the clear unless the register is read
+(`TMU_LINGER` in `src/sh4/onchip.rs`), which makes a handler like the
+old one count double there as well; how long the real request lasts is
+not known.
+
 ## Loader
 
 Entry and arguments as on the 192, but the loader sets its own stack
@@ -521,7 +606,17 @@ so:
 * the CAN controller's bit timing makes the infotainment bus's 100
   kbit/s from 50.4 MHz.
 
-The loader's tick (62437) is 5 ms, the CAN timer's period 2.5 ms.
+Measured on a bench unit, the timers count 12.462 MHz (249.3 million
+counts in 20.00 s on two channels of rnse-sdk's `mon193`, and a clock
+kept at the stock software's 12488 counts a millisecond was 3.8 s
+behind after 31 minutes; 2026-11-21): a peripheral clock of 49.85 MHz,
+and the stock software's millisecond 0.2 % long.  That is one and a
+half times 33.23 MHz, which the crystal X1 (`D332K`) may well be; the
+CPU's 400 MHz would then be 398.8.  The emulator's peripheral clock is
+49.848 MHz.
+
+The loader's tick (62437) is 5 ms, and so is the CAN timer's period as
+the boot ROM leaves it (the loaders give it 2.5 ms themselves).
 (Until the sound output was modelled the emulator took the tick for
 2 ms and the clock for 25 MHz, with the serial peripherals running from
 twice the timers' clock; the unit then ran at half its speed measured
@@ -839,6 +934,239 @@ instrument cluster's task logs `car_model = 4` instead of `ffffffff`.
 `--car-type N` codes an emulated unit (`Machine::set_car_type`) by
 writing that block before the start.
 
+## Battery-backed SRAM
+
+The 256 KiB static RAM at physical `0x18000000` (P2 `0xb8000000`; one
+Renesas R1LV0208BSA) holds the unit's persistent state between power
+cycles.  The OS has some 1800 references to it and uses it up to about
+`0x3aec0`; most of that is settings (radio stations, display and sound
+preferences) that have not been broken down.  The fields identified so
+far, by offset from the base:
+
+| Offset | Content | From |
+|---|---|---|
+| `0x0000` | A header.  The boot ROM clears `0x00..0x18` (and `0x1a..0x1c`) on every reset, so only the rest survives a restart; a real dump reads `00 ff 00 00` then zeroes, with `0x00040000` at `0x1c`. | `src/machine.rs` (the `0x18`/`0x1a` clear), a unit dump |
+| `0x1400`, `0x1402` | Counter/status half-words. | PIN handoff |
+| `0x1408..0x1507` | A block the CPU does not read before the user interface is up. | PIN handoff |
+| `0x2c14..0x2c4c` | The **anti-theft (THF)** block — see "Anti-theft" below. | this work, PIN handoff |
+| `0x2c4c..0x2c8c` | The **coding** block — see "Coding". | `Machine::set_car_type`, this work |
+| up to `~0x3aec0` | OS settings (not individually mapped). | — |
+
+The **serial number and the factory parameter block are not here** —
+they are in the flash at `0x03ff401f`/`0x03ff403a` (see "Main
+software").  A common confusion, because the anti-theft reads both the
+flash parameter block and this SRAM.
+
+Both known structured blocks carry the same frame: a mark `0x12345678`
+at the start and that mark inverted, `0xedcba987`, at the end, with the
+OS clearing the block if the pair does not check out.
+
+**THF block, `0x2c14` (56 bytes)** — the fields within it (read from a
+locked unit over CAN and from the recovery notes; some are provisional):
+
+| +off | Address | Content |
+|---|---|---|
+| `0x00` | `0x2c14` | mark `0x12345678` |
+| `0x04` | `0x2c18` | lock word (the lock-check at `0x8061367c` reads the 16-bit half here) |
+| `0x08` | `0x2c1c` | the car's VIN, 16 ASCII bytes |
+| `0x18` | `0x2c2c` | state byte |
+| `0x1a`-`0x1c` | `0x2c2e`-`0x2c30` | wrong-PIN attempt counter |
+| `0x20` | `0x2c34` | a word derived from the boot decode (differs per unit) |
+| `0x24` | `0x2c38` | inverted mark `0xedcba987` |
+| `0x28`.. | `0x2c3c`.. | decode working values |
+
+**Coding block, `0x2c4c` (64 bytes)** — what a workshop codes (see
+"Coding"): mark `0x12345678` at `+0`, a version at `+4`, a checksum of
+`+0x0c..+0x1c` at `+8`, the car type (1-7) at `+0x16`, and the inverted
+mark `0xedcba987` at `+0x3c`.
+
+The emulator seeds this RAM with zeros (then the boot ROM stand-in's
+clear); `--nvram FILE` starts it from a unit's dump instead, and a
+dump is kept out of the repository (firmware).
+
+## Interfaces the stock software leaves unused
+
+Asked 2026-11-22: is there a USB, PCI, Wi-Fi or Bluetooth interface on
+the 193 that custom software could turn on?  What the stock software
+says (V575 10AA and 1050, the boot ROM dumped from a unit), short of
+reading the chip itself:
+
+* **Wi-Fi, Bluetooth, PCI: no.**  No radio part is on the boards, no
+  chip of this family has PCI, and no module refers to registers of
+  either.  The "Bluetooth" texts in the application are the screens for
+  the car's telephone module, which is on the CAN bus
+  ([telephone.md](telephone.md)).
+* **USB: no driver in the stock software; the block itself is unproven.**
+  The texts "USB storage device" are names of sources of the Audi Music
+  Interface, again on CAN.  The documented relatives of the R8A77730
+  have a USB 2.0 host (Renesas's announcements of the SH7770, SH7775
+  and SH77721), and Linux's table for the SH7770, whose serial ports
+  (0xff923000 up, a page each) and timers are where the 193's are, gives
+  its USB interrupt as INTEVT 0x840.  The 193's OS installs no handler
+  there (its table at 0x8e8d0400 is empty at 0x840), and of the blocks
+  that the OS, the loader and the boot ROM load addresses of, none has
+  the many registers of a USB host controller except those named
+  below.  Whether the R8A77730 has the block, where its
+  registers are, and whether its pins reach anything on the board is
+  not known.  A bench unit was asked (2026-11-22, rnse-sdk's
+  `tools/bench193/blocks.script` and `blocks2.script` under `mon193`:
+  one read at the base of each 4 KiB page from 0xfe000000 up, 8700
+  reads): no read anywhere takes an exception, a page with nothing in
+  it reads zero, and 0xffe70000, 0xffe70400, 0xffe70800 (where the
+  SH7786 has its EHCI, OHCI and USB control registers) and 0xfff70000
+  read zero throughout; no page begins with an EHCI block's length and
+  version.  That does not settle it: the clock block at 0xffc80000
+  (repeated every 0x80; frequency registers at +0x14 to +0x2c) reads
+  0x0000000f at +0x30, 1 at +0x34 and 1 at +0x44, where the R-Car H1
+  has its module stop registers, and bit 0 of +0x34 stops the USB
+  host's clock there.  They are stop bits here too, and they do not
+  hide a USB host at those addresses (`unstop.script` to
+  `unstop3.script`, the same day): all five bits can be cleared and
+  set with the unit running on; with them clear the candidates still
+  read zero, and of 8700 page bases one changes: 0xfc800000, which
+  reads 0xfcfc21e4 while bit 0 of +0x34 is clear and zero while it is
+  set.  Of that block's first kilobyte only +0x104 (0x10) is not zero
+  besides.  Two blocks that answer whatever the bits say begin alike:
+  0xfc400000 and 0xfc600000 (both 0xfcfc58f2, then 0x16, then
+  0xfdff0000 and 0xfc7f0000, twice each; the R-Car H1 has its SATA
+  controller at 0xfc600000-0xfc7fffff).  None of the three begins as
+  an EHCI or OHCI block does, and what they are is not known; the
+  four bits of +0x30 and the one of +0x44 changed no page base.
+  The block at 0xfc800000, looked at closer (`fc8.script`,
+  `fc8w.script`): it answers 32-bit accesses only (16- and 8-bit reads
+  give zero) and is one page.  Its words are registers, not memory:
+  written all ones and then zero, +0x00 stays 0xfcfc21e4 and +0x104
+  stays 0x10; +0x04 keeps bit 0, +0x100 bit 31, +0x10c bits 0, 1 and
+  4; nothing else below +0x140 keeps anything.  From +0x500 to +0x730
+  some sixty words hold values as found (0x03850048, 0x00000181,
+  0x008400b0 ...) and keep parts of what is written (+0x500 all 32
+  bits, +0x504 0x01ff01ff, +0x520 0x9fff, +0x700 the low 16; +0x524,
+  +0x600 and +0x730 nothing).  An identity word, an enable bit, a
+  start or busy bit, an interrupt mask and a table of parameters:
+  the shape of a processing block (picture or signal), not of a USB
+  host or function controller.  The unit ran on through all of it.
+* Pages that answer on the unit and that no stock module refers to:
+  0xffe92000-0xffe97000 (fixed patterns of four words), 0xfffa0000
+  (3, 0x221, 0xc8e0), 0xff952000, 0xff92d000 and 0xff990000 (which the
+  OS writes once at +0xb8), 0xff2c0000-0xff2ff000, and in the lower
+  half of the area 0xfc110000, 0xfc400000, 0xfc600000 and
+  0xfcd80000-0xfcdf0000.  None is identified.  Most pages from
+  0xff904000 to 0xff9ff000 that hold nothing known read 0x01010101,
+  and 0xffa00000-0xffbfffff repeats 0xff900000-0xff9fffff.
+* **The SD slots** are the interface that is there: both wired to the
+  SoC's host interface ("SD cards"), one data line in use by the kit of
+  four, SDIO never tried.
+
+What the stock software does use and nothing here models, by block
+(`rnse boot DISC --variant V575 --ignition --cycles 30000000000
+--unmodelled` lists the addresses; the handlers are those of the OS's
+interrupt table, followed to the registers they load):
+
+| block | INTEVT | what it looks like |
+|-------|--------|--------------------|
+| 0xffc50000-0xffc53000 (offsets 0, 4, 8, 0xc, 0x44, 0x50, 0x80) | 0x760 (the second) | four alike; the R-Car H1, which has the 193's ports (0xffc40000 a page each), timers and display unit at the same addresses, has its video inputs in this layout.  With 0x7a0, "video in" in Linux's SH7770 table, which has a handler too: the picture input behind the AK5406 |
+| 0xff985000, 0xff986000 | 0xcc0; 0x940, 0xe20 | beside the sound interface (0xff984000) and set up with it: further sound channels or a sample-rate converter |
+| 0xff927000 | 0xde0 | a serial port with FIFO that the OS runs with its interrupt; what is on its pins is not known |
+| 0xff923000 | none installed | a serial port the OS has code for (eleven registers, among them +0x30 and +0x34 as the debug port's) and does not touch in a start to the menu |
+| 0xff908000 with 0x10000000 | 0xc00 | ten registers written at the start; the handler also reads memory at 0x10000000, where the OS reads 768 words (0x10002c34 up) once at its start.  An external device in that chip select: IC100 is the candidate |
+| 0xff938000 | 0xce0 | the GPS block ("GPS") |
+| 0xff940000 (+0x10, +0x14) | 0xfa0 | a port's pin interrupt |
+| 0xfff8a000 | none | inside the display unit's range (0x40000 from 0xfff80000 on the R-Car H1) and in the display's code: thirty registers at +0x100 to +0x150 and +0x200 to +0x250, laid out like two planes; not touched in a start to the menu |
+| 0xff902000, 0xff903000, 0xff900000, 0xffc00200 | | interrupt masks' second block, and clock or pin set-up written once |
+
+## Anti-theft (the PIN lock)
+
+After a loss of power the unit demands a four-digit PIN before it will
+work, on a screen with a dial of the digits 0-9 (the knob turns to one,
+the button enters it), "Remaining attempts: 2", and the unit's 14-char
+serial at the bottom.  The module that does it is `THF`; its 40-byte
+persistent state (`THF_FLASH`) is stored as block #6 of the 93-block
+ping-pong flash store at `0x033e0000` / `0x03400000` (each 128 KiB:
+93 × 256-byte pages, 93 × 8-byte directory entries at `+0x5d00`, magic
+`01..08` at `+0x5fe8`, wrapping `u32` sum at `+0x1fff8`, sequence
+number at `+0x1fffc`) and mirrored at boot into battery-backed SRAM at
+`0xb8002c14` (magic `0x12345678` at `+0`, lockout flag at `+4`,
+`wrongpin_cnt` at `+6`, the car's VIN from `+7`, factory grace counter
+at `+0x18`, persisted state at `+0x1e`, Kombi CAN challenge PRNG
+accumulator at `+0x20`, and inverted mark `0xedcba987` at `+0x24`).
+
+When block #6 is missing or fails the magic check (as on blank flash),
+`0x80613e9c` initializes `THF_FLASH` with a **50-boot factory grace
+counter** (`+0x18 = 50`).  While `+0x18 > 0`, `0x8061369e` decrements
+it on each boot and immediately authorizes the unit (`0x8e9f3d61 = 3`,
+skipping the PIN screen).  Once `+0x18 == 0`, the unit sends a Kombi
+(instrument cluster) challenge on CAN `0x361` (`0x80613fc8`, updating
+the PRNG accumulator at `+0x20`); if no cluster answers after two 3 s
+timeouts (`0x8061421e`) and persisted state `+0x1e` is `2`, it sets
+`0x8e9f3d61 = 2` (PIN required) and opens the PIN entry screen.
+
+The PIN itself is AES-128 encrypted in the flash parameter block at
+`0x03ff403a`:
+
+    ciphertext = AES128_encrypt([PIN_u16_be][14-char serial], key)
+
+where `key` is the 16-byte product-identification field (bytes 16–31)
+returned by the DVD drive's SCSI `INQUIRY` (`12 00 00 00 60 00`),
+copied to DRAM `0x8e9de900` by `0x8058db8a` (`"DV33M01B/       "` on
+the Alpine drive).  At boot (`0x80613db0`) and on every PIN submission
+(`0x80613b32`), `0x8058cc7e` decrypts `0x03ff403a` with `0x80681196`
+(standard AES-128), verifies that `plaintext[2..16]` matches the unit
+serial at `0x03ff401f` and `PIN < 10000`, and compares the four ASCII
+digits at `0x80613bd2`.  A match sets `0x8e9f3d61 = 3` and unlocks the
+unit; two mismatches enter the 1-hour lockout (`0x8e9f3d61 = 1`,
+`THF_FLASH+4 = 1`).  (`0x8058ce0e` is the factory counterpart that
+encrypts a 66-byte input record into the 78-byte block at `0x03ff4000`
+using `0x80680dbc`.)
+
+In the emulator, `Machine::for_model(Model::Rnse193)` sets the 193's
+SoC-side drive (`navi.atapi`) identity to `ALPINE  DV33M01B/       2912`.
+`--pin NNNN` (`Machine::set_pin`) provisions `0x03ff403a` (and a
+default serial `AUZBZ700000001` at `0x03ff401f` if none was given) with
+the real AES-128 ciphertext, and `--pin-lock` (`Machine::lock_pin`)
+updates or appends block #6 (`grace = 0, state = 2`) in the active bank
+of the `0x033e0000` / `0x03400000` flash store (preserving any other
+blocks and advancing the sequence number above both banks, and leaving
+an already-provisioned flash PIN intact unless `--pin` is also given).
+The layout is verified on `V5751050` and `V57510AA` (other 193 builds
+such as V574 or VB48 have not been checked; `Machine::pin_lock_verified`
+gates the test and warns on unverified builds).  The unmodified firmware
+then runs its own decode, shows the PIN screen with the serial at the
+bottom, rejects wrong entries, and unlocks when the right PIN is entered.
+
+## Status
+
+What is known of each part, where from, and what drives it (2026-11-21).
+"Unit": read or tried on a bench unit (V575, with rnse-sdk's `mon193`
+and its earlier bench programs); "stock": inferred from the stock
+software running in the emulator.  The kit is rnse-sdk.
+
+| part | known from | emulator | kit driver | on a unit |
+|------|------------|----------|------------|-----------|
+| processor, caches | unit (PVR, CVR, PRR, CCR) | yes | start-up code | works |
+| RAM and its controller (0xfe800xxx) | unit: one register and the loader's computed write | the one register | `board_init` | works; the rest of the block unknown |
+| flash, 2 x 32 MiB | boards, stock; identity and CFI read on a unit | yes (data sheet identity) | read; erase and program untried on a unit by choice | read only |
+| battery-backed memory | boards; dumped from a unit | yes | none needed | read only |
+| timers | unit: rate 12.462 MHz, the request that lingers after a cleared flag | yes | tick, `micros` | works (the clock was twice too fast until 2026-11-21) |
+| interrupt controller | stock; unit: mask read-back, pins' block | 13 sources; ten more the OS uses have no model ("Not done") | timer and CAN | works for those two |
+| watchdog (port strobe) | stock; unit: a hung program is reset, the unit back in 95 s | yes (period assumed 1.5 s) | tick, or the program's loop | works |
+| CAN controller | stock; unit: every register, the mailbox table, the control bit that moves identifiers | yes | `can_init`, `can_attach`, `canload` | works after stock; from reset the monitor's own copy of the set-up works (`can_try`: with the top control bit kept it talks and listens, without it the link is lost), `can_init` itself not yet run in a program |
+| radio processor | stock; unit: status block, keep-alive (8a), tuning and volume | stand-in (no 0x87 after tuning) | keep-alive, source, volume, tuner commands as the 192's | keep-alive, sound source, tuning and volume work (the last two by their frames, read back in the status block; nobody listened); POWER untried |
+| faceplate controller | stock; unit: keys, knobs, reset line | stand-in | `panel.c` | works; goes dark for good if its start is left unanswered (limit not measured) |
+| display unit | stock; unit: planes and timing as the kit sets them | yes | 16-bit plane 6 | works; a partial second copy of the bottom text line seen on a unit, unexplained |
+| 2D graphics engine | stock | yes (the OS's commands) | none | untried |
+| display motor, position | stock; unit | yes | `display.c` | works |
+| ATAPI drive | stock; unit: eject, INQUIRY, reads | yes (no DMA) | `cd.c`, programmed I/O | eject and reading a disc work; DMA and CD audio untried |
+| SD host, two slots | stock; unit: both slots, CMD18 at 2.9 MB/s | yes | `sdhi_*`, one data line, polled | works; 4-bit mode, DMA, writes, card detect untried |
+| sound interface, audio clock | stock; unit: plays | yes | `pcm.c` | works |
+| DMA channels | stock | sound and SD | sound | works for sound |
+| A/D converter | stock; unit | yes | `adc_read` | works |
+| ports | unit: every register read once | inputs as the unit's, few lines named | the lines named | most lines unknown |
+| GPS block, its clock (0xff907000) | stock | fix patched in, clock not modelled | none | untried |
+| gyroscope, speed pulses | stock | yes (the OS's view) | none | untried |
+| I2C masters, serial ports 0xff923000 and 0xff927000 | stock touches them | no | none | unknown |
+| IC100 (Aisin), AK5406, MAX9247 | boards | no | none | unknown |
+| boot ROM | dumped from a unit (128 KiB) | stand-in; the dump not yet run in its place | none | - |
+
 ## Not done
 
 * Antialiasing of the map's lines (drawing mode bit 2), the A bit of
@@ -861,4 +1189,6 @@ writing that block before the start.
   the remaining serial ports, DMA for the drive.
 * Interrupt sources the OS registers handlers for and that have no
   model: 0x760, 0x7a0, 0x940, 0x960, 0xc00, 0xcc0, 0xce0, 0xde0,
-  0xe20, 0xfa0.
+  0xe20, 0xfa0.  Most are placed in "Interfaces the stock software
+  leaves unused"; 0x960 is not (its handler loads no register address
+  directly).

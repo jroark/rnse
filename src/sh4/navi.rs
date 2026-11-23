@@ -79,6 +79,8 @@ const DU_END: u32 = 0xfffa_0000;
 /// the faceplate controller when low.
 const PORT_FP: u32 = 0xff90_9000;
 const SCIF_DEBUG: u32 = 0xffe4_0000;
+/// The interrupt pins' control block.
+const PINS: u32 = 0xff80_2000;
 /// The DMA channel that feeds the serial sound interface.
 const AUDIO_DMA: u32 = 0xff80_1180;
 /// Its bit in the common registers.
@@ -209,6 +211,20 @@ impl Navi {
         // drove them all low and set the drive ejecting on the unit.)
         navi.raw_write(PORT_FP, 4, 0xdfff_ffff);
         navi.raw_write(PORT_FP + 4, 4, 0xffff_fff9);
+        // Read off a bench unit under rnse-sdk's mon193 (2026-11-21):
+        // the interrupt pins all masked until software says otherwise,
+        // the third timer unit's first channel as a reset leaves it,
+        // and the input registers of the ports the model has no lines
+        // of (the unit idle on a bench, display closed, a disc in, no
+        // cards).  What each line is, is not known.
+        navi.raw_write(PINS + 0x44, 4, 0xff00_0000);
+        navi.raw_write(PINS + 0x48, 4, 0xff00_0000);
+        navi.raw_write(0xffd8_2008, 4, 0xffff_ffff);
+        navi.raw_write(0xffd8_200c, 4, 0xffff_ffff);
+        navi.raw_write(0xff93_e00c, 4, 0x0001_21c7);
+        navi.raw_write(0xff94_000c, 4, 0x0e3e_8b8f);
+        navi.raw_write(0xffc4_000c, 4, 0x0166_0079);
+        navi.raw_write(0xffc4_400c, 4, 0x04ff_fe03);
         navi
     }
 
@@ -342,7 +358,9 @@ impl Navi {
                 // Input levels.  Bit 20 is the display's position switch.
                 // Bit 22 has to be high or the OS stops itself after nine
                 // seconds: presumably the supply voltage monitor.
-                (self.raw_read(addr, size) & !(1 << 20)) | ((self.display_pos > 94) as u32) << 20 | 1 << 22
+                // The other lines as a bench unit has them (0xfe54000e
+                // with the display closed, 2026-11-21).
+                ((self.raw_read(addr, size) | 0xfe04_000e) & !(1 << 20)) | ((self.display_pos > 94) as u32) << 20 | 1 << 22
             }
             CAN..=0xffdf_0fff => {
                 let v = self.can.read(addr - CAN, size, pc);
@@ -363,6 +381,24 @@ impl Navi {
                 intc.set_int2(INT2_ATAPI, self.atapi_request());
                 v
             }
+            // A register of the memory controller, as a bench unit has
+            // it (rnse-sdk's mon193, 2026-11-21).  The stock loader and
+            // the kit's board_init compute what they write to +0x220
+            // from its bits 10-18 (0x49 here: 0x1047 written); read as
+            // 0 it made a constant of that write, 0xfffffffe, which
+            // stopped a unit's RAM.
+            0xfe80_0280 if size == 4 => 0x0249_24e5,
+            // The interrupt pins' block (the SH7780's layout).  +0 has
+            // the NMI pin's level in bit 31, high; the mask registers
+            // (+0x44, +0x48) are set by ones written to them and
+            // cleared by ones written to +0x64 and +0x68, which read
+            // as the masks do.  All as a bench unit reads after the
+            // kit's set-up (2026-11-21).
+            PINS if size == 4 => self.raw_read(addr, 4) | 0x8000_0000,
+            a if size == 4 && (a == PINS + 0x64 || a == PINS + 0x68) => self.raw_read(a - 0x20, 4),
+            // The sound interface's status while it is off: idle (bits
+            // 25, 1 and 0 on a bench unit).
+            a if a == SSI + 4 && size == 4 && self.raw_read(SSI, 4) & 1 == 0 => self.raw_read(a, 4) | 0x0200_0003,
             ATAPI_STATUS => self.atapi_status(),
             // Signal levels: bit 0 is the drive's DMA request.
             ATAPI_SIGNALS => self.atapi.dma_request() as u32,
@@ -462,6 +498,14 @@ impl Navi {
             }
             0xffc4_0000..=0xffc4_002f | 0xffc4_4000..=0xffc4_402f => self.port_write(addr, size, v),
             PORT_FP..=0xff90_9007 => self.raw_write(addr, size, v),
+            a if size == 4 && (a == PINS + 0x44 || a == PINS + 0x48) => {
+                let m = self.raw_read(a, 4) | v;
+                self.raw_write(a, 4, m);
+            }
+            a if size == 4 && (a == PINS + 0x64 || a == PINS + 0x68) => {
+                let m = self.raw_read(a - 0x20, 4) & !v;
+                self.raw_write(a - 0x20, 4, m);
+            }
             AUDIO_DMA..=0xff80_14ff if size == 4 => {
                 self.dma_write(addr, v);
                 self.audio_irq(intc);

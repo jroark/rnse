@@ -45,7 +45,9 @@ on that unit.
   Quake, Windows 3.11, a Mac Plus and an NES emulator have run on the bench unit. See
   [Custom firmware](/custom-firmware/#games-and-other-computers). Since November 2026
   a real **193** runs programs of our own too, started from a CD and an SD card
-  ([on the bench](/hardware-193/#on-the-bench)).
+  ([on the bench](/hardware-193/#on-the-bench)), and a monitor on it is
+  [driven from scripts](/hardware-193/#driven-from-scripts) over the CAN bus, with
+  the emulator answering the same scripts beside it.
 - A small board in an SD slot makes a 192 an **Android Auto** head unit: a phone's
   Google Maps runs on the bench unit's own display at 10 to 13 pictures a second,
   decoded by its own processor, driven with its own knob, and the phone's music

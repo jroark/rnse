@@ -97,10 +97,57 @@ SD card, so later tests needed no new disc. What they found:
   slots takes 10 to 20 ms before commands reach the new one. The selects are the
   other way round from the slots' numbers: select 0 is the unit's slot 2.
 - **CAN** works through the controller as the stock software leaves it set up. The
-  kit's own CAN start left it silent; why is not known yet.
+  kit's own CAN start left it silent, until the monitor below showed why.
 
 With that, a phone's [Android Auto](/android-auto/#on-the-193) ran full screen on
 the unit at 30 pictures a second.
+
+### Driven from scripts
+
+A second 193 (V575, index 0310) now sits on the bench with a small **monitor**
+running on it. The loader on the disc takes the monitor over the CAN bus in six
+seconds; after that the monitor does what frames on the bus ask of it: read a
+register, write one, send a stretch of memory, pass on what the faceplate and the
+radio processor say. A script on the Mac drives it, and the same script runs against
+the emulator, so the two answers can be laid side by side. The monitor never writes
+the flash or the battery-backed memory, and it leaves the watchdog to its own main
+loop: a request that hangs the unit ends in a reset, the unit's own software starts,
+the loader takes over and the monitor is pushed again, about 95 seconds in all,
+with nobody at the bench. The first evening of it found:
+
+- **The kit's clock ran twice too fast on the real chip.** A timer goes on asking
+  for its interrupt for a moment after its flag is cleared. The kit's handler
+  returned before the request had gone, so it ran twice for every tick: forty
+  seconds counted in twenty, and every delay and time-out in a program half as long
+  as written. Reading the timer's control register back after clearing the flag is
+  enough. The emulator now keeps the request the same way, so a handler like the
+  old one counts double there as well.
+- **The clock itself**: the timers count 12.462 MHz, a quarter of a peripheral
+  clock of 49.85 MHz and not of 50. The stock software's millisecond is 0.2 % long.
+- **The silent CAN bus.** The kit's CAN start cleared the top bit of the
+  controller's control register, which the stock software leaves set. With that bit
+  clear, the controller keeps a mailbox's identifier two bits further up: the unit
+  was not silent at all, it sent its frames under other identifiers (0x1FE for
+  0x7F8) and took ours for something else. Started with the bit kept, the
+  controller talks and listens from reset.
+- **The CAN mailboxes** as the boot ROM sets them up: ranges of identifiers in
+  seven of them, single identifiers in six, and one for everything else. The
+  emulator had a single catch-all in their place.
+- **What keeps the unit from restarting.** The radio processor starts the unit
+  again when the main software stops talking to it: after 13½ minutes of nothing.
+  The stock software sends it two frames over and over, `8a` every 30 seconds and
+  `81 [06]` every 60. The second alone does not help (the unit restarted after 15
+  minutes); with both, the unit stayed up. The front stays lit either way.
+- **The tuner and the amplifier** take the 192's frames: a frequency set and a
+  volume set both show in the status block the radio processor sends back.
+- **The drive** reads a disc from a program: five stretches of a CD-R came back as
+  the disc's image has them, 3.7 ms a sector in a row, 170 to 290 ms for a read
+  somewhere else.
+- **Registers that read differently**: the cache control register has only an
+  SH-4A's bits, the interrupt pins' masks are set and cleared by writing ones, and
+  the ports' input registers have real levels on them. Some sixty of 328 registers
+  compared still differ, most of them state the stock software sets later on the
+  unit than in the emulator.
 
 ## Graphics
 
@@ -131,13 +178,20 @@ given speed and rate of turn, and the map follows.
 
 ## What is still open
 
-- Most of the address table above is still inferred. The processor, the display
-  unit, the faceplate's serial port, the drive, the SD host and CAN have been used on
-  the bench unit; the rest has not.
-- Sound through the serial sound interface has not been tried on the unit.
-- What switches the panel on, and the display's motor lines, are not known.
-- Several register blocks are written at start-up and never understood. The emulator
-  lets them behave like memory, so that what is written can be read back.
-- The 193's boot ROM is entirely inferred; it has not been read from the bench unit yet.
+- Much of the address table above is still inferred. The processor, the timers, the
+  display unit, the faceplate's serial port, the radio processor's, the drive, the SD
+  host, CAN and the sound interface have been used on a bench unit; the GPS block,
+  the 2D engine, the I2C masters and two more serial ports have not.
+- What switches the panel on is not known: the frame the radio processor sends when
+  POWER is pressed has not been caught yet.
+- The front goes dark for good when a program leaves the faceplate's start
+  unanswered. How long it waits has not been measured.
+- Ten interrupt sources the stock software uses have no model in the emulator, and
+  several register blocks written at start-up are not understood. The emulator lets
+  those behave like memory, so that what is written can be read back.
+- The boot ROM has been read from a bench unit, but the emulator still runs its
+  stand-in for it.
+- How long a timer's request really lingers is not known; the emulator's figure is
+  only long enough to catch a handler like the kit's old one.
 
 See also [The 192's hardware](/hardware-192/) and [The emulator](/the-emulator/).

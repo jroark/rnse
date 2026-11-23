@@ -557,6 +557,97 @@ fn transport_channels_open() {
     }
 }
 
+/// `--pin` / `--pin-lock` (`Machine::set_pin` + `Machine::lock_pin`):
+/// the 193's own firmware decodes the AES-128 encrypted PIN from flash
+/// (`0x03ff_403a`) using the DVD drive's SCSI INQUIRY product field
+/// (`0x8e9de900`), shows the anti-theft PIN entry screen when SRAM
+/// `THF_FLASH` has grace=0 and state=2, rejects a wrong PIN, and
+/// unlocks on the right PIN.  See `docs/hardware-193.md`, "Anti-theft".
+#[test]
+fn pin_lock_shows_the_pin_entry_screen() {
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    let Some(v) = variants.iter().find(|v| v.module("OSM").is_some_and(|m| Machine::pin_lock_verified(&m.version))) else {
+        return;
+    };
+    let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+    let boot = |lock: bool| -> (Machine, Vec<u8>) {
+        let mut m = Machine::for_model(rnse::board::Model::Rnse193);
+        m.echo_console = false;
+        m.install_boot_stub(&v.name);
+        m.install(v, &index);
+        if lock {
+            m.set_pin(1234).unwrap();
+            m.lock_pin().unwrap();
+        }
+        m.set_ignition(true);
+        m.start_os(v).unwrap();
+        let ms = m.cycles_per_ms();
+        assert_eq!(m.run(30_000 * ms), Stop::Budget, "{}: {:?}", v.name, m.cpu.fault);
+        let pixels = m.render().2;
+        (m, pixels)
+    };
+    let (unlocked, open_screen) = boot(false);
+    let (mut locked, pin_screen) = boot(true);
+    // Persisted THF_FLASH state (+0x1e = SRAM 0x2c32): 3 authorized
+    // without the lock (blank SRAM grace counter), 2 (PIN required)
+    // with it.
+    assert_eq!(unlocked.board.nvram[0x2c32], 3, "{}: unlocked SRAM state", v.name);
+    assert_eq!(locked.board.nvram[0x2c32], 2, "{}: locked SRAM state", v.name);
+    assert_eq!(locked.board.nvram[0x2c1a], 0, "{}: initial wrongpin_cnt", v.name);
+    // The 193's DVD drive INQUIRY product field populates 0x8e9de900.
+    let key: Vec<u8> = (0..16).map(|i| locked.peek8(0x8e9d_e900 + i).unwrap()).collect();
+    assert_eq!(key.as_slice(), b"DV33M01B/       ", "{}: ATAPI INQUIRY key", v.name);
+    // The real firmware AES-128 decode (0x8058cc7e) succeeded at boot.
+    assert_eq!(locked.peek8(0x8e9f_3d78), Some(1), "{}: boot PIN decode did not validate", v.name);
+    // The anti-theft state the application reads: 3 authorized vs 2 PIN required.
+    assert_eq!(unlocked.peek8(0x8e9f_3d61), Some(3), "{}: unlocked state", v.name);
+    assert_eq!(locked.peek8(0x8e9f_3d61), Some(2), "{}: unit did not enter PIN-required state", v.name);
+    // And the screen is a different one, with content drawn on it.
+    assert_ne!(open_screen, pin_screen, "{}: --pin-lock drew the same screen", v.name);
+    let lit = pin_screen.chunks(3).filter(|p| p.iter().any(|&c| c > 0x40)).count();
+    assert!(lit > 3_000, "{}: the PIN screen is blank ({} lit)", v.name, lit);
+
+    // Helper: press a faceplate key and let the OS process it.
+    let ms = locked.cycles_per_ms();
+    let press = |m: &mut Machine, key: &str| {
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(200 * ms), Stop::Budget);
+        assert!(m.panel_key(key, false));
+        assert_eq!(m.run(400 * ms), Stop::Budget);
+    };
+    let turn = |m: &mut Machine, detents: i32| {
+        assert!(m.panel_knob("main", detents));
+        assert_eq!(m.run(300 * ms), Stop::Budget);
+    };
+
+    // Enter a wrong PIN (1111 — dial starts at 1); after the 4th digit
+    // the dial jumps to O.K., so a 5th SELECT submits it.
+    for _ in 0..5 {
+        press(&mut locked, "SELECT");
+    }
+    // Wait for the "Incorrect PIN" notice to clear back to the dial.
+    assert_eq!(locked.run(5_000 * ms), Stop::Budget);
+    assert_eq!(locked.board.nvram[0x2c1a], 1, "{}: wrong PIN did not increment wrongpin_cnt", v.name);
+    assert_eq!(locked.board.nvram[0x2c32], 2, "{}: wrong PIN unlocked the unit", v.name);
+
+    // Enter the right PIN (1234) and press SELECT on O.K.: the real
+    // firmware AES-128 decode + memcmp accepts it and unlocks the unit.
+    // On this dial, negative detents move clockwise (1 -> 2 -> 3 -> 4).
+    press(&mut locked, "SELECT"); // 1
+    turn(&mut locked, -1);
+    press(&mut locked, "SELECT"); // 2
+    turn(&mut locked, -1);
+    press(&mut locked, "SELECT"); // 3
+    turn(&mut locked, -1);
+    press(&mut locked, "SELECT"); // 4
+    press(&mut locked, "SELECT"); // O.K.
+    assert_eq!(locked.run(2_000 * ms), Stop::Budget);
+    assert_eq!(locked.board.nvram[0x2c32], 3, "{}: right PIN did not unlock the unit", v.name);
+    assert_eq!(locked.board.nvram[0x2c1a], 0, "{}: right PIN did not clear wrongpin_cnt", v.name);
+    assert_eq!(locked.peek8(0x8e9f_3d61), Some(3), "{}: unlocked RAM state", v.name);
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]

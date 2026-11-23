@@ -378,8 +378,9 @@ State the OS inherits:
 * A running CAN timer: TMU2 on the 192, unit 1 channel 0 on the 193.
   The OS installs its handler and clears underflows but does not start
   the timer.  On the 192 the ROM has it at 5 ms, and so has the
-  stand-in.  For the 193 the stand-in supplies 2.5 ms, the interval the
-  loaders program themselves, which is an assumption.
+  stand-in.  The 193's ROM has it at 5 ms as well (a bench unit's
+  reload register reads 0xf3e5, 62437 counts, 2026-11-21); the stand-in
+  supplied 2.5 ms before, the interval the loaders program themselves.
 * On the 192, shared receive mailboxes 0 (general), 2 (network management,
   mask `0x03f`) and 3 (`0x600..0x67f`, mask `0x07f`). The driver changes
   their identifiers as clients register but skips programming their mode.
