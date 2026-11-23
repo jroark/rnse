@@ -572,7 +572,6 @@ impl Machine {
         // +0x18 (+24): factory grace counter (0 = anti-theft active)
         block[30] = 2; // +0x1e: persisted state (2 = PIN required)
         block[36..40].copy_from_slice(&0xedcb_a987u32.to_be_bytes());
-        self.board.nvram[0x2c14..0x2c3c].copy_from_slice(&block);
 
         let sum_words = |buf: &[u8]| -> u32 {
             let mut sum = 0u32;
@@ -643,38 +642,38 @@ impl Machine {
             }
         };
 
-        // Update block #6 in-place if present, otherwise append it after the last used page.
-        let mut updated = false;
-        let mut free_slot = None;
-        let mut next_page = 0usize;
-        for i in 0..MAX_BLOCKS {
-            let off = DIR_OFF + i * 8;
-            let id = u16::from_be_bytes([sector[off], sector[off + 1]]);
-            if id == 0 {
-                if free_slot.is_none() {
-                    free_slot = Some(i);
-                }
-                break;
+        let entries = &sector[DIR_OFF..MAGIC_OFF];
+        if let Some(entry) = entries.chunks_exact(8).find(|e| e[..2] == 6u16.to_be_bytes()) {
+            let size = u16::from_be_bytes([entry[2], entry[3]]) as usize;
+            if size < block.len() {
+                return Err("existing THF_FLASH block #6 is smaller than 40 bytes".into());
             }
-            let size = u16::from_be_bytes([sector[off + 2], sector[off + 3]]) as usize;
-            let page = u16::from_be_bytes([sector[off + 4], sector[off + 5]]) as usize;
-            let pages = (size - 1) / 256 + 1;
-            next_page = page + pages;
-            if id == 6 {
-                if size < block.len() {
-                    return Err("existing THF_FLASH block #6 is smaller than 40 bytes".into());
+            let page = u16::from_be_bytes([entry[4], entry[5]]) as usize;
+            sector[page * 256..page * 256 + block.len()].copy_from_slice(&block);
+        } else {
+            // Pack occupied records in directory order before appending. Empty
+            // slots can separate runs whose page numbers are not consecutive.
+            let mut slot = 0;
+            let mut next_page = 0;
+            if let Some(src) = active {
+                for entry in src[DIR_OFF..MAGIC_OFF].chunks_exact(8).filter(|e| e[..2] != [0, 0]) {
+                    let size = u16::from_be_bytes([entry[2], entry[3]]) as usize;
+                    let page = u16::from_be_bytes([entry[4], entry[5]]) as usize;
+                    let pages = size.div_ceil(256);
+                    if next_page + pages >= MAX_BLOCKS {
+                        return Err("flash store has no free pages for THF_FLASH".into());
+                    }
+                    sector[next_page * 256..(next_page + pages) * 256]
+                        .copy_from_slice(&src[page * 256..(page + pages) * 256]);
+                    let off = DIR_OFF + slot * 8;
+                    sector[off..off + 8].copy_from_slice(entry);
+                    sector[off + 4..off + 6].copy_from_slice(&(next_page as u16).to_be_bytes());
+                    slot += 1;
+                    next_page += pages;
                 }
-                sector[page * 256..page * 256 + block.len()].copy_from_slice(&block);
-                updated = true;
-                break;
-            }
-        }
-        if !updated {
-            let slot = free_slot.ok_or("flash store directory is full")?;
-            if next_page >= MAX_BLOCKS {
-                return Err("flash store has no free pages for THF_FLASH".into());
             }
             let off = DIR_OFF + slot * 8;
+            sector[off..MAGIC_OFF].fill(0);
             sector[off..off + 2].copy_from_slice(&6u16.to_be_bytes());
             sector[off + 2..off + 4].copy_from_slice(&40u16.to_be_bytes());
             sector[off + 4..off + 6].copy_from_slice(&(next_page as u16).to_be_bytes());
@@ -686,6 +685,7 @@ impl Machine {
         sector[0x1fff8..0x1fffc].copy_from_slice(&sum.to_be_bytes());
         sector[0x1fffc..0x20000].copy_from_slice(&new_seq.to_be_bytes());
         self.board.load(target_addr as u32, &sector);
+        self.board.nvram[0x2c14..0x2c3c].copy_from_slice(&block);
         Ok(())
     }
 
@@ -2320,29 +2320,30 @@ mod tests {
         assert_eq!(aes128_encrypt(pt, key), expected);
     }
 
+    fn build_bank(entries: &[(u16, &[u8])], seq: u32) -> Vec<u8> {
+        let mut s = vec![0u8; 0x20000];
+        let mut page = 0usize;
+        for (i, &(id, data)) in entries.iter().enumerate() {
+            if id == 0 { continue; }
+            let off = 0x5d00 + i * 8;
+            s[off..off + 2].copy_from_slice(&id.to_be_bytes());
+            s[off + 2..off + 4].copy_from_slice(&(data.len() as u16).to_be_bytes());
+            s[off + 4..off + 6].copy_from_slice(&(page as u16).to_be_bytes());
+            s[page * 256..page * 256 + data.len()].copy_from_slice(data);
+            page += (data.len() - 1) / 256 + 1;
+        }
+        s[0x5fe8..0x5ff0].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let mut sum = 0u32;
+        for chunk in s[..0x1fff8].chunks_exact(4) {
+            sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+        }
+        s[0x1fff8..0x1fffc].copy_from_slice(&sum.to_be_bytes());
+        s[0x1fffc..0x20000].copy_from_slice(&seq.to_be_bytes());
+        s
+    }
+
     #[test]
     fn lock_pin_preserves_populated_flash_store() {
-        let build_bank = |entries: &[(u16, &[u8])], seq: u32| -> Vec<u8> {
-            let mut s = vec![0u8; 0x20000];
-            let mut page = 0usize;
-            for (i, &(id, data)) in entries.iter().enumerate() {
-                let off = 0x5d00 + i * 8;
-                s[off..off + 2].copy_from_slice(&id.to_be_bytes());
-                s[off + 2..off + 4].copy_from_slice(&(data.len() as u16).to_be_bytes());
-                s[off + 4..off + 6].copy_from_slice(&(page as u16).to_be_bytes());
-                s[page * 256..page * 256 + data.len()].copy_from_slice(data);
-                page += (data.len() - 1) / 256 + 1;
-            }
-            s[0x5fe8..0x5ff0].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
-            let mut sum = 0u32;
-            for chunk in s[..0x1fff8].chunks_exact(4) {
-                sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
-            }
-            s[0x1fff8..0x1fffc].copy_from_slice(&sum.to_be_bytes());
-            s[0x1fffc..0x20000].copy_from_slice(&seq.to_be_bytes());
-            s
-        };
-
         let mut m = Machine::for_model(crate::board::Model::Rnse193);
         // Bank 0 (older, seq 3) has stale block #10; bank 1 (active, seq 7)
         // has newer block #10 and an unlocked block #6 (state = 3).
@@ -2373,6 +2374,32 @@ mod tests {
         assert_eq!(u16::from_be_bytes([updated[0x5d08], updated[0x5d09]]), 6);
         assert_eq!(updated[256 + 24], 0);
         assert_eq!(updated[256 + 30], 2);
+    }
+
+    #[test]
+    fn lock_pin_preserves_records_after_empty_slots() {
+        let mut m = Machine::for_model(crate::board::Model::Rnse193);
+        let data = [0x56; 300];
+        let bank = build_bank(&[(0, &[]), (10, &data)], 1);
+        m.board.load(0x033e_0000, &bank);
+        m.lock_pin().unwrap();
+        let updated = &m.board.flash[0x0340_0000..0x0342_0000];
+        assert_eq!(&updated[..300], &data);
+        assert_eq!(&updated[0x5d00..0x5d06], &[0, 10, 1, 44, 0, 0]);
+        assert_eq!(&updated[0x5d08..0x5d0e], &[0, 6, 0, 40, 0, 2]);
+        assert_eq!(updated[512 + 30], 2);
+    }
+
+    #[test]
+    fn lock_pin_error_preserves_flash_and_sram() {
+        let mut m = Machine::for_model(crate::board::Model::Rnse193);
+        let bank = build_bank(&[(0, &[]), (6, &[0; 8])], 1);
+        m.board.load(0x033e_0000, &bank);
+        let banks = m.board.flash[0x033e_0000..0x0342_0000].to_vec();
+        let mirror = m.board.nvram[0x2c14..0x2c3c].to_vec();
+        assert!(m.lock_pin().is_err());
+        assert_eq!(m.board.flash[0x033e_0000..0x0342_0000], banks);
+        assert_eq!(m.board.nvram[0x2c14..0x2c3c], mirror);
     }
 
     /// A program for the 192 that puts `edges` edges on the watchdog
