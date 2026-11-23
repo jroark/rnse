@@ -1068,7 +1068,8 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Some(path) => rnse::dev::atapi::Disc::open(path)?,
         None => image.clone().into(),
     };
-    let build = |ignition: bool, disc: bool| -> Result<Machine, Box<dyn std::error::Error>> {
+    let mut provisioned_pin = None::<u16>;
+    let build = |ignition: bool, disc: bool, provisioned: &mut Option<u16>| -> Result<Machine, Box<dyn std::error::Error>> {
         let mut m = Machine::for_model(model);
         if let Some(path) = &sd_card {
             m.insert_card(0, rnse::dev::sdhi::Card::open(path)?);
@@ -1109,8 +1110,10 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
             if let Some(t) = car_type.or(drive.as_ref().map(|_| 5)) {
                 m.set_car_type(t)?;
             }
+            *provisioned = None;
             if let Some(code) = pin {
                 m.set_pin(code)?;
+                *provisioned = Some(code);
             }
             if pin_lock {
                 if !v.module("OSM").is_some_and(|m| Machine::pin_lock_verified(&m.version)) {
@@ -1118,6 +1121,7 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 if pin.is_none() && !m.has_pin() {
                     m.set_pin(1234)?;
+                    *provisioned = Some(1234);
                 }
                 m.lock_pin()?;
             }
@@ -1127,11 +1131,14 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Ok(m)
     };
 
-    let mut m = build(ignition, disc)?;
+    let mut m = build(ignition, disc, &mut provisioned_pin)?;
     let shared = Arc::new(Mutex::new(Shared::default()));
     let addr = serve(&format!("{}:{}", bind, port), shared.clone())?;
     if pin_lock {
-        println!("rnse: anti-theft PIN lock active (PIN {:04})", pin.unwrap_or(1234));
+        match provisioned_pin {
+            Some(code) => println!("rnse: anti-theft PIN lock active (PIN {:04})", code),
+            None => println!("rnse: anti-theft PIN lock active (PIN from flash image)"),
+        }
     }
     println!("rnse: {} running; open http://{}/ in a browser (Ctrl-C to quit)", what, addr);
     let mut stopped: Option<String> = None;
@@ -1175,7 +1182,7 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 UiEvent::Reset => {
                     emu_base_ms += m.cpu.cycles / m.cycles_per_ms();
-                    m = build(ignition, disc_in)?;
+                    m = build(ignition, disc_in, &mut provisioned_pin)?;
                     stopped = None;
                     log_sent = 0;
                     note = "restarted".into();
