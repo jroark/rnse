@@ -960,3 +960,26 @@ the library.
 The OS's table of interrupt handlers (handler, vector << 16 | 0x0800)
 is at 0x80032990 in V2200815: vectors 0x1e (GPS), 0x19, 0x11, 0x18,
 0x1a, 0x34, 0x35, 0x3c and 0x3f.
+
+## Anti-theft (the PIN lock)
+
+Unlike the 193 (which AES-128 encrypts its PIN using the DVD drive's
+`INQUIRY` product field), the 192 stores its four-digit anti-theft PIN
+in **plaintext ASCII** inside the factory parameter block at flash
+`0x00ffe000`:
+
+* `0x00ffe01f` (14 bytes): the unit's ASCII serial number (`AUZ...`).
+* `0x00ffe031` (4 bytes): the four-digit ASCII PIN.
+
+In `V2220317`, the PIN check at `0x8019c180` compares the entered four
+digits directly against `0x00ffe031` via `memcmp` (`0x801e0320`).  If
+any of the four bytes at `0x00ffe031..0x00ffe035` is outside `'0'..'9'`
+(e.g. `0xff` on blank flash), the check at `0x8019c192` accepts any
+entry.  The `THF_FLASH` working block lives in battery-backed SRAM at
+`0xb0002c14` (36 bytes, persisted as block #6 via `0x801320ea`), with
+`wrongpin_cnt` at `+5` (`0xb0002c19`) and the lock state in OS scratch
+RAM at `0x8c0ca010` (`2` = PIN required, `3` = authorized).
+
+In the emulator, `--serial` (`Machine::set_serial`) writes the 14-byte
+serial to `0x00ffe01f` and `--pin NNNN` (`Machine::set_pin`) writes the
+four plaintext ASCII digits to `0x00ffe031`.
