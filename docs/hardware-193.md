@@ -1078,43 +1078,60 @@ interrupt table, followed to the registers they load):
 
 After a loss of power the unit demands a four-digit PIN before it will
 work, on a screen with a dial of the digits 0-9 (the knob turns to one,
-the button enters it), "Remaining attempts: 2".  The module that does
-it is `THF`; its persistent state is a block in the battery-backed SRAM
-at `0xb8002c14` (magic `0x12345678` at +0, the car's VIN as ASCII from
-+8, an inverted mark `0xedcba987` at +0x24).
+the button enters it), "Remaining attempts: 2", and the unit's 14-char
+serial at the bottom.  The module that does it is `THF`; its 40-byte
+persistent state (`THF_FLASH`) is stored as block #6 of the 93-block
+ping-pong flash store at `0x033e0000` / `0x03400000` (each 128 KiB:
+93 × 256-byte pages, 93 × 8-byte directory entries at `+0x5d00`, magic
+`01..08` at `+0x5fe8`, wrapping `u32` sum at `+0x1fff8`, sequence
+number at `+0x1fffc`) and mirrored at boot into battery-backed SRAM at
+`0xb8002c14` (magic `0x12345678` at `+0`, lockout flag at `+4`,
+`wrongpin_cnt` at `+6`, the car's VIN from `+7`, factory grace counter
+at `+0x18`, persisted state at `+0x1e`, Kombi CAN challenge PRNG
+accumulator at `+0x20`, and inverted mark `0xedcba987` at `+0x24`).
 
-The OS does not keep the lock state across boots in a single flag.
-Every boot it **rebuilds** the block and runs a decode
-(`AES_dec(ciphertext from the flash parameter block at 0x03ff403a,
-key from the drive's INQUIRY product field at 0x8e9de900)`; the
-routine is at `0x8058cc7e`, called from the boot decision at
-`0x80613db0`, in V57510AA), and from the result it sets a state byte in
-OS scratch RAM at **`0x8e9f3d61`**: **3 = authorized, 2 = PIN
-required**.  The application reads that state to choose the screen.
-(The routine at `0x8061367c`, which reads the 16-bit word at the SRAM
-block's +4, is a *separate* check and is not the boot gate: on a real
-locked unit that word is `0`.)
+When block #6 is missing or fails the magic check (as on blank flash),
+`0x80613e9c` initializes `THF_FLASH` with a **50-boot factory grace
+counter** (`+0x18 = 50`).  While `+0x18 > 0`, `0x8061369e` decrements
+it on each boot and immediately authorizes the unit (`0x8e9f3d61 = 3`,
+skipping the PIN screen).  Once `+0x18 == 0`, the unit sends a Kombi
+(instrument cluster) challenge on CAN `0x361` (`0x80613fc8`, updating
+the PRNG accumulator at `+0x20`); if no cluster answers after two 3 s
+timeouts (`0x8061421e`) and persisted state `+0x1e` is `2`, it sets
+`0x8e9f3d61 = 2` (PIN required) and opens the PIN entry screen.
 
-The emulator does not reproduce the decode faithfully: with a real
-unit's parameter block and the real drive identity
-(`ALPINE  DV33M01B/`, already set) it still computes a different result
-(the block's word at +0x20 comes out `4edd4f5c` where a real unit has
-`37e18ea8`) and resolves to *authorized*, so it boots to the radio.
-This is the same gap the PIN-recovery work hit.
+The PIN itself is AES-128 encrypted in the flash parameter block at
+`0x03ff403a`:
 
-`--pin-lock` (`Machine::lock_pin`) forces the outcome instead of
-reproducing the decode: at the return of the boot decision it writes
-the "PIN required" state to the scratch variables, the values read from
-a real unit on its PIN screen (`0x8e9f3d61 = 2`, `0x8e9f3d74 = …08`,
-`0x8e9f3d79 = ff`).  The unit then draws its PIN entry screen.  It
-**shows and keeps** the lock; it does not model the right PIN, so no
-entry is accepted (the compare is at `0x80613bd2`).  Known only for
-V57510AA so far; `known_pin_lock` holds the addresses per build, and
-other builds (the screen is unverified on them) return nothing.  The
-ground-truth values were read from a real locked unit over CAN with a
-resident running beside the stock software (rnse-sdk `side193`).  One
-cosmetic gap remains: a label at the bottom of the screen renders as
-`??????????? 18DB`.
+    ciphertext = AES128_encrypt([PIN_u16_be][14-char serial], key)
+
+where `key` is the 16-byte product-identification field (bytes 16–31)
+returned by the DVD drive's SCSI `INQUIRY` (`12 00 00 00 60 00`),
+copied to DRAM `0x8e9de900` by `0x8058db8a` (`"DV33M01B/       "` on
+the Alpine drive).  At boot (`0x80613db0`) and on every PIN submission
+(`0x80613b32`), `0x8058cc7e` decrypts `0x03ff403a` with `0x80681196`
+(standard AES-128), verifies that `plaintext[2..16]` matches the unit
+serial at `0x03ff401f` and `PIN < 10000`, and compares the four ASCII
+digits at `0x80613bd2`.  A match sets `0x8e9f3d61 = 3` and unlocks the
+unit; two mismatches enter the 1-hour lockout (`0x8e9f3d61 = 1`,
+`THF_FLASH+4 = 1`).  (`0x8058ce0e` is the factory counterpart that
+encrypts a 66-byte input record into the 78-byte block at `0x03ff4000`
+using `0x80680dbc`.)
+
+In the emulator, `Machine::for_model(Model::Rnse193)` sets the 193's
+SoC-side drive (`navi.atapi`) identity to `ALPINE  DV33M01B/       2912`.
+`--pin NNNN` (`Machine::set_pin`) provisions `0x03ff403a` (and a
+default serial `AUZBZ700000001` at `0x03ff401f` if none was given) with
+the real AES-128 ciphertext, and `--pin-lock` (`Machine::lock_pin`)
+updates or appends block #6 (`grace = 0, state = 2`) in the active bank
+of the `0x033e0000` / `0x03400000` flash store (preserving any other
+blocks and advancing the sequence number above both banks, and leaving
+an already-provisioned flash PIN intact unless `--pin` is also given).
+The layout is verified on `V5751050` and `V57510AA` (other 193 builds
+such as V574 or VB48 have not been checked; `Machine::pin_lock_verified`
+gates the test and warns on unverified builds).  The unmodified firmware
+then runs its own decode, shows the PIN screen with the serial at the
+bottom, rejects wrong entries, and unlocks when the right PIN is entered.
 
 ## Status
 
