@@ -362,6 +362,11 @@ impl Machine {
     /// never on an update disc, so an emulated unit has none unless it
     /// is given one.  Navigation discs can be tied to one unit's serial
     /// number, see docs/hardware-193.md.
+    ///
+    /// Call this before [`set_pin`](Self::set_pin): the serial is baked
+    /// into the AES-128 PIN ciphertext at `0x03ff_403a`, so changing the
+    /// serial afterwards invalidates an already-provisioned PIN until
+    /// `set_pin` is called again.
     pub fn set_serial(&mut self, serial: &str) -> Result<(), String> {
         if self.board.model != crate::board::Model::Rnse193 {
             return Err("where the 192 keeps its serial number is not known".into());
@@ -483,6 +488,24 @@ impl Machine {
         }
     }
 
+    /// Whether the 193's flash parameter block at `0x03ff_403a` already
+    /// carries a provisioned (non-blank) PIN ciphertext, e.g. loaded from
+    /// a saved flash image.
+    pub fn has_pin(&self) -> bool {
+        if self.board.model != crate::board::Model::Rnse193 {
+            return false;
+        }
+        let ct = &self.board.flash[0x03ff_403a..0x03ff_403a + 16];
+        !ct.iter().all(|&b| b == 0xff) && !ct.iter().all(|&b| b == 0x00)
+    }
+
+    /// Whether the 193's flash block store (`0x033e_0000`, block #6) and
+    /// parameter block (`0x03ff_403a`) anti-theft layout has been verified
+    /// for this `OSM` version.
+    pub fn pin_lock_verified(os_version: &str) -> bool {
+        matches!(os_version, "V5751050" | "V57510AA")
+    }
+
     /// Provision the 193's four-digit anti-theft PIN (`0..=9999`) in the
     /// flash parameter block at `0x03ff_403a`.  The firmware stores
     /// `AES128_encrypt([pin_u16_be][serial_14], key)` there, where `key`
@@ -490,6 +513,9 @@ impl Machine {
     /// (see `docs/hardware-193.md`, "Anti-theft").  If no serial number
     /// has been set at `0x03ff_401f` yet, a default one (`AUZBZ700000001`)
     /// is written so the firmware's serial-match check succeeds.
+    ///
+    /// Call [`set_serial`](Self::set_serial) before this method: changing
+    /// the serial afterwards invalidates the ciphertext written here.
     pub fn set_pin(&mut self, pin: u16) -> Result<(), String> {
         if self.board.model != crate::board::Model::Rnse193 {
             return Err("where the 192 keeps its PIN is not known".into());
@@ -515,17 +541,29 @@ impl Machine {
         Ok(())
     }
 
-    /// Seed the 193's persistent anti-theft (`THF_FLASH`, block #6) in
-    /// the flash block store at `0x033e_0000` (and its working mirror in
-    /// battery-backed SRAM at `0x2c14..0x2c3c`) in its post-power-loss
-    /// "PIN required" state (`grace = 0`, `state = 2`, `wrongpin_cnt = 0`).
-    /// Without a valid block #6 in flash `0x033e_0000`, the OS sees an
-    /// uninitialized store and initializes `THF_FLASH` with a 50-boot
-    /// factory grace counter (`+0x18 = 50`) that skips the PIN screen.
+    /// Seed or update the 193's persistent anti-theft (`THF_FLASH`,
+    /// block #6) in the ping-pong flash block store (`0x033e_0000` /
+    /// `0x0340_0000`, verified on `V5751050` and `V57510AA`) and its
+    /// working mirror in battery-backed SRAM (`0x2c14..0x2c3c`) in its
+    /// post-power-loss "PIN required" state (`grace = 0`, `state = 2`,
+    /// `wrongpin_cnt = 0`).
+    ///
+    /// If either flash bank already holds a valid store (e.g. loaded via
+    /// `--flash`), the active bank's other blocks are preserved, only
+    /// block #6 is updated or appended, and the updated bank is written
+    /// with a sequence number higher than both banks.
     pub fn lock_pin(&mut self) -> Result<(), String> {
         if self.board.model != crate::board::Model::Rnse193 {
             return Err("where the 192 keeps its anti-theft state is not known".into());
         }
+        const BANK_SIZE: usize = 0x20000;
+        const BANK0: usize = 0x033e_0000;
+        const BANK1: usize = 0x0340_0000;
+        const DIR_OFF: usize = 0x5d00;
+        const MAGIC_OFF: usize = 0x5fe8;
+        const MAGIC: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+        const MAX_BLOCKS: usize = 93;
+
         let mut block = [0u8; 40];
         block[0..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
         // +0x04..+0x06: lockout active flag (0 = normal)
@@ -536,25 +574,118 @@ impl Machine {
         block[36..40].copy_from_slice(&0xedcb_a987u32.to_be_bytes());
         self.board.nvram[0x2c14..0x2c3c].copy_from_slice(&block);
 
-        // Bank 0 of the 193's 93-block flash store (0x033e_0000, 128 KiB):
-        //   +0x0000..+0x5d00: 93 x 256-byte pages (page 0 = THF_FLASH)
-        //   +0x5d00..+0x5fe8: 93 x 8-byte directory entries (id, size, page, 0)
-        //   +0x5fe8..+0x5ff0: magic [1, 2, 3, 4, 5, 6, 7, 8]
-        //   +0x1fff8..+0x1fffc: wrapping u32 sum of 0x0000..0x1fff8
-        //   +0x1fffc..+0x20000: sequence number (1)
-        let mut sector = vec![0u8; 0x20000];
-        sector[0..40].copy_from_slice(&block);
-        sector[0x5d00..0x5d02].copy_from_slice(&6u16.to_be_bytes()); // block ID 6 (THF_FLASH)
-        sector[0x5d02..0x5d04].copy_from_slice(&40u16.to_be_bytes()); // size 40 bytes
-        sector[0x5d04..0x5d06].copy_from_slice(&0u16.to_be_bytes()); // page 0
-        sector[0x5fe8..0x5ff0].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
-        let mut sum = 0u32;
-        for chunk in sector[..0x1fff8].chunks_exact(4) {
-            sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+        let sum_words = |buf: &[u8]| -> u32 {
+            let mut sum = 0u32;
+            for chunk in buf[..0x1fff8].chunks_exact(4) {
+                sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+            }
+            sum
+        };
+        let valid_bank = |buf: &[u8]| -> Option<u32> {
+            if buf[MAGIC_OFF..MAGIC_OFF + 8] != MAGIC {
+                return None;
+            }
+            let seq = u32::from_be_bytes(buf[0x1fffc..0x20000].try_into().unwrap());
+            if seq == u32::MAX {
+                return None;
+            }
+            let stored = u32::from_be_bytes(buf[0x1fff8..0x1fffc].try_into().unwrap());
+            if sum_words(buf) != stored {
+                return None;
+            }
+            // Validate directory entries (matching 0x8058a1d2).
+            let mut prev_end: Option<usize> = None;
+            for i in 0..MAX_BLOCKS {
+                let e = &buf[DIR_OFF + i * 8..DIR_OFF + (i + 1) * 8];
+                let id = u16::from_be_bytes([e[0], e[1]]) as usize;
+                if id == 0 {
+                    prev_end = None;
+                    continue;
+                }
+                let size = u16::from_be_bytes([e[2], e[3]]) as usize;
+                let page = u16::from_be_bytes([e[4], e[5]]) as usize;
+                if id > MAX_BLOCKS || page > MAX_BLOCKS || size == 0 {
+                    return None;
+                }
+                let pages = (size - 1) / 256 + 1;
+                if page + pages > MAX_BLOCKS {
+                    return None;
+                }
+                if let Some(expected) = prev_end {
+                    if page != expected {
+                        return None;
+                    }
+                }
+                prev_end = Some(page + pages);
+            }
+            Some(seq)
+        };
+
+        let b0 = &self.board.flash[BANK0..BANK0 + BANK_SIZE];
+        let b1 = &self.board.flash[BANK1..BANK1 + BANK_SIZE];
+        let (active, target_addr, new_seq) = match (valid_bank(b0), valid_bank(b1)) {
+            (Some(s0), Some(s1)) if s1 > s0 => (Some(b1), BANK0, s1.checked_add(1).ok_or("flash store sequence overflow")?),
+            (Some(s0), Some(_)) => (Some(b0), BANK1, s0.checked_add(1).ok_or("flash store sequence overflow")?),
+            (Some(s0), None) => (Some(b0), BANK1, s0.checked_add(1).ok_or("flash store sequence overflow")?),
+            (None, Some(s1)) => (Some(b1), BANK0, s1.checked_add(1).ok_or("flash store sequence overflow")?),
+            (None, None) => (None, BANK0, 1),
+        };
+        if new_seq == u32::MAX {
+            return Err("flash store sequence overflow".into());
         }
+
+        let mut sector = match active {
+            Some(src) => src.to_vec(),
+            None => {
+                let mut s = vec![0u8; BANK_SIZE];
+                s[MAGIC_OFF..MAGIC_OFF + 8].copy_from_slice(&MAGIC);
+                s
+            }
+        };
+
+        // Update block #6 in-place if present, otherwise append it after the last used page.
+        let mut updated = false;
+        let mut free_slot = None;
+        let mut next_page = 0usize;
+        for i in 0..MAX_BLOCKS {
+            let off = DIR_OFF + i * 8;
+            let id = u16::from_be_bytes([sector[off], sector[off + 1]]);
+            if id == 0 {
+                if free_slot.is_none() {
+                    free_slot = Some(i);
+                }
+                break;
+            }
+            let size = u16::from_be_bytes([sector[off + 2], sector[off + 3]]) as usize;
+            let page = u16::from_be_bytes([sector[off + 4], sector[off + 5]]) as usize;
+            let pages = (size - 1) / 256 + 1;
+            next_page = page + pages;
+            if id == 6 {
+                if size < block.len() {
+                    return Err("existing THF_FLASH block #6 is smaller than 40 bytes".into());
+                }
+                sector[page * 256..page * 256 + block.len()].copy_from_slice(&block);
+                updated = true;
+                break;
+            }
+        }
+        if !updated {
+            let slot = free_slot.ok_or("flash store directory is full")?;
+            if next_page >= MAX_BLOCKS {
+                return Err("flash store has no free pages for THF_FLASH".into());
+            }
+            let off = DIR_OFF + slot * 8;
+            sector[off..off + 2].copy_from_slice(&6u16.to_be_bytes());
+            sector[off + 2..off + 4].copy_from_slice(&40u16.to_be_bytes());
+            sector[off + 4..off + 6].copy_from_slice(&(next_page as u16).to_be_bytes());
+            sector[off + 6..off + 8].copy_from_slice(&0u16.to_be_bytes());
+            sector[next_page * 256..next_page * 256 + block.len()].copy_from_slice(&block);
+        }
+
+        let sum = sum_words(&sector);
         sector[0x1fff8..0x1fffc].copy_from_slice(&sum.to_be_bytes());
-        sector[0x1fffc..0x20000].copy_from_slice(&1u32.to_be_bytes());
-        self.board.load(0x033e_0000, &sector);
+        sector[0x1fffc..0x20000].copy_from_slice(&new_seq.to_be_bytes());
+        self.board.load(target_addr as u32, &sector);
         Ok(())
     }
 
@@ -2187,6 +2318,61 @@ mod tests {
             0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a, 0x0b, 0x32,
         ];
         assert_eq!(aes128_encrypt(pt, key), expected);
+    }
+
+    #[test]
+    fn lock_pin_preserves_populated_flash_store() {
+        let build_bank = |entries: &[(u16, &[u8])], seq: u32| -> Vec<u8> {
+            let mut s = vec![0u8; 0x20000];
+            let mut page = 0usize;
+            for (i, &(id, data)) in entries.iter().enumerate() {
+                let off = 0x5d00 + i * 8;
+                s[off..off + 2].copy_from_slice(&id.to_be_bytes());
+                s[off + 2..off + 4].copy_from_slice(&(data.len() as u16).to_be_bytes());
+                s[off + 4..off + 6].copy_from_slice(&(page as u16).to_be_bytes());
+                s[page * 256..page * 256 + data.len()].copy_from_slice(data);
+                page += (data.len() - 1) / 256 + 1;
+            }
+            s[0x5fe8..0x5ff0].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            let mut sum = 0u32;
+            for chunk in s[..0x1fff8].chunks_exact(4) {
+                sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+            }
+            s[0x1fff8..0x1fffc].copy_from_slice(&sum.to_be_bytes());
+            s[0x1fffc..0x20000].copy_from_slice(&seq.to_be_bytes());
+            s
+        };
+
+        let mut m = Machine::for_model(crate::board::Model::Rnse193);
+        // Bank 0 (older, seq 3) has stale block #10; bank 1 (active, seq 7)
+        // has newer block #10 and an unlocked block #6 (state = 3).
+        let mut unlocked_thf = [0u8; 40];
+        unlocked_thf[0..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        unlocked_thf[30] = 3;
+        unlocked_thf[36..40].copy_from_slice(&0xedcb_a987u32.to_be_bytes());
+        let bank0 = build_bank(&[(10, b"stale-settings-v3")], 3);
+        let bank1 = build_bank(&[(10, b"live-settings-v7!"), (6, &unlocked_thf)], 7);
+        m.board.load(0x033e_0000, &bank0);
+        m.board.load(0x0340_0000, &bank1);
+
+        m.lock_pin().unwrap();
+
+        // Updated bank should be ping-ponged to bank 0 with sequence 8 (> 7),
+        // preserving block #10 from bank 1 and updating block #6 to locked (state = 2).
+        let updated = &m.board.flash[0x033e_0000..0x0340_0000];
+        assert_eq!(u32::from_be_bytes(updated[0x1fffc..0x20000].try_into().unwrap()), 8);
+        let mut sum = 0u32;
+        for chunk in updated[..0x1fff8].chunks_exact(4) {
+            sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+        }
+        assert_eq!(u32::from_be_bytes(updated[0x1fff8..0x1fffc].try_into().unwrap()), sum);
+        // Entry 0: block #10 preserved intact on page 0.
+        assert_eq!(u16::from_be_bytes([updated[0x5d00], updated[0x5d01]]), 10);
+        assert_eq!(&updated[0..17], b"live-settings-v7!");
+        // Entry 1: block #6 updated in-place on page 1 to grace = 0, state = 2.
+        assert_eq!(u16::from_be_bytes([updated[0x5d08], updated[0x5d09]]), 6);
+        assert_eq!(updated[256 + 24], 0);
+        assert_eq!(updated[256 + 30], 2);
     }
 
     /// A program for the 192 that puts `edges` edges on the watchdog

@@ -983,10 +983,15 @@ SoC-side drive (`navi.atapi`) identity to `ALPINE  DV33M01B/       2912`.
 `--pin NNNN` (`Machine::set_pin`) provisions `0x03ff403a` (and a
 default serial `AUZBZ700000001` at `0x03ff401f` if none was given) with
 the real AES-128 ciphertext, and `--pin-lock` (`Machine::lock_pin`)
-seeds block #6 in flash `0x033e0000` (and SRAM `0x2c14`) with
-`grace = 0, state = 2`.  The unmodified firmware then runs its own
-decode, shows the PIN screen with the serial at the bottom, rejects
-wrong entries, and unlocks when the right PIN is entered.
+updates or appends block #6 (`grace = 0, state = 2`) in the active bank
+of the `0x033e0000` / `0x03400000` flash store (preserving any other
+blocks and advancing the sequence number above both banks, and leaving
+an already-provisioned flash PIN intact unless `--pin` is also given).
+The layout is verified on `V5751050` and `V57510AA` (other 193 builds
+such as V574 or VB48 have not been checked; `Machine::pin_lock_verified`
+gates the test and warns on unverified builds).  The unmodified firmware
+then runs its own decode, shows the PIN screen with the serial at the
+bottom, rejects wrong entries, and unlocks when the right PIN is entered.
 
 ## Status
 

@@ -567,7 +567,7 @@ fn transport_channels_open() {
 fn pin_lock_shows_the_pin_entry_screen() {
     let Some(image) = disc() else { return };
     let variants = fw::load_variants(&image).unwrap();
-    let Some(v) = variants.iter().find(|v| rnse::board::Model::for_variant(&v.name) == Some(rnse::board::Model::Rnse193)) else {
+    let Some(v) = variants.iter().find(|v| v.module("OSM").is_some_and(|m| Machine::pin_lock_verified(&m.version))) else {
         return;
     };
     let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
@@ -595,16 +595,14 @@ fn pin_lock_shows_the_pin_entry_screen() {
     assert_eq!(unlocked.board.nvram[0x2c32], 3, "{}: unlocked SRAM state", v.name);
     assert_eq!(locked.board.nvram[0x2c32], 2, "{}: locked SRAM state", v.name);
     assert_eq!(locked.board.nvram[0x2c1a], 0, "{}: initial wrongpin_cnt", v.name);
-    if v.module("OSM").is_some_and(|m| matches!(m.version.as_str(), "V5751050" | "V57510AA")) {
-        // The 193's DVD drive INQUIRY product field populates 0x8e9de900.
-        let key: Vec<u8> = (0..16).map(|i| locked.peek8(0x8e9d_e900 + i).unwrap()).collect();
-        assert_eq!(key.as_slice(), b"DV33M01B/       ", "{}: ATAPI INQUIRY key", v.name);
-        // The real firmware AES-128 decode (0x8058cc7e) succeeded at boot.
-        assert_eq!(locked.peek8(0x8e9f_3d78), Some(1), "{}: boot PIN decode did not validate", v.name);
-        // The anti-theft state the application reads: 3 authorized vs 2 PIN required.
-        assert_eq!(unlocked.peek8(0x8e9f_3d61), Some(3), "{}: unlocked state", v.name);
-        assert_eq!(locked.peek8(0x8e9f_3d61), Some(2), "{}: unit did not enter PIN-required state", v.name);
-    }
+    // The 193's DVD drive INQUIRY product field populates 0x8e9de900.
+    let key: Vec<u8> = (0..16).map(|i| locked.peek8(0x8e9d_e900 + i).unwrap()).collect();
+    assert_eq!(key.as_slice(), b"DV33M01B/       ", "{}: ATAPI INQUIRY key", v.name);
+    // The real firmware AES-128 decode (0x8058cc7e) succeeded at boot.
+    assert_eq!(locked.peek8(0x8e9f_3d78), Some(1), "{}: boot PIN decode did not validate", v.name);
+    // The anti-theft state the application reads: 3 authorized vs 2 PIN required.
+    assert_eq!(unlocked.peek8(0x8e9f_3d61), Some(3), "{}: unlocked state", v.name);
+    assert_eq!(locked.peek8(0x8e9f_3d61), Some(2), "{}: unit did not enter PIN-required state", v.name);
     // And the screen is a different one, with content drawn on it.
     assert_ne!(open_screen, pin_screen, "{}: --pin-lock drew the same screen", v.name);
     let lit = pin_screen.chunks(3).filter(|p| p.iter().any(|&c| c > 0x40)).count();
@@ -647,9 +645,7 @@ fn pin_lock_shows_the_pin_entry_screen() {
     assert_eq!(locked.run(2_000 * ms), Stop::Budget);
     assert_eq!(locked.board.nvram[0x2c32], 3, "{}: right PIN did not unlock the unit", v.name);
     assert_eq!(locked.board.nvram[0x2c1a], 0, "{}: right PIN did not clear wrongpin_cnt", v.name);
-    if v.module("OSM").is_some_and(|m| matches!(m.version.as_str(), "V5751050" | "V57510AA")) {
-        assert_eq!(locked.peek8(0x8e9f_3d61), Some(3), "{}: unlocked RAM state", v.name);
-    }
+    assert_eq!(locked.peek8(0x8e9f_3d61), Some(3), "{}: unlocked RAM state", v.name);
 }
 
 /// The installed OS must get through its three entry points and reach

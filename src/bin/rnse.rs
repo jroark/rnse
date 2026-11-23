@@ -653,6 +653,9 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
     m.install_boot_stub(&v.name);
     m.trace_bios = o.trace_bios;
     if loader {
+        if o.pin.is_some() || o.pin_lock {
+            return Err("--pin and --pin-lock apply to the installed OS, not the update loader".into());
+        }
         m.start_loader(ldm, o.args);
         if o.strict {
             // Only here: the 193's OS takes a timer interrupt it has no
@@ -696,7 +699,10 @@ fn run(path: &str, rest: &[String], loader: bool) -> Result<(), Box<dyn std::err
             m.set_pin(pin)?;
         }
         if o.pin_lock {
-            if o.pin.is_none() {
+            if !v.module("OSM").is_some_and(|m| Machine::pin_lock_verified(&m.version)) {
+                eprintln!("--pin-lock: anti-theft flash layout is unverified for this OS build");
+            }
+            if o.pin.is_none() && !m.has_pin() {
                 m.set_pin(1234)?;
             }
             m.lock_pin()?;
@@ -1042,6 +1048,9 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
         i += 1;
     }
+    if loader && (pin.is_some() || pin_lock) {
+        return Err("--pin and --pin-lock apply to the installed OS, not --loader".into());
+    }
 
     let image = std::fs::read(path)?;
     let variants = fw::load_variants(&image)?;
@@ -1104,7 +1113,10 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
                 m.set_pin(code)?;
             }
             if pin_lock {
-                if pin.is_none() {
+                if !v.module("OSM").is_some_and(|m| Machine::pin_lock_verified(&m.version)) {
+                    eprintln!("--pin-lock: anti-theft flash layout is unverified for this OS build");
+                }
+                if pin.is_none() && !m.has_pin() {
                     m.set_pin(1234)?;
                 }
                 m.lock_pin()?;
@@ -1115,14 +1127,13 @@ fn ui(path: &str, rest: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         Ok(m)
     };
 
+    let mut m = build(ignition, disc)?;
     let shared = Arc::new(Mutex::new(Shared::default()));
     let addr = serve(&format!("{}:{}", bind, port), shared.clone())?;
     if pin_lock {
         println!("rnse: anti-theft PIN lock active (PIN {:04})", pin.unwrap_or(1234));
     }
     println!("rnse: {} running; open http://{}/ in a browser (Ctrl-C to quit)", what, addr);
-
-    let mut m = build(ignition, disc)?;
     let mut stopped: Option<String> = None;
     let mut last_rgb: Vec<u8> = Vec::new();
     let mut seq = 0u32;
