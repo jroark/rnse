@@ -153,15 +153,6 @@ pub struct Machine {
     pub drive: Option<Drive>,
     /// How many of the library's results have been replaced by the fix.
     pub gps_fixes: u64,
-    /// When set, the unit shows its anti-theft PIN entry screen, the
-    /// lock it demands after a loss of power.  The real decision comes
-    /// from a decode the emulator does not reproduce (see
-    /// `docs/hardware-193.md`, "Anti-theft"); this forces its outcome
-    /// instead: at the return of the boot anti-theft routine it writes
-    /// the "PIN required" state to the OS's scratch variables, the
-    /// values read from a real locked unit.  The tuple is that return
-    /// address and the (address, word) pairs to write, by OS build.
-    pub pin_lock: Option<(u32, [(u32, u32); 3])>,
     /// Frames sent to the unit periodically, standing in for the rest
     /// of the car: (frame, period in cycles, next due).
     can_cyclic: Vec<(Frame, u64, u64)>,
@@ -248,12 +239,16 @@ impl Machine {
         // A display frame every 60th of a second.
         let per_ms = cpu.io.pclk_div * cpu.io.pclk_hz / 1000;
         let frame = per_ms * 1000 / 60;
-        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, radio_keepalive_limit_ms: 420_000, radio_keepalive_at: 0, radio_keepalives: 0, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, pin_lock: None, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
+        let mut m = Machine { cpu, board: Board::for_model(model), console: Vec::new(), echo_console: true, radio_keepalive_limit_ms: 420_000, radio_keepalive_at: 0, radio_keepalives: 0, profile: None, frame_cycles: frame, resets: 0, real_rom: false, sound: None, speaker: None, decoded: VecDeque::new(), media_last: [[0; 2]; 2], next_sound: 0, watchdog: Watchdog::default(), watchdog_always: false, next_frame: frame, boot_calls: VecDeque::new(), reset_requested: false, trace_bios: false, bios_calls: BTreeMap::new(), bios_break: [0; 8], printf_hook: None, printf_hooks: Vec::new(), gps: None, drive: None, gps_fixes: 0, can_cyclic: Vec::new(), can_peers: Vec::new(), can_says: Vec::new(), can_seen: 0, can_waiting: VecDeque::new(), can_bus_free: 0, can_sending: None, ignition: false, trace_serial: false, radio: crate::dev::radio::Radio::new(), radio_present: true, panel: crate::dev::panel::Panel::new(), panel_present: true, panel_replies: VecDeque::new(), radio_replies: VecDeque::new(), panel_script: Vec::new() };
         if model == crate::board::Model::Rnse193 {
             // A bench 193 that got nothing from its software started
             // again 806 s after a program of the kit had taken over
             // (some ten seconds after the stock software's last 8a).
             m.radio_keepalive_limit_ms = 815_000;
+            // The 193's DVD drive as a bench unit's INQUIRY reported it.
+            // Its 16-byte product field ("DV33M01B/       ") is also the
+            // AES-128 key the OS uses to decode the anti-theft PIN.
+            m.atapi().identity = Some(b"ALPINE  DV33M01B/       2912");
         }
         if model == crate::board::Model::Rnse192 {
             // The 192's drive as one was measured (docs/boot-rom.md, "A
@@ -488,34 +483,79 @@ impl Machine {
         }
     }
 
-    /// Where the boot anti-theft routine returns, and the OS scratch
-    /// variables and values that mean "PIN required", by OS build: what
-    /// [`lock_pin`](Self::lock_pin) forces to show the PIN entry screen.
-    /// The values are those read from a real locked unit (unit on its
-    /// PIN screen, `0x8e9f3d61` = state 2, not 3).  Known only for the
-    /// build the emulator draws the screen for so far.
-    pub fn known_pin_lock(os_version: &str) -> Option<(u32, [(u32, u32); 3])> {
-        match os_version {
-            "V57510AA" => Some((
-                0x8061_3e28,
-                [(0x8e9f_3d60, 0x0002_0000), (0x8e9f_3d74, 0x0080_0008), (0x8e9f_3d78, 0x01ff_0000)],
-            )),
-            _ => None,
+    /// Provision the 193's four-digit anti-theft PIN (`0..=9999`) in the
+    /// flash parameter block at `0x03ff_403a`.  The firmware stores
+    /// `AES128_encrypt([pin_u16_be][serial_14], key)` there, where `key`
+    /// is the 16-byte SCSI INQUIRY product field of the unit's DVD drive
+    /// (see `docs/hardware-193.md`, "Anti-theft").  If no serial number
+    /// has been set at `0x03ff_401f` yet, a default one (`AUZBZ700000001`)
+    /// is written so the firmware's serial-match check succeeds.
+    pub fn set_pin(&mut self, pin: u16) -> Result<(), String> {
+        if self.board.model != crate::board::Model::Rnse193 {
+            return Err("where the 192 keeps its PIN is not known".into());
         }
+        if pin > 9999 {
+            return Err("a PIN is four decimal digits (0000-9999)".into());
+        }
+        let mut serial = [0u8; 14];
+        serial.copy_from_slice(&self.board.flash[0x03ff_401f..0x03ff_401f + 14]);
+        if !serial.iter().all(|b| b.is_ascii_alphanumeric()) {
+            serial.copy_from_slice(b"AUZBZ700000001");
+            self.board.load(0x03ff_401f, &serial);
+        }
+        let key: [u8; 16] = match self.atapi().identity {
+            Some(id) => id[8..24].try_into().unwrap(),
+            None => *b"EMULATED DVD-ROM",
+        };
+        let mut plaintext = [0u8; 16];
+        plaintext[0..2].copy_from_slice(&pin.to_be_bytes());
+        plaintext[2..16].copy_from_slice(&serial);
+        let ciphertext = aes128_encrypt(plaintext, key);
+        self.board.load(0x03ff_403a, &ciphertext);
+        Ok(())
     }
 
-    /// Make the unit demand its anti-theft PIN (see
-    /// [`pin_lock`](Self#structfield.pin_lock)).  Returns false when the
-    /// OS build is not one the screen is known for.
-    pub fn lock_pin(&mut self, v: &Variant) -> bool {
-        let Some(hook) = v.module("OSM").and_then(|m| Self::known_pin_lock(&m.version)) else {
-            return false;
-        };
-        self.pin_lock = Some(hook);
-        if !self.cpu.breakpoints.contains(&hook.0) {
-            self.cpu.breakpoints.push(hook.0);
+    /// Seed the 193's persistent anti-theft (`THF_FLASH`, block #6) in
+    /// the flash block store at `0x033e_0000` (and its working mirror in
+    /// battery-backed SRAM at `0x2c14..0x2c3c`) in its post-power-loss
+    /// "PIN required" state (`grace = 0`, `state = 2`, `wrongpin_cnt = 0`).
+    /// Without a valid block #6 in flash `0x033e_0000`, the OS sees an
+    /// uninitialized store and initializes `THF_FLASH` with a 50-boot
+    /// factory grace counter (`+0x18 = 50`) that skips the PIN screen.
+    pub fn lock_pin(&mut self) -> Result<(), String> {
+        if self.board.model != crate::board::Model::Rnse193 {
+            return Err("where the 192 keeps its anti-theft state is not known".into());
         }
-        true
+        let mut block = [0u8; 40];
+        block[0..4].copy_from_slice(&0x1234_5678u32.to_be_bytes());
+        // +0x04..+0x06: lockout active flag (0 = normal)
+        // +0x06: wrongpin_cnt (0 = 2 attempts remaining)
+        block[7..23].copy_from_slice(b"DUMMY38P00000815");
+        // +0x18 (+24): factory grace counter (0 = anti-theft active)
+        block[30] = 2; // +0x1e: persisted state (2 = PIN required)
+        block[36..40].copy_from_slice(&0xedcb_a987u32.to_be_bytes());
+        self.board.nvram[0x2c14..0x2c3c].copy_from_slice(&block);
+
+        // Bank 0 of the 193's 93-block flash store (0x033e_0000, 128 KiB):
+        //   +0x0000..+0x5d00: 93 x 256-byte pages (page 0 = THF_FLASH)
+        //   +0x5d00..+0x5fe8: 93 x 8-byte directory entries (id, size, page, 0)
+        //   +0x5fe8..+0x5ff0: magic [1, 2, 3, 4, 5, 6, 7, 8]
+        //   +0x1fff8..+0x1fffc: wrapping u32 sum of 0x0000..0x1fff8
+        //   +0x1fffc..+0x20000: sequence number (1)
+        let mut sector = vec![0u8; 0x20000];
+        sector[0..40].copy_from_slice(&block);
+        sector[0x5d00..0x5d02].copy_from_slice(&6u16.to_be_bytes()); // block ID 6 (THF_FLASH)
+        sector[0x5d02..0x5d04].copy_from_slice(&40u16.to_be_bytes()); // size 40 bytes
+        sector[0x5d04..0x5d06].copy_from_slice(&0u16.to_be_bytes()); // page 0
+        sector[0x5fe8..0x5ff0].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+        let mut sum = 0u32;
+        for chunk in sector[..0x1fff8].chunks_exact(4) {
+            sum = sum.wrapping_add(u32::from_be_bytes(chunk.try_into().unwrap()));
+        }
+        sector[0x1fff8..0x1fffc].copy_from_slice(&sum.to_be_bytes());
+        sector[0x1fffc..0x20000].copy_from_slice(&1u32.to_be_bytes());
+        self.board.load(0x033e_0000, &sector);
+        Ok(())
     }
 
     /// The debug `printf` of the navigation application (module `APM`),
@@ -1852,17 +1892,6 @@ impl Machine {
                 let saved = std::mem::take(&mut self.cpu.breakpoints);
                 self.cpu.run(&mut self.board, 1);
                 self.cpu.breakpoints = saved;
-            } else if stop == Stop::Breakpoint && self.pin_lock.is_some_and(|(at, _)| at == self.cpu.pc) {
-                // The boot anti-theft routine has decided; write the
-                // "PIN required" state over its result so the unit asks
-                // for its PIN.
-                let (_, writes) = self.pin_lock.unwrap();
-                for (addr, word) in writes {
-                    self.poke32(addr, word);
-                }
-                let saved = std::mem::take(&mut self.cpu.breakpoints);
-                self.cpu.run(&mut self.board, 1);
-                self.cpu.breakpoints = saved;
             } else if stop != Stop::Budget {
                 return stop;
             }
@@ -2058,9 +2087,107 @@ impl Machine {
     }
 }
 
+/// Standard AES-128 single-block encryption (FIPS-197), used to
+/// provision the 193's flash parameter block at `0x03ff_403a` so the
+/// unit's own firmware decrypts and verifies the anti-theft PIN.
+fn aes128_encrypt(block: [u8; 16], key: [u8; 16]) -> [u8; 16] {
+    #[rustfmt::skip]
+    const SBOX: [u8; 256] = [
+        0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+        0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+        0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+        0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+        0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+        0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+        0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+        0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+        0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+        0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+        0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+        0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+        0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+        0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+        0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+        0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16,
+    ];
+    const RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
+    let xtime = |a: u8| -> u8 { (a << 1) ^ if a & 0x80 != 0 { 0x1b } else { 0 } };
+
+    // Key expansion: 11 round keys (44 words).
+    let mut rk = [[0u8; 16]; 11];
+    rk[0] = key;
+    for r in 1..=10 {
+        let prev = rk[r - 1];
+        let mut w = [
+            SBOX[prev[13] as usize] ^ RCON[r - 1],
+            SBOX[prev[14] as usize],
+            SBOX[prev[15] as usize],
+            SBOX[prev[12] as usize],
+        ];
+        for c in 0..4 {
+            for i in 0..4 {
+                w[i] ^= prev[c * 4 + i];
+                rk[r][c * 4 + i] = w[i];
+            }
+        }
+    }
+
+    let mut s = block;
+    for i in 0..16 {
+        s[i] ^= rk[0][i];
+    }
+    for r in 1..=10 {
+        // SubBytes
+        for b in &mut s {
+            *b = SBOX[*b as usize];
+        }
+        // ShiftRows (column-major state)
+        let t = s;
+        for row in 0..4 {
+            for col in 0..4 {
+                s[row + 4 * col] = t[row + 4 * ((col + row) % 4)];
+            }
+        }
+        // MixColumns (rounds 1..=9)
+        if r < 10 {
+            for col in 0..4 {
+                let i = col * 4;
+                let (a0, a1, a2, a3) = (s[i], s[i + 1], s[i + 2], s[i + 3]);
+                let xor = a0 ^ a1 ^ a2 ^ a3;
+                s[i] = a0 ^ xor ^ xtime(a0 ^ a1);
+                s[i + 1] = a1 ^ xor ^ xtime(a1 ^ a2);
+                s[i + 2] = a2 ^ xor ^ xtime(a2 ^ a3);
+                s[i + 3] = a3 ^ xor ^ xtime(a3 ^ a0);
+            }
+        }
+        // AddRoundKey
+        for i in 0..16 {
+            s[i] ^= rk[r][i];
+        }
+    }
+    s
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aes128_fips_197_vector() {
+        let key = [
+            0x2b, 0x7e, 0x15, 0x16, 0x28, 0xae, 0xd2, 0xa6,
+            0xab, 0xf7, 0x15, 0x88, 0x09, 0xcf, 0x4f, 0x3c,
+        ];
+        let pt = [
+            0x32, 0x43, 0xf6, 0xa8, 0x88, 0x5a, 0x30, 0x8d,
+            0x31, 0x31, 0x98, 0xa2, 0xe0, 0x37, 0x07, 0x34,
+        ];
+        let expected = [
+            0x39, 0x25, 0x84, 0x1d, 0x02, 0xdc, 0x09, 0xfb,
+            0xdc, 0x11, 0x85, 0x97, 0x19, 0x6a, 0x0b, 0x32,
+        ];
+        assert_eq!(aes128_encrypt(pt, key), expected);
+    }
 
     /// A program for the 192 that puts `edges` edges on the watchdog
     /// strobe and then does nothing.
