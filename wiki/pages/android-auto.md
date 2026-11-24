@@ -1,13 +1,16 @@
 title: Android Auto
 order: 77
-summary: A phone's Android Auto on an RNS-E's own display, decoded by its own processor and driven by its own knob, through a small board in an SD slot: on the 192 since 18 November, on the 193 since 21 November.
+summary: A phone's Android Auto on an RNS-E's own display, decoded by its own processor and driven by its own knob, through a small board in an SD slot: on the 192 since 18 November, on the 193 since 21 November, and since 23 November over Wi-Fi from a single ESP32-S3.
 ---
 **A 192 can be an Android Auto head unit.** On 18 November a phone's Google Maps ran
 on the bench unit's own display at 10 to 13 pictures a second, decoded by the unit's
 own processor and driven with its own knob and keys, through a small board in an SD
 slot ([on the unit](#on-the-unit)). The same evening the phone's music played through
 the unit's own sound. On 21 November it ran on a **193** too, full screen at the
-phone's own 30 pictures a second ([on the 193](#on-the-193)).
+phone's own 30 pictures a second ([on the 193](#on-the-193)). On 23 November a single
+**ESP32-S3** took the place of the bridge and of the phone's cable: the phone reaches
+it over Wi-Fi, and it is itself the SD card the unit reads
+([the whole bridge on an ESP32-S3](#the-whole-bridge-on-an-esp32-s3)).
 
 This page follows how it got there: whether the 192 could decode the video at all,
 how fast an SD slot can carry it, the bridge between the phone and the slot, the
@@ -194,6 +197,7 @@ unit's own display: Google Maps in 3D beside the media card and the app bar, at 
 phone's own **30 pictures a second**, every picture shown.
 
 ![Android Auto full screen on the 193's display](/media/android-auto-193.jpg "Android Auto on the bench 193, 21 November: a Pixel's Google Maps in 3D beside the media card and the app bar, full screen at 800 × 480, through the bridge in slot 2, decoded by the 193's own processor. The map is blurred.")
+![The bridge's ribbon in the 193's second slot](/media/android-auto-193-slots.jpg "The same day with the display folded down: the bridge's ribbon goes into the second card slot behind it, and the Pico sits on top of the unit. The map is blurred.")
 
 - **Its own processor decodes, about three times as fast as a 192's.** A picture
   takes some 17 ms to decode, 15 ms to draw and 3 ms to read, so there is room to
@@ -205,8 +209,9 @@ phone's own **30 pictures a second**, every picture shown.
 - The same bridge serves it, on a Raspberry Pi Pico running at 250 MHz, in the
   unit's second slot; the viewer starts from a card in the first.
 - The unit's knob and keys drive the phone, as on the 192, and the eject key works.
-- **No sound yet.** The 193 plays sound through its own serial sound interface, for
-  which there is no driver yet.
+- **Sound came later.** The 193 plays sound through its own serial sound interface,
+  not a card processor; with a driver for it in the kit, the phone's music and
+  navigation voice were heard on the unit on 23 November.
 
 Two things had to be found on the unit first. The 193's display unit showed the
 kit's 256-colour picture as a flat light grey, though the stock software's own
@@ -217,4 +222,117 @@ reached the newest to show it; now it decodes them all and shows the last.
 
 Still open: drawing faster, which now costs nearly as much as decoding; the
 decoder's hottest loops in hand-written code; and a board that fits in the car in place of a Pico on
-a ribbon.
+a ribbon, which the next section begins.
+
+## The whole bridge on an ESP32-S3
+
+![Android Auto on the 193 through an ESP32-S3](/media/android-auto-esp32.jpg "The bench 193 on 23 November, with no RP2040 and no cable to the phone: the phone's music and Google Maps through an ESP32-S3 that is both the phone's Wi-Fi access point and the SD card in slot 2. The map is blurred.")
+
+On 23 November one **ESP32-S3** took the place of the Pico, and of the phone's cable
+too. The phone reaches it over Wi-Fi; it runs the Android Auto session, decrypts the
+video, and is itself the SD card the unit reads, through wires soldered inside the
+unit to the second slot's contacts. Android Auto ran on the bench 193 at **25 to 30
+pictures a second, with its sound**.
+
+![An ESP32-S3 development board](/media/esp32-s3-board.jpg "The board: an ESP32-S3-N16R8 development board, 16 MB of flash and 8 MB of PSRAM, with two USB-C sockets (a USB serial port for the log and the chip's own USB).")
+
+**The phone over Wi-Fi, with no Bluetooth.** Wireless Android Auto is normally
+started over classic Bluetooth, which the ESP32-S3 does not have (it has Bluetooth
+LE only). Android Auto's developer settings have another way in: a *head unit
+server* on the phone, on TCP port 5277, that a head unit connects to over the
+network. A Mac tried it first: a full session with a Pixel, every channel opened, no
+Bluetooth. On the ESP32-S3 the bridge is its own Wi-Fi access point (2.4 GHz, WPA2);
+the phone joins it, and the bridge connects to the phone's server, every two seconds
+until it answers. A phone that leaves the network and comes back gets its session
+again by itself. The server has to be started on the phone (Android Auto's developer
+settings, *Start head unit server*).
+
+**The SD card without programmable I/O.** The RP2040 answers the card's commands
+with its PIO state machines, on the host's clock. The ESP32-S3 has nothing like them
+and no SD card (slave) peripheral, so three of its peripherals share the work:
+
+- the **camera interface** (LCD_CAM) takes CMD and DAT0 at every rising edge of the
+  slot's clock and the DMA controller writes a byte for each into a ring in memory;
+- a loop on the chip's **second core**, which does nothing else and takes no
+  interrupt, finds the host's commands in that ring and answers them with the same
+  card code as the RP2040's;
+- **two SPI controllers as slaves** on the slot's clock shift the answers out: one
+  the responses on CMD, the other, fed by DMA, the blocks of data on DAT0. The loop
+  turns each on and off at the right clock by tying its select line from inside the
+  chip.
+
+Wi-Fi, the encryption and the session run on the first core. A response begins about
+80 of the host's clocks after its command, a little more than the SD specification's
+64, which the 193 accepts (as it accepted the Pico's 70).
+
+![The ribbon soldered to slot 2's contacts](/media/esp32-slot-wires.jpg "Inside the 193: the wires soldered to the back of the second card slot's contacts, CLK, CMD, DAT0 and ground, leaving the slot itself empty.")
+
+**How fast.** A test program on the 193 read the bridge's 8 MB test file and checked
+every word, at the stock clock of the 193's SD host (24.9 MHz, measured by the
+bridge) and at half of it:
+
+| Read | Clock | KB/s | Wrong sectors |
+|---|---|---|---|
+| one sector a command, 256 sectors | 24.9 MHz | 1687 | 0 |
+| 8 sectors a command, 1024 sectors | 24.9 MHz | 2617 | 0 |
+| 64 sectors a command, 2048 sectors | 24.9 MHz | 2809 | 0 |
+| 256 sectors a command, 4096 sectors | 24.9 MHz | 2814 | 0 |
+| one sector a command, 256 sectors | half | 1075 | 0 |
+| 256 sectors a command, 4096 sectors | half | 1331 | 0 |
+
+The same with the Wi-Fi access point running. The Pico gave 2.9 MB/s; the phone's
+video needs 200 to 400 KB/s.
+
+Three faults behind stalls and stuttering sound were found on the unit and fixed:
+
+- **The card damaged its own commands.** The system's timer interrupted the card's
+  loop every millisecond; when that fell on a response, the loop let the CMD line go
+  late, the SPI controller drove it low after its last bit, and the loop took that for
+  a damaged command and reported it in its next answer. About one command in 1500;
+  the unit then gave up a read. The card's core now takes no interrupt at all.
+- **Sound dropped whenever a big picture came.** The stream to the unit kept the
+  Pico's 63 KB of blocks, and the first picture of a new screen (50 KB and more) nearly
+  filled it: at the start and whenever Maps opened, the bridge dropped sound. The
+  stream is now half a megabyte, in the board's PSRAM.
+- **The link was slower than the music.** The network stack's receive window was
+  its default of 5.6 KB, so whenever a round trip over Wi-Fi was slow the phone's bytes
+  came at 150 to 230 KB/s, and music alone is about 190 KB/s: the unit's sound ran
+  dry every few seconds. With a 64 KB window it did not run dry once in the two
+  minutes measured.
+
+![The 193's main board wired to the ESP32-S3](/media/esp32-main-board.jpg "The 193's main board out of the unit, with the ribbon from the second slot's contacts to the ESP32-S3: three signal lines and ground.")
+
+**Wiring.** Three signal lines and ground, from the second slot's contacts to the
+board, each signal through a 100 Ω resistor at the board's end:
+
+| ESP32-S3 | Signal | SD contact |
+|---|---|---|
+| GPIO 12 | CLK, through 100 Ω | 5 |
+| GPIO 11 | CMD, through 100 Ω | 2 |
+| GPIO 13 | DAT0, through 100 Ω | 7 |
+| GND | ground | 3 and 6 (VSS) |
+| none | VDD | 4: not connected |
+| none | DAT1, DAT2, DAT3 | 8, 9, 1: not connected |
+
+GPIO 4 is used inside the chip and stays unconnected. The board is powered from its
+own USB socket. The slot's 3.3 V is there even with no card in, but how much current
+it can give has not been measured, and the ESP32-S3 draws up to some 350 mA in bursts
+while it transmits, so it does not power the board. The 193 started the card with the
+slot itself empty.
+
+The firmware is built with Espressif's ESP-IDF (v5.5) and flashed over the board's
+USB serial port; its source is the `esp32/` directory of
+[rnse-sdbridge](https://github.com/jroark/rnse-sdbridge), and the bridge needs a
+head unit certificate of its own, which is not supplied.
+
+Not done yet:
+
+- **A 192.** Its card processors clock the card at 16.9 MHz, slower than the 193's
+  host, but the 192 knows a card by the slot's switch, which a card end or the
+  wires inside would have to close.
+- **Starting without touching the phone.** The head unit server is a developer
+  setting started by hand; in a car, Android Auto would be started over Bluetooth or
+  by a helper app on the phone.
+- **The picture.** The phone sends its video at 200 to 400 KB/s over this link, and
+  the picture looks compressed; why the phone chooses so low a rate is not known yet.
+- **Power and a home for the board** in the car.
