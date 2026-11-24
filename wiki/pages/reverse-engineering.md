@@ -197,3 +197,4 @@ says what that unit has confirmed and what is still inferred.
 | 18 Nov | the SD slots read at 2 MB/s on the unit; Android Auto on the 192's own display, Google Maps at 10 to 13 pictures a second, driven by the unit's knob and keys, with the phone's sound |
 | 20 Nov | a 193 on the bench: its boards photographed, the first programs on it, its processor identified as an SH-4A; an SD loader for the 193, the screen, the faceplate and both SD slots working |
 | 21 Nov | Android Auto on the 193's display, full screen at 30 pictures a second; a monitor on a bench 193 driven over CAN from scripts, which finds the kit's clock running twice too fast, the reason for its silent CAN bus, and what the radio processor wants so as not to restart the unit |
+| 23 Nov | Android Auto on the 193 through one ESP32-S3: the phone over Wi-Fi with no Bluetooth, and the ESP32-S3 itself the SD card, read at 2.8 MB/s with every word right |
