@@ -236,12 +236,11 @@ command word was programmed as data. Neither the stock software nor anything of
 the kit writes that value to that address.
 
 The eject fix had not caused it: it wrote three words of battery-backed memory
-and no flash. But it did make the damage show sooner than it might have, by
-letting the disc out.
+and no flash, and the stock software ran after it.
 
-Why the unit had run for an hour on that software is not settled. It had only
-been restarted since the update, never switched off; the likely reading is that
-the ROM adds the operating system up at a cold start only.
+Why the unit had run for an hour on that software is not settled. The likely
+reading is that it had only been restarted since the update, never switched
+off, and that the ROM adds the operating system up at a cold start only.
 
 The way back was the ordinary one: the update disc in, and the ROM installed
 all of it. The same check afterwards found all five modules right, and the
