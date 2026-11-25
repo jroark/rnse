@@ -209,6 +209,46 @@ put the channel back to 0 with the block's sum: three words of battery-backed
 memory, written only after the marks, the sum and the value were found as
 expected. The stock software has ejected since.
 
+### One wrong word, and the boot ROM asks for a disc
+
+Minutes after that fix the same unit came up from a power cycle with a bare
+screen: 専用ディスクを入れて下さい, "Set Original CD-ROM". That is the boot ROM,
+which had found no software it would start and waits for an update disc. Nothing
+is drawn by the software; nothing is sent on the CAN bus except network
+management once the ignition message is there.
+
+The ROM takes a loader from any disc that carries one, so the SD loader's disc
+went in first, and the ROM started it. Three small programs sent over the bus
+then read the flash, writing nothing:
+
+- The module directory was whole, and four of the five modules added up to the
+  sums in their headers. The operating system did not.
+- Sums of every 4 KiB of it, compared with the module on the disc it was installed
+  from, differed in one page.
+- That page, sent whole, differed in one word: `0x00020028` at `0x00401554` where
+  the disc has `0x52532269`.
+
+The wrong value is the right one with `0x00aa00aa` programmed over it, flash only
+ever clearing bits. And `0x00401554` is where the stock update loader writes
+`0x00aa00aa` to begin every write in that megabyte of the flash. So during the
+last update one of the loader's own write sequences slipped, and its first
+command word was programmed as data. Neither the stock software nor anything of
+the kit writes that value to that address.
+
+The eject fix had not caused it: it wrote three words of battery-backed memory
+and no flash. But it did make the damage show sooner than it might have, by
+letting the disc out.
+
+Why the unit had run for an hour on that software is not settled. It had only
+been restarted since the update, never switched off; the likely reading is that
+the ROM adds the operating system up at a cold start only.
+
+The way back was the ordinary one: the update disc in, and the ROM installed
+all of it. The same check afterwards found all five modules right, and the
+eject setting still at 0, now in the flash copies too, which the stock software
+had written back by itself. The check (`flashchk193` in the kit) is worth
+running after any update, before the unit is switched off.
+
 ### The adaptation channels
 
 A tester asks one of three things of a channel: read it, try a value (forgotten

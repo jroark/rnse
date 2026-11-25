@@ -337,6 +337,18 @@ own guard (`sdk/src/flash.c`; `docs/custom-firmware.md`, "A program in
 flash").  Emulator only, all of it; `rnse boot` goes on through a
 watchdog reset when it runs a real ROM.
 
+A 193's ROM does the same, and a unit has shown it (V575, 2026-11-25):
+with one word of the OS module wrong in flash (`0x00401554`: the stock
+loader's own command word `0x00aa00aa` programmed over the data, a
+slipped write of the update before) it showed 専用ディスクを入れて下さい /
+"Set Original CD-ROM" after a power cycle, answered the ignition
+message with network management (0x436) and nothing else, started
+rnse-sdk's SD loader from its disc when that went in, and installed the
+stock update disc after it.  The unit had run on that flash through
+several restarts before, so the 193's ROM probably checks the sum at a
+cold start only; that is not established.  rnse-sdk's
+`examples/flashchk193` reads the directory and adds the modules up.
+
 `rnse loader` starts one directly, with interrupts masked and zeroes in
 r4-r6 unless told otherwise (`--args`).
 
