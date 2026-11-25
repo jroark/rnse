@@ -148,4 +148,5 @@ drive model.
 
 - [The 193's hardware](/hardware-193/): the 2010 unit, which works quite differently
 - [Firmware and update discs](/firmware/): what runs on all this
+- [Anti-theft PIN](/anti-theft/): how the 192 and 193 store and verify the four-digit PIN
 - [Reverse engineering](/reverse-engineering/): how the numbers above were measured

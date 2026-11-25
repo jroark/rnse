@@ -194,4 +194,4 @@ given speed and rate of turn, and the map follows.
 - How long a timer's request really lingers is not known; the emulator's figure is
   only long enough to catch a handler like the kit's old one.
 
-See also [The 192's hardware](/hardware-192/) and [The emulator](/the-emulator/).
+See also [The 192's hardware](/hardware-192/), [Anti-theft PIN](/anti-theft/) and [The emulator](/the-emulator/).
