@@ -244,9 +244,9 @@ off, and that the ROM adds the operating system up at a cold start only.
 
 The way back was the ordinary one: the update disc in, and the ROM installed
 all of it. The same check afterwards found all five modules right, and the unit
-then came up in its stock software from a power cycle. The
-eject setting still at 0, now in the flash copies too, which the stock software
-had written back by itself. The check (`flashchk193` in the kit) is worth
+then came up in its stock software from a power cycle. The eject setting was
+still at 0, now in the flash copies too, which the stock software had written
+back by itself. The check (`flashchk193` in the kit) is worth
 running after any update, before the unit is switched off.
 
 ### The adaptation channels
