@@ -176,6 +176,86 @@ Between GPS fixes the navigation reckons its position from speed pulses and a
 gyroscope, sampled by the A/D converter. The emulator can set the car moving at a
 given speed and rate of turn, and the map follows.
 
+## The unit that would not eject
+
+One bench 193 read discs, took updates and answered every key under its stock
+software, but never gave a disc back. Drives and faceplates swapped in from other
+units made no difference, and the same parts ejected in those units. Our own loader
+ejected at once on the same unit, since it sends the drive its command itself.
+
+The cause was a setting. The stock software keeps its diagnostic **adaptation
+channels**, the values a workshop tester reads and writes, in the battery-backed
+memory: 39 values of 16 bits in a block at `0x18003de4`, between two marks and
+with their sum, and a copy in the flash memory for the day the battery-backed
+memory is lost. Its CD EJECT routine looks at **channel 67** first, and when that
+holds 255 it logs `CDS_Eject2` and does nothing. This unit had 255 there. How it
+got there is not known; the unit was never coded to a car.
+
+The stock eject has four ways to refuse, each with its own line in the log
+(`acon_hkejct_proc-NG` follows a refusal, `-OK` an eject):
+
+| log | why |
+|-----|-----|
+| `CDS_Eject2` | adaptation channel 67 is 255: the eject is switched off |
+| `CDS_Eject3` | the drive is in one of two states (10 and 11 of its own count; which they are is not worked out) |
+| `CDS_Eject4` | there is no disc |
+| `CDS_Eject1` | the display is not open |
+| `CDS_Eject0` | it ejects |
+
+The emulator runs all of them on the stock software. On the unit, a small program
+of the kit started from the loader read the block over the CAN bus (channel 67 at
+255, in the battery-backed memory and in both copies in flash), and a second one
+put the channel back to 0 with the block's sum: three words of battery-backed
+memory, written only after the marks, the sum and the value were found as
+expected. The stock software has ejected since.
+
+### The adaptation channels
+
+A tester asks one of three things of a channel: read it, try a value (forgotten
+again afterwards), or save one. The routine behind each channel names itself in
+its error message, which is where the names here come from. What each does beyond
+its name is read from its code, and only channel 67 has been tried on a unit.
+
+**Stored settings**
+
+| channel | name in the software | what it is | default |
+|---------|----------------------|------------|---------|
+| 1 | `tirelen` | the tyre's circumference in mm (1000 to 2500) | by region |
+| 2 | `tirelen` | pulses for a turn of the wheel | 48, 43 or 45 by region |
+| 3 | `config` | a set of bits, not worked out | 7 |
+| 4 | `RvcActivation` | the rear view camera; 1 and 2 switch it on | 0 |
+| 5 | `vthreshold1` | a speed threshold, tied to channel 63 | 1 |
+| 7 | `config2` | four bits, not worked out | 15 |
+| 8 | (none) | a setting of the sound, 0 to 5; anything else is read as 3 | 3 |
+| 10 | (none) | not worked out | 0 |
+| 16 | `NoNavi` | navigation switched off | 0 |
+| 17 | `enabfunc2` | functions enabled, a set of bits | 0 |
+| 18 | `StartUpScreen` | the picture the unit starts with, 1 to 10 by region | 0 |
+| 63 | `secaccess` | the security access code | 0 |
+| 67 | `eject` | tried with 1: eject now. Saved as 255: CD EJECT refused | 0 |
+| 70 | `displight` | the display's light | 2 |
+| 97 | `swupgrade` | the state of a software update | 0 |
+| 99 | `transmode` | transport mode; 1 is on | 0 |
+| 129 to 139 | `cstkey`, `cstpwoff`, `cstent`, `cstdrvpos`, `cstansw`, `cstautored1`, `cstautoredrpt` | seven values kept together, not worked out | 10, 10, 12, 5, 10, 10, 60 |
+
+**Tests**, which store nothing and only start something:
+
+| channel | name in the software | what it does |
+|---------|----------------------|--------------|
+| 64 | `swchksum` | the software's checksum |
+| 65 | `diskread` | a read test of the disc |
+| 66 | `self` | the self test |
+| 68, 114, 115, 118, 119 | `tstimage` and unnamed | test pictures |
+| 69 | `dispmec` | the display's mechanism run |
+| 112 | `sourcesw` | the sound source, 1 to 4 |
+| 117 | `soundpos` | the loudspeakers one at a time |
+| 123 | `volume` | the volume |
+| 125 | `settings` | the user's settings, read out or reset |
+| 98, 111, 116 | `trgtowtch` and unnamed | not worked out |
+
+No answer to a tester has been had from a unit over the CAN bus; the stock
+software's adaptation code sits behind its K-line task.
+
 ## What is still open
 
 - Much of the address table above is still inferred. The processor, the timers, the
