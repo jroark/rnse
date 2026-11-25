@@ -344,7 +344,8 @@ slipped write of the update before) it showed 専用ディスクを入れて下�
 "Set Original CD-ROM" after a power cycle, answered the ignition
 message with network management (0x436) and nothing else, started
 rnse-sdk's SD loader from its disc when that went in, and installed the
-stock update disc after it.  The unit had run on that flash through
+stock update disc after it; with every module's sum right again it
+started the software from a power cycle.  The unit had run on that flash through
 several restarts before, so the 193's ROM probably checks the sum at a
 cold start only; that is not established.  rnse-sdk's
 `examples/flashchk193` reads the directory and adds the modules up.
