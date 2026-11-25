@@ -1148,6 +1148,109 @@ gates the test and warns on unverified builds).  The unmodified firmware
 then runs its own decode, shows the PIN screen with the serial at the
 bottom, rejects wrong entries, and unlocks when the right PIN is entered.
 
+## Adaptation, and when the stock software ejects
+
+The diagnostic adaptation channels of the stock software are 39 values
+of 16 bits in the battery-backed memory, a block of 0xac bytes at
+`0x18003de4` (addresses of the code are V575 10AA's):
+
+| offset | what |
+|--------|------|
+| +0x00 | mark `0x12345678` |
+| +0x04 | version, `0x02220004` |
+| +0x08 | the sum of the 39 values (`0x80675f24`) |
+| +0x0c | the values, in the order of the channel table at `0x804b8270`: 64, 65, 1, 2, 66, 67, 69, 68, 70, 99, 98, 63, 123, 117, 112, 3, 7, 114, 115, 118, 119, 97, 125, 129, 130, 135, 136, 137, 138, 139, 8, 16, 17, 5, 116, 111, 10, 4, 18 |
+| +0xa8 | mark `0xedcba987` |
+
+At its start (`0x80674f58`) the software takes the block as it is when
+the marks and the sum are right.  Only otherwise does it fetch the copy
+it keeps as block 3 of the flash store (`0x8058a3e4`), and, that one
+failing too, write the defaults.  The setter a tester's adaptation ends
+in (`0x80675366`) writes the value, the sum and the flash copy
+(`0x8058a564`).
+
+### The channels
+
+A tester's adaptation arrives at `Adp_main` (`0x80674a7e`), which hands
+each channel to a routine of its own with a request: 1 read, 2 test (a
+value tried, kept in a table in RAM at `0x8eacff64` and forgotten at
+the next read), 3 save (the value into the block, the sum and the flash
+copy), 4 a tick while a test runs.  The routines name themselves in
+their error messages (`[adp_eject] Unknown request = %d`), which is
+where the names below come from.  "Stored" channels have a save;
+the others only start something.  The defaults are what the software
+writes into an empty block (`0x80674fd8`); everything else starts at 0.
+The last column is the bench unit that would not eject (V575, read
+with rnse-sdk's `examples/adp193`).
+
+| channel | name in the software | kind | default | what is known | bench unit |
+|---------|----------------------|------|---------|---------------|-----------|
+| 1 | `adp_tirelen` | stored | by region | the tyre's circumference in mm; a save takes 1000 to 2500 | 2004 |
+| 2 | `adp_tirelen` | stored | 48, 43 or 45 by region | pulses for a turn of the wheel | 43 |
+| 3 | `adp_config` | stored | 7 | a set of bits, read by `0x80679a5e`; the bits not worked out | 7 |
+| 4 | `adp_RvcActivation` | stored | 0 | the rear view camera: 1 and 2 switch it on (`0x8066c8cc`) | 0 |
+| 5 | `adp_vthreshold1` | stored | 1 | a speed threshold; a save looks at channel 63 first | 1 |
+| 7 | `adp_config2` | stored | 15 | four bits, read by `0x80679a8e`; not worked out | 15 |
+| 8 | none | stored | 3 | a setting of the sound part (`0x805f37b6`), 0 to 5; anything else, 255 too, is read as 3 | 255 |
+| 10 | none | stored | 0 | not worked out | 0 |
+| 16 | `adp_NoNavi` | stored | 0 | navigation switched off | 0 |
+| 17 | `adp_enabfunc2` | stored | 0 | functions enabled, a set of bits; not worked out | 1 |
+| 18 | `adp_StartUpScreen` | stored | 0 | which picture the unit starts with, 1 to 10 by region | 4 |
+| 63 | `adp_secaccess` | stored | 0 | the security access (a code checked by `0x80677f52`) | 0 |
+| 64 | `adp_swchksum` | test | | the software's checksum, computed and answered | |
+| 65 | `adp_diskread` | test | | a read test of the disc, in areas, with a rate | |
+| 66 | `adp_self` | test | | the self test | |
+| 67 | `adp_eject` | stored | 0 | test with 1: eject now; **255 stored: CD EJECT refused** (below) | 255 |
+| 68 | `adp_tstimage` | test | | a test picture (`0x805a036a`) | |
+| 69 | `adp_dispmec` | test | | the display's mechanism run | |
+| 70 | `adp_displight` | stored | 2 | the display's light | 2 |
+| 97 | `adp_swupgrade` | stored | 0 | the software update's state, four bits at a time (15 a marker) | 0x0f00 |
+| 98 | `adp_trgtowtch` | test | | not worked out | |
+| 99 | `adp_transmode` | stored | 0 | transport mode: 1 on (`0x80602d20`), otherwise off (`0x80602e64`) | 0 |
+| 111 | none | test | | wants the pairs 0x55/0xaa and 0x1234/0x5678 in turn before it acts (`0x8060150e`); not tried, not worked out | |
+| 112 | `adp_sourcesw` | test | | the sound source, 1 to 4 | |
+| 114, 115 | none | test | | test pictures 3 and 4 | |
+| 116 | none | test | | not worked out | |
+| 117 | `adp_soundpos` | test | | the loudspeakers, 1 to 4 one at a time | |
+| 118, 119 | none | test | | test pictures 6 and 7 | |
+| 123 | `adp_volume` | test | 6 | the volume | 6 |
+| 125 | `adp_settings` | test | | the user's settings, read out or reset; not worked out | |
+| 129 | `adp_cstkey` | stored | 10 | the `cst` group: seven values kept together (`0x8067932a`); not worked out | 10 |
+| 130 | `adp_cstpwoff` | stored | 10 | | 10 |
+| 135 | `adp_cstent` | stored | 12 | | 12 |
+| 136 | `adp_cstdrvpos` | stored | 5 | | 5 |
+| 137 | `adp_cstansw` | stored | 10 | | 10 |
+| 138 | `adp_cstautored1` | stored | 10 | | 10 |
+| 139 | `adp_cstautoredrpt` | stored | 60 | | 60 |
+
+What each routine does beyond its name is read from its calls and the
+constants it compares, not tried on a unit, except channel 67.
+
+### When the stock software ejects
+
+CD EJECT goes to `0x805fa21a`, which logs the reason when it does not
+eject:
+
+| log | returned | why |
+|-----|----------|-----|
+| `CDS_Eject2` | 2 | **adaptation channel 67 is 255** (`0x80677820`): the eject is switched off |
+| `CDS_Eject3` | 3 | the drive's state is 10 or 11 |
+| `CDS_Eject4` | 4 | no disc |
+| `CDS_Eject1` | 1 | the display is not open (`0x805faaf8` is not 1) |
+| `CDS_Eject0` | 0 | it ejects (`cd_eject`, START STOP UNIT `1b .. 02`) |
+
+followed by `acon_hkejct_proc-OK` or `-NG`.  Channel 67 is the one a
+tester's value 1 ejects a disc through (rnse-sdk's `docs/car-bus.md`);
+255 in it is a lock.  A bench unit (V575, never coded to a car) came
+with it at 255: its stock software read discs, took updates and
+answered every key but never ejected, with any drive and any faceplate,
+while a program of the kit, which sends the drive its command itself,
+ejected at once.  The value was in that unit's dump of the
+battery-backed memory, offset `0x3dfa`.  `tests/disc.rs`
+`adaptation_channel_67_disables_the_eject_193` runs the three cases on
+the stock software; rnse-sdk's `examples/adp193` reads the block from a
+unit and `examples/adpclear193` puts the channel back to 0.
+
 ## Status
 
 What is known of each part, where from, and what drives it (2026-11-21).
