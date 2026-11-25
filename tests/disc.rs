@@ -648,6 +648,82 @@ fn pin_lock_shows_the_pin_entry_screen() {
     assert_eq!(locked.peek8(0x8e9f_3d61), Some(3), "{}: unlocked RAM state", v.name);
 }
 
+/// The 193's stock software ejects a disc for CD EJECT only with the
+/// display open, and not at all while adaptation channel 67 holds 255
+/// (`docs/hardware-193.md`, "Adaptation").  The values are 39 words in
+/// the battery-backed memory at offset 0x3df0, channel 67 the sixth,
+/// under a header at 0x3de4 whose third word is their sum.
+#[test]
+fn adaptation_channel_67_disables_the_eject_193() {
+    let Some(image) = disc() else { return };
+    let variants = fw::load_variants(&image).unwrap();
+    let Some(v) = variants.iter().find(|v| v.module("OSM").is_some_and(|m| m.version == "V57510AA")) else { return };
+    let index = fw::IndexInfo::from_disc(&image, &v.name).unwrap();
+    let mut m = Machine::for_model(rnse::board::Model::Rnse193);
+    m.echo_console = false;
+    m.install_boot_stub(&v.name);
+    m.install(v, &index);
+    m.atapi().load(image.clone());
+    m.set_ignition(true);
+    m.start_os(v).unwrap();
+    let printf = v.module("OSM").and_then(|os| Machine::known_printf(&os.version)).expect("printf address for this OS build");
+    m.hook_printf(printf);
+    let ms = m.cycles_per_ms();
+    assert_eq!(m.run(40_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert_eq!(&m.board.nvram[0x3de4..0x3de8], &[0x12, 0x34, 0x56, 0x78], "no adaptation block");
+
+    let word = |m: &Machine, at: usize| u16::from_be_bytes([m.board.nvram[at], m.board.nvram[at + 1]]) as u32;
+    let sum = |m: &Machine| (0..39).map(|i| word(m, 0x3df0 + 2 * i)).sum::<u32>();
+    let stored = |m: &Machine| word(m, 0x3dec) << 16 | word(m, 0x3dee);
+    assert_eq!(sum(&m), stored(&m), "the checksum is not the sum of the values");
+    let set = |m: &mut Machine, value: u16| {
+        m.board.nvram[0x3dfa..0x3dfc].copy_from_slice(&value.to_be_bytes());
+        let total = sum(m);
+        m.board.nvram[0x3dec..0x3df0].copy_from_slice(&total.to_be_bytes());
+    };
+    let press = |m: &mut Machine, key: &str, wait: u64| -> String {
+        let from = m.console.len();
+        assert!(m.panel_key(key, true));
+        assert_eq!(m.run(200 * ms), Stop::Budget);
+        assert!(m.panel_key(key, false));
+        assert_eq!(m.run(wait * ms), Stop::Budget, "{:?}", m.cpu.fault);
+        String::from_utf8_lossy(&m.console[from..]).into_owned()
+    };
+
+    // Display closed: refused, whatever the channel says.
+    let log = press(&mut m, "CD_EJECT", 2_000);
+    assert!(log.contains("CDS_Eject1") && log.contains("acon_hkejct_proc-NG"), "closed display:\n{log}");
+    assert_eq!(m.atapi().ejects, 0);
+
+    // Display open, channel 67 = 255: refused.
+    press(&mut m, "EJECT", 13_000);
+    set(&mut m, 0x00ff);
+    let log = press(&mut m, "CD_EJECT", 2_000);
+    assert!(log.contains("CDS_Eject2") && log.contains("acon_hkejct_proc-NG"), "channel 67 = 255:\n{log}");
+    assert_eq!(m.atapi().ejects, 0);
+
+    // Channel 67 = 0: the disc comes out.
+    set(&mut m, 0);
+    let log = press(&mut m, "CD_EJECT", 2_000);
+    assert!(log.contains("CDS_Eject0") && log.contains("acon_hkejct_proc-OK"), "channel 67 = 0:\n{log}");
+    assert_eq!(m.atapi().ejects, 1);
+
+    // A valid block in the battery-backed memory is taken as it is at
+    // the next start (the copy in the flash store is for a lost one).
+    set(&mut m, 0x00ff);
+    let kept = m.board.nvram.clone();
+    let mut m = Machine::for_model(rnse::board::Model::Rnse193);
+    m.echo_console = false;
+    m.install_boot_stub(&v.name);
+    m.install(v, &index);
+    m.board.nvram.copy_from_slice(&kept);
+    m.set_ignition(true);
+    m.start_os(v).unwrap();
+    assert_eq!(m.run(40_000 * ms), Stop::Budget, "{:?}", m.cpu.fault);
+    assert_eq!(word(&m, 0x3dfa), 0x00ff, "the value did not survive a restart");
+    assert_eq!(sum(&m), stored(&m));
+}
+
 /// The installed OS must get through its three entry points and reach
 /// its idle loop with the system tick running.
 #[test]

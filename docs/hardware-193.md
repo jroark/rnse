@@ -1148,6 +1148,50 @@ gates the test and warns on unverified builds).  The unmodified firmware
 then runs its own decode, shows the PIN screen with the serial at the
 bottom, rejects wrong entries, and unlocks when the right PIN is entered.
 
+## Adaptation, and when the stock software ejects
+
+The diagnostic adaptation channels of the stock software are 39 values
+of 16 bits in the battery-backed memory, a block of 0xac bytes at
+`0x18003de4` (addresses of the code are V575 10AA's):
+
+| offset | what |
+|--------|------|
+| +0x00 | mark `0x12345678` |
+| +0x04 | version, `0x02220004` |
+| +0x08 | the sum of the 39 values (`0x80675f24`) |
+| +0x0c | the values, in the order of the channel table at `0x804b8270`: 64, 65, 1, 2, 66, 67, 69, 68, 70, 99, 98, 63, 123, 117, 112, 3, 7, 114, 115, 118, 119, 97, 125, 129, 130, 135, 136, 137, 138, 139, 8, 16, 17, 5, 116, 111, 10, 4, 18 |
+| +0xa8 | mark `0xedcba987` |
+
+At its start (`0x80674f58`) the software takes the block as it is when
+the marks and the sum are right.  Only otherwise does it fetch the copy
+it keeps as block 3 of the flash store (`0x8058a3e4`), and, that one
+failing too, write the defaults.  The setter a tester's adaptation ends
+in (`0x80675366`) writes the value, the sum and the flash copy
+(`0x8058a564`).
+
+CD EJECT goes to `0x805fa21a`, which logs the reason when it does not
+eject:
+
+| log | returned | why |
+|-----|----------|-----|
+| `CDS_Eject2` | 2 | **adaptation channel 67 is 255** (`0x80677820`): the eject is switched off |
+| `CDS_Eject3` | 3 | the drive's state is 10 or 11 |
+| `CDS_Eject4` | 4 | no disc |
+| `CDS_Eject1` | 1 | the display is not open (`0x805faaf8` is not 1) |
+| `CDS_Eject0` | 0 | it ejects (`cd_eject`, START STOP UNIT `1b .. 02`) |
+
+followed by `acon_hkejct_proc-OK` or `-NG`.  Channel 67 is the one a
+tester's value 1 ejects a disc through (rnse-sdk's `docs/car-bus.md`);
+255 in it is a lock.  A bench unit (V575, never coded to a car) came
+with it at 255: its stock software read discs, took updates and
+answered every key but never ejected, with any drive and any faceplate,
+while a program of the kit, which sends the drive its command itself,
+ejected at once.  The value was in that unit's dump of the
+battery-backed memory, offset `0x3dfa`.  `tests/disc.rs`
+`adaptation_channel_67_disables_the_eject_193` runs the three cases on
+the stock software; rnse-sdk's `examples/adp193` reads the block from a
+unit and `examples/adpclear193` puts the channel back to 0.
+
 ## Status
 
 What is known of each part, where from, and what drives it (2026-11-21).
