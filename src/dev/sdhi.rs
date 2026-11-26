@@ -26,6 +26,9 @@ pub struct Card {
     storage: Storage,
     sectors: u64,
     writable: bool,
+    app: bool,
+    selected: bool,
+    four_bit: bool,
 }
 
 impl Card {
@@ -33,12 +36,12 @@ impl Card {
         let file = File::open(path)?;
         let bytes = file.metadata()?.len();
         Self::check_size(bytes)?;
-        Ok(Self { storage: Storage::File(file), sectors: bytes / 512, writable: false })
+        Ok(Self { storage: Storage::File(file), sectors: bytes / 512, writable: false, app: false, selected: false, four_bit: false })
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> io::Result<Self> {
         Self::check_size(bytes.len() as u64)?;
-        Ok(Self { sectors: bytes.len() as u64 / 512, storage: Storage::Bytes(bytes), writable: false })
+        Ok(Self { sectors: bytes.len() as u64 / 512, storage: Storage::Bytes(bytes), writable: false, app: false, selected: false, four_bit: false })
     }
 
     fn check_size(bytes: u64) -> io::Result<()> {
@@ -118,8 +121,6 @@ pub struct Sdhi {
     pub cards: [Option<Card>; 2],
     regs: [u16; 128],
     fifo: VecDeque<u8>,
-    app: bool,
-    selected: bool,
     pub commands: Vec<(u8, u32)>,
     pub bytes_read: u64,
     pub bytes_written: u64,
@@ -146,7 +147,7 @@ const SWITCH_MICROS: u64 = 15_000;
 impl Default for Sdhi {
     fn default() -> Self {
         let mut host = Self { cards: [None, None], regs: [0; 128], fifo: VecDeque::new(),
-            app: false, selected: false, commands: Vec::new(), bytes_read: 0, trace: false, micros: 0,
+            commands: Vec::new(), bytes_read: 0, trace: false, micros: 0,
             switching: None, bytes_written: 0, write_sector: 0, write_blocks: 0, write_block: Vec::new() };
         host.reset();
         host
@@ -161,8 +162,6 @@ impl Sdhi {
         self.regs[0x26 / 2] = 512;
         self.regs[0xe0 / 2] = 1;
         self.fifo.clear();
-        self.app = false;
-        self.selected = false;
         self.write_blocks = 0;
         self.write_block.clear();
     }
@@ -277,7 +276,6 @@ impl Sdhi {
         let cmd = (command & 0x3f) as u8;
         let arg = u32::from(self.regs[2]) | u32::from(self.regs[3]) << 16;
         self.commands.push((cmd, arg));
-        let app = std::mem::take(&mut self.app);
         self.fifo.clear();
         self.write_blocks = 0;
         self.write_block.clear();
@@ -288,12 +286,16 @@ impl Sdhi {
             if self.trace { println!("[sd] slot {} CMD{} {:08x}: no card", self.slot() + 1, cmd, arg); }
             return;
         }
-        let status = if self.selected { 0x900 } else { 0x700 };
+        let slot = self.slot();
+        let card = self.cards[slot].as_mut().unwrap();
+        let app = std::mem::take(&mut card.app);
+        let status = if card.selected { 0x900 } else { 0x700 };
         self.response(status);
+        let card = self.cards[slot].as_mut().unwrap();
         match (app, cmd) {
-            (_, 0) => { self.selected = false; self.response(0); }
+            (_, 0) => { card.selected = false; card.four_bit = false; self.response(0); }
             (_, 8) => self.response(arg & 0xfff),
-            (_, 55) => { self.app = true; self.response(status | 0x20); }
+            (_, 55) => { card.app = true; self.response(status | 0x20); }
             // Ready, 3.3 V, and whether the card is a high-capacity one.
             (true, 41) => {
                 let high = self.cards[self.slot()].as_ref().unwrap().high_capacity();
@@ -301,7 +303,7 @@ impl Sdhi {
             }
             (_, 2 | 10) => self.long_response(*b"\x01RNEMUSD\x10\x00\x00\x00\x01\x01\x01\x01"),
             (_, 3) => self.response(0x0001_0700),
-            (_, 7) => { self.selected = arg != 0; self.response(0x900); }
+            (_, 7) => { card.selected = arg != 0; self.response(0x900); }
             (_, 9) => {
                 let csd = self.cards[self.slot()].as_ref().unwrap().csd();
                 self.long_response(csd);
@@ -309,13 +311,14 @@ impl Sdhi {
             (true, 51) => self.data(vec![2, 5, 0, 0, 0, 0, 0, 0]),
             (true, 13) => {
                 let mut status = vec![0; 64];
-                status[0] = 0x80; // four-bit bus, as selected by ACMD6
+                status[0] = if card.four_bit { 0x80 } else { 0 };
                 status[8] = 2; // speed class 2
                 status[10] = 0x40; // 128 KiB allocation unit
                 status[12] = 1; // one allocation unit per erase group
                 self.data(status);
             }
-            (_, 12 | 13 | 16) | (true, 6) => {}
+            (true, 6) => card.four_bit = arg == 2,
+            (_, 12 | 13 | 16) => {}
             (false, 6) => self.data(vec![0; 64]),
             (false, 17 | 18) => {
                 let blocks = if cmd == 18 { self.regs[5].max(1) } else { 1 };
@@ -384,6 +387,29 @@ mod tests {
         let (timeout, low) = cmd8(&mut host);
         assert!(!timeout);
         assert_eq!(low & 0xfff, 0x1aa);
+    }
+
+    #[test]
+    fn commands_and_bus_width_belong_to_the_selected_card() {
+        let mut host = Sdhi::default();
+        for slot in &mut host.cards {
+            *slot = Some(Card::from_bytes(vec![0; 512 * 1024]).unwrap());
+        }
+        host.write(4, 1);
+        host.write(0, 7);
+        host.write(0, 55);
+        host.write(2, 1);
+        host.advance(SWITCH_MICROS);
+        host.write(0, 13);
+        assert_eq!(host.read(0x0c), 0x700);
+        assert!(!host.data_ready());
+        host.write(2, 0);
+        host.advance(SWITCH_MICROS);
+        host.write(4, 2);
+        host.write(0, 6);
+        host.write(0, 55);
+        host.write(0, 13);
+        assert_eq!(host.read(0x30), 0x8000);
     }
 
     /// CMD25 writes a writable card through the data port, a block each
