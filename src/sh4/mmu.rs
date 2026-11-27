@@ -48,6 +48,9 @@ pub struct Mmu {
     /// One-entry-per-slot cache of recent translations, flushed on any
     /// change to the TLB, ASID or privilege mode.
     soft: [(u32, u32, u8); 64],
+    /// C and WT from the most recent successful translated access.
+    pub(super) cacheable: bool,
+    pub(super) write_through: bool,
     pub ldtlb_count: u64,
 }
 
@@ -73,6 +76,8 @@ impl Mmu {
             utlb: [TlbEntry::default(); 64],
             itlb: [TlbEntry::default(); 4],
             soft: [(1, 0, 0); 64],
+            cacheable: false,
+            write_through: false,
             ldtlb_count: 0,
         }
     }
@@ -103,6 +108,8 @@ impl Mmu {
         let (tag, base, perm) = self.soft[slot];
         let need = if acc == Access::Write { 2 } else { 1 };
         if tag == (addr & 0xffff_f000) && perm & need != 0 {
+            self.cacheable = perm & 4 != 0;
+            self.write_through = perm & 8 != 0;
             return Ok(base | (addr & 0xfff));
         }
         let asid = (self.pteh & 0xff) as u8;
@@ -142,8 +149,11 @@ impl Mmu {
             return Err(Exc::mem(ExcKind::TlbProtRead, addr));
         }
         let pa = (e.ppn | (addr & !e.mask)) & 0x1fff_ffff;
+        self.cacheable = e.c;
+        self.write_through = e.wt;
         if e.sz != 0 {
-            let perm = (can_r as u8) | (((can_w && e.d) as u8) << 1);
+            let perm = (can_r as u8) | (((can_w && e.d) as u8) << 1)
+                | ((e.c as u8) << 2) | ((e.wt as u8) << 3);
             self.soft[slot] = (addr & 0xffff_f000, pa & 0xffff_f000, perm);
         }
         Ok(pa)

@@ -332,12 +332,23 @@ impl Cpu {
     }
 
     #[inline(always)]
+    fn paged(&self, addr: u32) -> bool {
+        self.mmu.enabled() && (addr < 0x8000_0000 || addr >= 0xc000_0000)
+    }
+
+    /// Called immediately after translation, including on a soft-TLB hit.
+    #[inline(always)]
+    fn cached(&self, addr: u32) -> bool {
+        super::cache::cacheable(addr) && (!self.paged(addr) || self.mmu.cacheable)
+    }
+
+    #[inline(always)]
     pub fn read8<B: Bus>(&mut self, bus: &mut B, addr: u32) -> Result<u8, Exc> {
         if addr >= 0xe000_0000 {
             return self.p4_read(bus, addr, 1).map(|v| v as u8);
         }
         let pa = self.translate(addr, Access::Read)?;
-        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+        if self.cache.enabled && self.cached(addr) && bus.is_ram(pa) {
             return Ok(self.cache.read(bus, pa, 1) as u8);
         }
         Ok(bus.read8(pa))
@@ -352,7 +363,7 @@ impl Cpu {
             return self.p4_read(bus, addr, 2).map(|v| v as u16);
         }
         let pa = self.translate(addr, Access::Read)?;
-        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+        if self.cache.enabled && self.cached(addr) && bus.is_ram(pa) {
             return Ok(self.cache.read(bus, pa, 2) as u16);
         }
         Ok(bus.read16(pa))
@@ -367,7 +378,7 @@ impl Cpu {
             return self.p4_read(bus, addr, 4);
         }
         let pa = self.translate(addr, Access::Read)?;
-        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+        if self.cache.enabled && self.cached(addr) && bus.is_ram(pa) {
             return Ok(self.cache.read(bus, pa, 4) as u32);
         }
         Ok(bus.read32(pa))
@@ -392,8 +403,9 @@ impl Cpu {
                 self.note_store(addr, v as u32, 1);
             }
         }
-        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
-            self.cache.write(bus, pa, 1, v as u32, addr);
+        if self.cache.enabled && self.cached(addr) && bus.is_ram(pa) {
+            let through = self.paged(addr).then_some(self.mmu.write_through);
+            self.cache.write_policy(bus, pa, 1, v as u32, addr, through);
             return Ok(());
         }
         bus.write8(pa, v);
@@ -414,8 +426,9 @@ impl Cpu {
                 self.note_store(addr, v as u32, 2);
             }
         }
-        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
-            self.cache.write(bus, pa, 2, v as u32, addr);
+        if self.cache.enabled && self.cached(addr) && bus.is_ram(pa) {
+            let through = self.paged(addr).then_some(self.mmu.write_through);
+            self.cache.write_policy(bus, pa, 2, v as u32, addr, through);
             return Ok(());
         }
         bus.write16(pa, v);
@@ -436,8 +449,9 @@ impl Cpu {
                 self.note_store(addr, v, 4);
             }
         }
-        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
-            self.cache.write(bus, pa, 4, v as u32, addr);
+        if self.cache.enabled && self.cached(addr) && bus.is_ram(pa) {
+            let through = self.paged(addr).then_some(self.mmu.write_through);
+            self.cache.write_policy(bus, pa, 4, v, addr, through);
             return Ok(());
         }
         bus.write32(pa, v);
@@ -454,7 +468,7 @@ impl Cpu {
             return Err(Exc::mem(ExcKind::AddrErrRead, addr));
         }
         let pa = self.translate(addr, Access::Exec)?;
-        if self.cache.enabled && super::cache::cacheable(addr) && bus.is_ram(pa) {
+        if self.cache.enabled && self.cached(addr) && bus.is_ram(pa) {
             // Through the instruction cache, every time: no page is
             // remembered.
             return Ok(self.cache.fetch(bus, pa, addr));
@@ -545,7 +559,7 @@ impl Cpu {
     pub(super) fn movca<B: Bus>(&mut self, bus: &mut B, addr: u32, v: u32) -> Result<(), Exc> {
         if self.cache.enabled && addr & 3 == 0 && super::cache::cacheable(addr) {
             let pa = self.translate(addr, Access::Write)?;
-            if bus.is_ram(pa) {
+            if self.cached(addr) && bus.is_ram(pa) {
                 self.cache.movca(bus, pa, v);
                 return Ok(());
             }
