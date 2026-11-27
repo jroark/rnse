@@ -1,6 +1,0 @@
-# Paths outside sdk/ that rnse-sdk takes with their whole history, as they
-# are (git filter-repo --paths-from-file), besides sdk/ and the names its
-# files had before they moved into it (split/tools/history.py).
-docs/custom-firmware.md
-docs/sd-loader.md
-docs/modern-192.md

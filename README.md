@@ -78,7 +78,7 @@ processors").  `--wav` records what comes out:
 ## Related repositories
 
 Software for the unit itself, which this emulator runs and tests, was
-split out of this repository with its history (`split/PLAN.md`):
+split out of this repository with its history:
 
 | Repository | What it is |
 |---|---|
@@ -291,7 +291,6 @@ written from the SH-4 manual instead (`src/sh4/tests.rs`).
     tools/          CPU test tooling, the wiki's generator
     web/, wiki/     the emulator in a browser, the site at rns-e.com
     macos/          the native macOS app
-    split/          how the other repositories were split from this one
     docs/           notes on the hardware and the firmware
 
 ## Legal
