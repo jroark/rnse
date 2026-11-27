@@ -1,6 +1,6 @@
-title: Linux on the 192
+title: Linux on the 192 and 193
 order: 75
-summary: A Linux kernel and a BusyBox shell on a real 192, started from an SD card and typed on with the faceplate's knob.
+summary: SD boot and rotary shell input on a bench 192, and the faceplate GUI, storage, radio and stereo playback on the emulated 193.
 ---
 The 192's main processor is an SH-4, a CPU that Linux has supported for twenty years.
 The project runs a current **Linux kernel (6.18) with a BusyBox shell** on it. It
@@ -145,9 +145,37 @@ missing altogether: GPS, writing to cards, and a compressed kernel.
 
 ## On the 193
 
-A port to the 193 is under way. In the emulator it boots to a BusyBox shell on the
-whole 800 × 480 screen in about a second. The kernel finds the R8A77730, keeps the
-watchdog served and takes over the kit's 16-bit picture as its framebuffer. CD EJECT and
-typing with the knob work as on the 192; RETURN held says that there is no loader to
-go back to, and Linux carries on. It has no drivers for the SD
-cards, the drive, CAN or sound yet, and it has not run on the bench 193.
+On the emulated 193, stock V575 firmware starts the SD loader from disc.
+Selecting `RNSE.BIN` loads `VMLINUX.BIN` from the card and opens the faceplate GUI
+on the 800 × 480 screen. An earlier kernel booted on a bench 193. The GUI and
+drivers described here have been tested together in the emulator only.
+
+![Linux home menu on the emulated 193](/media/linux-193-menu.png "The 193 framebuffer after an SD boot. Turn the main knob to choose a page and press it to open the selection.")
+
+- **Storage.** Both SD sockets share a controller. Linux mounts their FAT
+  filesystems read-only at `/media/sd0` and `/media/sd1`. The test reads
+  known bytes from the optical disc through `/dev/sr0`, then presses CD EJECT
+  during an active read and checks that the display opens and the disc comes out.
+- **Radio and sound.** The Radio page tunes the receiver and the volume knob
+  controls the amplifier. The Media page plays WAV and MP3 through the 193's
+  stereo output. For each format the test captured a 440 Hz tone on the left
+  and an 880 Hz tone on the right at 44.1 kHz.
+- **CAN and controls.** Linux sends and receives frames on `can0` while the
+  kernel log continues on CAN ID `0x7FA`. Choose Shell to type with the knob.
+  INFO returns to the GUI. Holding RETURN for two seconds brings back the SD
+  loader menu.
+
+### Reproduce the emulator run
+
+From the Linux checkout containing the port, run the following with Docker, the
+SDK checkout and a stock firmware ISO containing the 193 variant. The build
+writes `out/193/VMLINUX.BIN`. Set `RNSE_SDK` if the SDK is outside `../rnse-sdk`.
+
+```sh
+RNSE_UNIT=193 ./build.sh
+RNSE_DISC=/absolute/path/to/firmware.iso tools/test-193.sh
+```
+
+The Linux test pins the emulator revision used for the run. The corresponding
+changes are in the [Linux port](https://github.com/jroark/rnse-linux/pull/5)
+and the [emulator fixes](https://github.com/jroark/rnse/pull/26).
