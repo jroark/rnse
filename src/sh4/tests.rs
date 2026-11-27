@@ -8,6 +8,7 @@ use super::*;
 struct Ram(Vec<u8>);
 
 impl Bus for Ram {
+    fn is_ram(&self, addr: u32) -> bool { (addr as usize) < self.0.len() }
     fn read8(&mut self, a: u32) -> u8 {
         self.0[a as usize]
     }
@@ -467,4 +468,23 @@ fn sh4a_instructions_are_illegal_on_an_sh4() {
     cpu.pc = 0x8000_1000;
     cpu.step(&mut ram);
     assert_ne!(cpu.pc, 0x8000_1002, "synco ran on an SH-4");
+}
+
+#[test]
+fn mmu_page_cache_policy_applies_on_soft_tlb_hits() {
+    let mut cpu = Cpu::new();
+    let mut ram = Ram(vec![0; 0x8000]);
+    cpu.cache.enable(0x105);
+    cpu.mmu.mmucr = 1;
+    for (i, policy) in [0, 8, 9].into_iter().enumerate() {
+        let page = (i as u32 + 1) << 12;
+        cpu.mmu.pteh = page;
+        cpu.mmu.ptel = page | 0x174 | policy;
+        cpu.mmu.ldtlb();
+        cpu.write32(&mut ram, page, 11).unwrap();
+        cpu.write32(&mut ram, page + 4, 12).unwrap();
+        assert_eq!(ram.read32(page + 4), if policy == 8 { 0 } else { 12 });
+        ram.write32(page, 99);
+        assert_eq!(cpu.read32(&mut ram, page).unwrap(), if policy == 0 { 99 } else { 11 });
+    }
 }

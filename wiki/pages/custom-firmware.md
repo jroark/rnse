@@ -140,7 +140,7 @@ run, remove, reinstall stock) has been done on the bench unit.
 - **h264bench**: a measurement of whether the 192 could decode video at all
   ([Android Auto](/android-auto/)).
 - **linuxboot**: a second stage that starts a Linux kernel and a BusyBox shell from
-  the card ([Linux on the 192](/linux/)).
+  the card ([Linux on the 192 and 193](/linux/)).
 
 ## Games and other computers
 

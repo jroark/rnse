@@ -175,7 +175,15 @@ impl Cache {
     /// `addr`: in copy-back mode it stays in the cache, in write-through
     /// mode it goes to memory too.
     pub fn write<B: Bus>(&mut self, bus: &mut B, pa: u32, size: u32, v: u32, addr: u32) {
-        let through = if (0x8000_0000..0xa000_0000).contains(&addr) { !self.p1_copy_back } else { self.p0_write_through };
+        self.write_policy(bus, pa, size, v, addr, None);
+    }
+
+    pub(super) fn write_policy<B: Bus>(&mut self, bus: &mut B, pa: u32, size: u32, v: u32, addr: u32, page_wt: Option<bool>) {
+        let through = page_wt.unwrap_or(if (0x8000_0000..0xa000_0000).contains(&addr) {
+            !self.p1_copy_back
+        } else {
+            self.p0_write_through
+        });
         if !self.oc_on || through {
             match size {
                 1 => bus.write8(pa, v as u8),
