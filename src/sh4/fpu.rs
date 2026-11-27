@@ -462,16 +462,9 @@ impl Cpu {
                         Self::ftrc(self.in32(self.fs(n)) as f64)
                     };
                 }
-                0x4 => {
-                    // FNEG
-                    let i = if pr { n & !1 } else { n };
-                    self.fr[i] ^= 0x8000_0000;
-                }
-                0x5 => {
-                    // FABS
-                    let i = if pr { n & !1 } else { n };
-                    self.fr[i] &= 0x7fff_ffff;
-                }
+                // FNEG and FABS address the encoded word in either precision.
+                0x4 => self.fr[n] ^= 0x8000_0000,
+                0x5 => self.fr[n] &= 0x7fff_ffff,
                 0x6 => {
                     // FSQRT
                     if pr {
